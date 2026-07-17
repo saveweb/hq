@@ -74,7 +74,6 @@ type Handler struct {
 	oauth             OAuth
 	logger            *slog.Logger
 	secret            []byte
-	publicOrigin      string
 	secureCookies     bool
 	adminOrganization string
 	adminTeam         string
@@ -108,7 +107,7 @@ func New(store Store, oauth OAuth, config Config, logger *slog.Logger) (*Handler
 	}
 	return &Handler{
 		store: store, oauth: oauth, logger: logger, secret: append([]byte(nil), config.Secret...),
-		publicOrigin: parsed.Scheme + "://" + parsed.Host, secureCookies: config.SecureCookies,
+		secureCookies:     config.SecureCookies,
 		adminOrganization: config.AdminOrganization, adminTeam: config.AdminTeam,
 		sessionTTL: config.SessionTTL, clock: config.Clock,
 	}, nil
@@ -459,10 +458,6 @@ func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) 
 		_ = h.pageError(ctx, http.StatusRequestEntityTooLarge, "Form is too large")
 		return tracker.User{}, "", false
 	}
-	if !h.requestOriginAllowed(ctx.Request()) {
-		_ = h.pageError(ctx, http.StatusForbidden, "Request origin is invalid")
-		return tracker.User{}, "", false
-	}
 	user, sessionToken, err := h.currentUser(ctx)
 	if err != nil {
 		_ = ctx.Redirect(http.StatusSeeOther, "/")
@@ -475,18 +470,6 @@ func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) 
 		return tracker.User{}, "", false
 	}
 	return user, sessionToken, true
-}
-
-func (h *Handler) requestOriginAllowed(request *http.Request) bool {
-	if origin := request.Header.Get("Origin"); origin != "" {
-		return origin == h.publicOrigin
-	}
-	referer := request.Referer()
-	if referer == "" {
-		return true
-	}
-	parsed, err := url.Parse(referer)
-	return err == nil && parsed.User == nil && parsed.Scheme+"://"+parsed.Host == h.publicOrigin
 }
 
 func (h *Handler) authorizeAdminPost(ctx *echo.Context) (tracker.User, bool) {

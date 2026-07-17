@@ -230,9 +230,12 @@ func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 		t.Fatalf("CSRF token missing from %q", portal.Body.String())
 	}
 	form := url.Values{"csrf": {csrfMatch[1]}}.Encode()
-	wrongOrigin := perform(server, http.MethodPost, "/portal/machine-token/reset", form, sessionCookie, "https://evil.test")
-	if wrongOrigin.Code != http.StatusForbidden || store.machineToken != "" {
-		t.Fatalf("wrong-origin reset = %d token=%q", wrongOrigin.Code, store.machineToken)
+	invalidCSRF := perform(
+		server, http.MethodPost, "/portal/machine-token/reset",
+		url.Values{"csrf": {"invalid"}}.Encode(), sessionCookie, "https://evil.test",
+	)
+	if invalidCSRF.Code != http.StatusForbidden || store.machineToken != "" {
+		t.Fatalf("invalid-CSRF reset = %d token=%q", invalidCSRF.Code, store.machineToken)
 	}
 	reset := perform(server, http.MethodPost, "/portal/machine-token/reset", form, sessionCookie, "http://tracker.test")
 	if reset.Code != http.StatusSeeOther || store.machineToken == "" {
@@ -352,37 +355,6 @@ func TestGitHubOAuthNonmemberAndLookupFailure(t *testing.T) {
 			}
 			if test.lookupErr != nil && len(store.sessions) != 0 {
 				t.Fatalf("lookup failure created sessions: %+v", store.sessions)
-			}
-		})
-	}
-}
-
-func TestPostRequestOriginPolicy(t *testing.T) {
-	handler := &Handler{publicOrigin: "https://tracker.test"}
-	for _, test := range []struct {
-		name    string
-		origin  string
-		referer string
-		allowed bool
-	}{
-		{name: "same origin", origin: "https://tracker.test", allowed: true},
-		{name: "cross origin", origin: "https://evil.test", allowed: false},
-		{name: "origin takes precedence", origin: "https://evil.test", referer: "https://tracker.test/portal", allowed: false},
-		{name: "same origin referer", referer: "https://tracker.test/portal", allowed: true},
-		{name: "cross origin referer", referer: "https://evil.test/", allowed: false},
-		{name: "userinfo referer", referer: "https://evil.test@tracker.test/portal", allowed: false},
-		{name: "source headers omitted", allowed: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "https://tracker.test/logout", nil)
-			if test.origin != "" {
-				request.Header.Set("Origin", test.origin)
-			}
-			if test.referer != "" {
-				request.Header.Set("Referer", test.referer)
-			}
-			if got := handler.requestOriginAllowed(request); got != test.allowed {
-				t.Fatalf("allowed = %v, want %v", got, test.allowed)
 			}
 		})
 	}
