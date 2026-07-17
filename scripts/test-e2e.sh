@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+run_dir=$(mktemp -d)
+container="saveweb-hq-e2e-$$"
+tracker_pid=""
+shard_pid=""
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [ -n "${shard_pid}" ]; then
+    kill -TERM "${shard_pid}" >/dev/null 2>&1 || true
+    wait "${shard_pid}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${tracker_pid}" ]; then
+    kill -TERM "${tracker_pid}" >/dev/null 2>&1 || true
+    wait "${tracker_pid}" >/dev/null 2>&1 || true
+  fi
+  docker rm -f "${container}" >/dev/null 2>&1 || true
+  if [ "${status}" -ne 0 ]; then
+    for log in tracker shard takeover; do
+      if [ -s "${run_dir}/${log}.log" ]; then
+        printf '\n=== %s log ===\n' "${log}" >&2
+        tail -n 200 "${run_dir}/${log}.log" >&2
+      fi
+    done
+  fi
+  rm -rf "${run_dir}"
+  exit "${status}"
+}
+trap cleanup EXIT
+
+wait_url() {
+  url=$1
+  for _ in $(seq 1 200); do
+    if curl --insecure --fail --silent --show-error "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_file() {
+  path=$1
+  for _ in $(seq 1 200); do
+    if [ -s "${path}" ]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+choose_port() {
+  while true; do
+    candidate=$((20000 + RANDOM % 20000))
+    if ! (exec 3<>"/dev/tcp/127.0.0.1/${candidate}") 2>/dev/null; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+  done
+}
+
+stop_shard() {
+  if [ -n "${shard_pid}" ]; then
+    kill -TERM "${shard_pid}"
+    wait "${shard_pid}"
+    shard_pid=""
+  fi
+}
+
+cd "${root}"
+for command in docker curl go uv; do
+  command -v "${command}" >/dev/null
+done
+
+printf 'Building E2E binaries...\n'
+go build -o "${run_dir}/tracker" ./cmd/tracker
+go build -o "${run_dir}/shard" ./cmd/shard
+go build -o "${run_dir}/queue-tool" ./e2e/cmd/queue-tool
+go build -o "${run_dir}/go-worker" ./e2e/cmd/go-worker
+
+docker run --rm -d --name "${container}" \
+  -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=saveweb_hq_e2e \
+  -p 127.0.0.1::5432 \
+  postgres:17-alpine >/dev/null
+
+ready=0
+for _ in $(seq 1 300); do
+  ready_count=$(docker logs "${container}" 2>&1 | grep -c 'database system is ready to accept connections' || true)
+  if [ "${ready_count}" -ge 2 ]; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "${ready}" -ne 1 ]; then
+  docker logs "${container}" >&2
+  exit 1
+fi
+
+pg_port=$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')
+database_url="postgres://postgres:test@127.0.0.1:${pg_port}/saveweb_hq_e2e?sslmode=disable"
+tracker_port=$(choose_port)
+shard_port=$(choose_port)
+tracker_url="http://127.0.0.1:${tracker_port}"
+shard_url="https://127.0.0.1:${shard_port}"
+
+umask 077
+printf '%s\n' 'e2e-owner-token-0123456789abcdef0123456789abcdef' >"${run_dir}/owner.token"
+printf '%s\n' 'e2e-worker-token-0123456789abcdef0123456789abcdef' >"${run_dir}/worker.token"
+"${run_dir}/tracker" keygen --out "${run_dir}/signing.key" --key-id e2e-key
+"${run_dir}/tracker" migrate --database-url "${database_url}"
+"${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id owner-e2e \
+  --roles shard_owner --machine-token-file "${run_dir}/owner.token"
+"${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id worker-e2e \
+  --roles worker --machine-token-file "${run_dir}/worker.token"
+"${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-e2e
+shard_id=$("${run_dir}/shard" init --out "${run_dir}/shard.identity")
+tls_pin=$("${run_dir}/shard" tls-init --key-out "${run_dir}/shard.key" \
+  --cert-out "${run_dir}/shard.pem" --server-name 127.0.0.1)
+
+"${run_dir}/tracker" serve --listen "127.0.0.1:${tracker_port}" \
+  --database-url "${database_url}" --public-url "${tracker_url}" \
+  --signing-key-file "${run_dir}/signing.key" --allow-insecure-public-url \
+  --allow-private-shard-endpoints --agent-heartbeat-seconds 1 --owner-lease-seconds 30 \
+  --session-heartbeat-seconds 1 --session-lease-seconds 30 >"${run_dir}/tracker.log" 2>&1 &
+tracker_pid=$!
+wait_url "${tracker_url}/healthz"
+
+start_shard() {
+  "${run_dir}/shard" serve --listen "127.0.0.1:${shard_port}" \
+    --tracker-url "${tracker_url}" --tracker-issuer "${tracker_url}" --allow-http-tracker \
+    --machine-token-file "${run_dir}/owner.token" --identity-file "${run_dir}/shard.identity" \
+    --data-dir "${run_dir}/shard-data" --endpoint "${shard_url}" --endpoint-version 1 \
+    --tls-spki-sha256 "${tls_pin}" --tls-cert-file "${run_dir}/shard.pem" \
+    --tls-key-file "${run_dir}/shard.key" >"${run_dir}/shard.log" 2>&1 &
+  shard_pid=$!
+  wait_url "${shard_url}/healthz"
+  sleep 0.5
+  kill -0 "${shard_pid}"
+}
+
+printf 'Registering HTTPS shard endpoint...\n'
+start_shard
+stop_shard
+"${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-e2e \
+  --shard-id shard-e2e --owner-agent-id "${shard_id}" --generation 1
+"${run_dir}/queue-tool" --mode seed --data-dir "${run_dir}/shard-data" \
+  --project-id project-e2e --shard-id shard-e2e --generation 1
+start_shard
+
+printf 'Running Go and Python workers through tracker routing...\n'
+"${run_dir}/go-worker" --phase initial --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token"
+uv run --project sdk/python python e2e/python_worker.py --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token"
+"${run_dir}/go-worker" --phase verify --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token"
+
+printf 'Fencing an in-flight generation and recovering its job...\n'
+"${run_dir}/go-worker" --phase takeover --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token" --ready-file "${run_dir}/takeover.ready" \
+  --continue-file "${run_dir}/takeover.continue" >"${run_dir}/takeover.log" 2>&1 &
+takeover_pid=$!
+wait_file "${run_dir}/takeover.ready"
+"${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-e2e \
+  --shard-id shard-e2e --owner-agent-id "${shard_id}" --generation 2
+sleep 3
+printf 'continue\n' >"${run_dir}/takeover.continue"
+wait "${takeover_pid}"
+"${run_dir}/go-worker" --phase recover --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token"
+
+stop_shard
+"${run_dir}/queue-tool" --mode check --data-dir "${run_dir}/shard-data" \
+  --project-id project-e2e --shard-id shard-e2e --generation 2
+printf 'SavewebHQ cross-process E2E passed.\n'

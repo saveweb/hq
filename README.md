@@ -42,6 +42,13 @@ Docker container:
 make test-postgres
 ```
 
+The cross-process E2E test also needs Docker. It starts PostgreSQL, tracker,
+and a pinned-HTTPS shard, then runs both worker SDKs and a generation takeover:
+
+```bash
+make test-e2e
+```
+
 Python commands always run through `uv`:
 
 ```bash
