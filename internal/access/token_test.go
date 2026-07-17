@@ -51,6 +51,10 @@ func TestSignAndVerifyScopedToken(t *testing.T) {
 	if claims != signedClaims || claims.Subject != testScope().WorkerAgentID {
 		t.Fatalf("verified claims = %+v, signed = %+v", claims, signedClaims)
 	}
+	unscopedClaims, err := verifier.VerifyToken(token)
+	if err != nil || unscopedClaims != signedClaims {
+		t.Fatalf("unscoped verification = %+v, %v", unscopedClaims, err)
+	}
 
 	wrongScope := testScope()
 	wrongScope.Generation++

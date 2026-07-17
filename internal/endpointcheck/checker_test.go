@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func testChecker() *Checker {
 func challengeHandler(t *testing.T, cfCacheStatus string, mutate bool) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != challengePath || request.Method != http.MethodPost {
+		if !strings.HasSuffix(request.URL.Path, challengePath) || request.Method != http.MethodPost {
 			http.NotFound(response, request)
 			return
 		}
@@ -76,9 +77,11 @@ func TestHTTPSChallengeRejectsWrongPin(t *testing.T) {
 func TestHTTPIsExplicitlyInsecure(t *testing.T) {
 	server := httptest.NewServer(challengeHandler(t, "BYPASS", false))
 	defer server.Close()
-	status, err := testChecker().Check(context.Background(), "shard-1", server.URL, nil)
-	if err != nil || status != tracker.EndpointInsecure {
-		t.Fatalf("check = %q, %v", status, err)
+	for _, endpoint := range []string{server.URL, server.URL + "/proxy-prefix"} {
+		status, err := testChecker().Check(context.Background(), "shard-1", endpoint, nil)
+		if err != nil || status != tracker.EndpointInsecure {
+			t.Fatalf("check %s = %q, %v", endpoint, status, err)
+		}
 	}
 }
 

@@ -49,11 +49,20 @@ type Checker struct {
 	options options
 }
 
+type Options struct {
+	AllowPrivate bool
+	Timeout      time.Duration
+}
+
 func New() *Checker {
+	return NewWithOptions(Options{})
+}
+
+func NewWithOptions(value Options) *Checker {
 	return newWithOptions(options{
 		resolver: net.DefaultResolver,
 		dialer:   &net.Dialer{Timeout: defaultTimeout, KeepAlive: 30 * time.Second},
-		timeout:  defaultTimeout,
+		timeout:  value.Timeout, allowPrivate: value.AllowPrivate,
 	})
 }
 
@@ -226,7 +235,12 @@ func pinnedTLSConfig(serverName string, expected []byte) *tls.Config {
 			if len(state.PeerCertificates) == 0 {
 				return errPinMismatch
 			}
-			digest := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			certificate := state.PeerCertificates[0]
+			now := time.Now()
+			if now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
+				return x509.CertificateInvalidError{Cert: certificate, Reason: x509.Expired}
+			}
+			digest := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
 			if !equalBytes(digest[:], expected) {
 				return errPinMismatch
 			}

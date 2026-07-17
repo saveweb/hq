@@ -43,6 +43,10 @@ func run(args []string, logger *slog.Logger) error {
 		return runMigrate(args[1:])
 	case "bootstrap-user":
 		return runBootstrapUser(args[1:])
+	case "put-project":
+		return runPutProject(args[1:])
+	case "put-shard":
+		return runPutShard(args[1:])
 	case "serve":
 		return runServe(args[1:], logger)
 	default:
@@ -51,7 +55,7 @@ func run(args []string, logger *slog.Logger) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: tracker {keygen|migrate|bootstrap-user|serve} [flags]")
+	return fmt.Errorf("usage: tracker {keygen|migrate|bootstrap-user|put-project|put-shard|serve} [flags]")
 }
 
 func runKeygen(args []string) error {
@@ -119,6 +123,55 @@ func runBootstrapUser(args []string) error {
 	}, token, time.Now().Unix())
 }
 
+func runPutProject(args []string) error {
+	flags := flag.NewFlagSet("put-project", flag.ContinueOnError)
+	databaseURL := flags.String("database-url", os.Getenv("HQ_DATABASE_URL"), "PostgreSQL connection URL")
+	projectID := flags.String("project-id", "", "explicit project identifier")
+	status := flags.String("status", tracker.ProjectStatusActive, "active, draining, or archived")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *databaseURL == "" || *projectID == "" {
+		return fmt.Errorf("put-project: database URL and --project-id are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := postgres.Open(ctx, *databaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.PutProject(ctx, tracker.Project{ID: *projectID, Status: *status}, time.Now().Unix())
+}
+
+func runPutShard(args []string) error {
+	flags := flag.NewFlagSet("put-shard", flag.ContinueOnError)
+	databaseURL := flags.String("database-url", os.Getenv("HQ_DATABASE_URL"), "PostgreSQL connection URL")
+	projectID := flags.String("project-id", "", "explicit project identifier")
+	shardID := flags.String("shard-id", "", "explicit shard identifier")
+	ownerAgentID := flags.String("owner-agent-id", "", "registered shard agent identifier")
+	status := flags.String("status", tracker.ShardStatusActive, "shard lifecycle status")
+	generation := flags.Int64("generation", 1, "positive owner generation")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *databaseURL == "" || *projectID == "" || *shardID == "" ||
+		*ownerAgentID == "" || *generation < 1 {
+		return fmt.Errorf("put-shard: database URL, project, shard, owner agent, and positive generation are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := postgres.Open(ctx, *databaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.PutShard(ctx, tracker.Shard{
+		ProjectID: *projectID, ID: *shardID, Status: *status,
+		OwnerAgentID: *ownerAgentID, Generation: *generation,
+	}, time.Now().Unix())
+}
+
 func runServe(args []string, logger *slog.Logger) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := flags.String("listen", envOr("HQ_LISTEN", ":8080"), "HTTP listen address")
@@ -126,6 +179,12 @@ func runServe(args []string, logger *slog.Logger) error {
 	publicURL := flags.String("public-url", os.Getenv("HQ_PUBLIC_URL"), "public tracker URL used as token issuer")
 	keyFile := flags.String("signing-key-file", os.Getenv("HQ_SIGNING_KEY_FILE"), "0600 Ed25519 key file")
 	allowInsecurePublicURL := flags.Bool("allow-insecure-public-url", false, "allow an HTTP issuer for local testing")
+	allowPrivateShardEndpoints := flags.Bool("allow-private-shard-endpoints", false, "allow private shard endpoints for local E2E testing")
+	agentHeartbeatSeconds := flags.Int64("agent-heartbeat-seconds", 30, "agent heartbeat interval")
+	ownerLeaseSeconds := flags.Int64("owner-lease-seconds", 120, "shard owner lease")
+	sessionHeartbeatSeconds := flags.Int64("session-heartbeat-seconds", 30, "worker session heartbeat interval")
+	sessionLeaseSeconds := flags.Int64("session-lease-seconds", 120, "worker session lease")
+	accessTokenTTLSeconds := flags.Int64("access-token-ttl-seconds", 600, "shard access token TTL")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -153,9 +212,18 @@ func runServe(args []string, logger *slog.Logger) error {
 		return err
 	}
 	config := tracker.DefaultConfig()
+	config.AgentHeartbeatSeconds = *agentHeartbeatSeconds
+	config.OwnerLeaseSeconds = *ownerLeaseSeconds
+	config.SessionHeartbeatSeconds = *sessionHeartbeatSeconds
+	config.SessionLeaseSeconds = *sessionLeaseSeconds
+	config.AccessTokenTTLSeconds = *accessTokenTTLSeconds
 	config.SigningKeyNotBefore = key.CreatedAt
 	config.SigningKeyNotAfter = key.CreatedAt + keyValiditySeconds
-	service, err := tracker.NewService(store, endpointcheck.New(), signer, func() int64 { return time.Now().Unix() }, config)
+	checker := endpointcheck.NewWithOptions(endpointcheck.Options{AllowPrivate: *allowPrivateShardEndpoints})
+	if *allowPrivateShardEndpoints {
+		logger.Warn("private shard endpoints are enabled; do not use this setting in production")
+	}
+	service, err := tracker.NewService(store, checker, signer, func() int64 { return time.Now().Unix() }, config)
 	if err != nil {
 		return err
 	}

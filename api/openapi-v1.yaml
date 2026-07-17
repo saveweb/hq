@@ -791,6 +791,7 @@ components:
         - identity_conflict
         - rate_limited
         - backpressure
+        - cache_misconfigured
         - shard_unavailable
         - owner_lease_expired
         - lease_expired

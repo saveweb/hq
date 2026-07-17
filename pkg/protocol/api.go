@@ -33,6 +33,7 @@ const (
 	ErrorIdentityConflict        = "identity_conflict"
 	ErrorRateLimited             = "rate_limited"
 	ErrorBackpressure            = "backpressure"
+	ErrorCacheMisconfigured      = "cache_misconfigured"
 	ErrorShardUnavailable        = "shard_unavailable"
 	ErrorOwnerLeaseExpired       = "owner_lease_expired"
 	ErrorLeaseExpired            = "lease_expired"

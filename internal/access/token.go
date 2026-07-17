@@ -153,6 +153,20 @@ func NewVerifier(issuer string, keys map[string]ed25519.PublicKey, now func() in
 }
 
 func (v *Verifier) Verify(token string, scope Scope) (Claims, error) {
+	claims, err := v.VerifyToken(token)
+	if err != nil {
+		return Claims{}, err
+	}
+	if err := validateScope(scope); err != nil || !matchesScope(claims, scope) {
+		return Claims{}, ErrScope
+	}
+	return claims, nil
+}
+
+// VerifyToken authenticates the token and its temporal claims without applying
+// a request scope. A shard uses this before reading the bounded JSON body, then
+// compares the body route and session to the returned claims.
+func (v *Verifier) VerifyToken(token string) (Claims, error) {
 	if len(token) == 0 || len(token) > MaxTokenBytes || strings.Count(token, ".") != 2 {
 		return Claims{}, ErrMalformed
 	}
@@ -196,9 +210,6 @@ func (v *Verifier) Verify(token string, scope Scope) (Claims, error) {
 	}
 	if now >= claims.SessionExpiresAt {
 		return Claims{}, ErrSessionExpired
-	}
-	if err := validateScope(scope); err != nil || !matchesScope(claims, scope) {
-		return Claims{}, ErrScope
 	}
 	return claims, nil
 }

@@ -1,6 +1,6 @@
 # SavewebHQ Queue API v1
 
-> 状态：实现前冻结稿
+> 状态：v1 冻结并由当前实现覆盖
 >
 > 本文只定义 tracker、shard queue RPC 和 worker SDK 共同依赖的最小协议。管理页面、Project 管理、checkpoint 上传和 artifact 上传使用独立 API。
 

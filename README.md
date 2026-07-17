@@ -3,7 +3,8 @@
 SavewebHQ is a small, explicit distributed queue for volunteer-operated web
 archive workers. A trusted tracker owns the control plane, each active shard
 owns one SQLite queue, and workers connect directly to the shard selected by
-the tracker.
+the tracker. Go HTTP adapters use Echo v5; domain and storage packages do not
+depend on the web framework.
 
 The first version intentionally supports only explicit, pre-split projects.
 Its design priorities are layering, modularity, low operational weight, and
@@ -70,3 +71,36 @@ web administration flow is configured. It reads the reusable machine token
 from a private `0600` file and never writes the token to logs. The trusted
 tracker database retains the current value so the contributor can reuse it on
 multiple machines, as defined in the v1 design.
+
+Projects and pre-split shards are also explicit commands until the admin page
+is available:
+
+```bash
+go run ./cmd/tracker put-project --database-url "$HQ_DATABASE_URL" --project-id project-1
+go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
+  --project-id project-1 --shard-id shard-1 --owner-agent-id sh_xxx
+```
+
+## Shard commands
+
+Initialization creates a stable agent ID and a random local-admin token in one
+private identity file:
+
+```bash
+go run ./cmd/shard init --out ./shard-identity.json
+```
+
+For a daemon exposed directly with pinned HTTPS, create a stable P-256 key and
+self-signed certificate. `tls-init` prints the SPKI SHA-256 value to register:
+
+```bash
+go run ./cmd/shard tls-init \
+  --key-out ./shard-tls.key --cert-out ./shard-tls.crt \
+  --server-name shard.example
+```
+
+Then run `serve` with both TLS files and the printed pin. An HTTPS endpoint
+terminated by Caddy or cloudflared instead uses `--tls-terminated-by-proxy` and
+normally omits the pin. Plain HTTP requires
+`--allow-insecure-public-endpoint`. Tracker HTTP likewise requires the separate
+`--allow-http-tracker` local-test opt-in.

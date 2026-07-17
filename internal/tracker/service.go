@@ -94,8 +94,7 @@ func (s *Service) UpsertAgent(ctx context.Context, machineToken, agentID string,
 		}
 		parsed, err := url.Parse(*request.Endpoint)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
-			parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" ||
-			parsed.Fragment != "" || parsed.ForceQuery {
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
 			return protocol.AgentResponse{}, invalidRequest("invalid shard endpoint URI")
 		}
 		if parsed.Scheme == "http" && request.TLSSPKISHA256 != nil {
