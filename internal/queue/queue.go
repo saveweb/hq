@@ -97,11 +97,11 @@ type RequeueResult struct {
 }
 
 type Stats struct {
-	Todo           int64
-	WIP            int64
-	Done           int64
-	Failed         int64
-	ResetExhausted int64
+	Todo           int64 `json:"todo"`
+	WIP            int64 `json:"wip"`
+	Done           int64 `json:"done"`
+	Failed         int64 `json:"failed"`
+	ResetExhausted int64 `json:"reset_exhausted"`
 }
 
 type Store interface {

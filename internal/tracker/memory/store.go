@@ -326,6 +326,9 @@ func cloneRoles(input map[string]bool) map[string]bool {
 
 func cloneUser(user tracker.User) tracker.User {
 	user.Roles = cloneRoles(user.Roles)
+	user.GitHubUserID = cloneInt64(user.GitHubUserID)
+	user.GitHubAvatarURL = cloneString(user.GitHubAvatarURL)
+	user.LastLoginAt = cloneInt64(user.LastLoginAt)
 	return user
 }
 

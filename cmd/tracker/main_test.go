@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"os"
@@ -25,13 +26,35 @@ func TestKeygenCommandCreatesLoadableExclusiveKey(t *testing.T) {
 	}
 }
 
+func TestWebKeygenCreatesPrivateExclusiveSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "web.secret")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := run([]string{"web-keygen", "--out", path}, logger); err != nil {
+		t.Fatal(err)
+	}
+	value, err := readSecretFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(decoded) != 32 {
+		t.Fatalf("web secret length = %d, %v", len(decoded), err)
+	}
+	if err := run([]string{"web-keygen", "--out", path}, logger); err == nil {
+		t.Fatal("web-keygen overwrote an existing secret")
+	}
+}
+
 func TestPublicURLAndRoleValidation(t *testing.T) {
-	for _, value := range []string{"https://tracker.example", "https://tracker.example/base"} {
+	for _, value := range []string{"https://tracker.example", "https://tracker.example/"} {
 		if err := validatePublicURL(value, false); err != nil {
 			t.Fatalf("valid URL %q: %v", value, err)
 		}
 	}
-	for _, value := range []string{"http://tracker.example", "https://user@tracker.example", "https://tracker.example?q=1"} {
+	for _, value := range []string{
+		"http://tracker.example", "https://user@tracker.example",
+		"https://tracker.example?q=1", "https://tracker.example/base",
+	} {
 		if err := validatePublicURL(value, false); err == nil {
 			t.Fatalf("invalid URL accepted: %q", value)
 		}

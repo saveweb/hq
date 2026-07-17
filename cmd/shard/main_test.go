@@ -17,6 +17,12 @@ func TestServeConfigAndEndpointAreExplicit(t *testing.T) {
 	if config.trackerIssuer != config.trackerURL || config.endpointVersion != 1 {
 		t.Fatalf("config = %+v", config)
 	}
+	if config.adminListen != "127.0.0.1:9081" || config.localAdminTokenFile == "" {
+		t.Fatalf("local admin config = %+v", config)
+	}
+	if err := validateAdminListen("0.0.0.0:9081"); err == nil {
+		t.Fatal("non-loopback local admin address accepted")
+	}
 	if _, err := validateEndpoint("http://shard.test", false); err == nil {
 		t.Fatal("HTTP endpoint accepted without opt-in")
 	}

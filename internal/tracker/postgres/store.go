@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,16 +51,28 @@ func (s *Store) Close() { s.pool.Close() }
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	script, err := migrations.ReadFile("migrations/001_init.sql")
+	entries, err := migrations.ReadDir("migrations")
 	if err != nil {
-		return fmt.Errorf("tracker postgres: read migration: %w", err)
+		return fmt.Errorf("tracker postgres: list migrations: %w", err)
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(7532194861021)`); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, string(script))
-		return err
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+				continue
+			}
+			script, err := migrations.ReadFile("migrations/" + entry.Name())
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, string(script)); err != nil {
+				return fmt.Errorf("apply %s: %w", entry.Name(), err)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("tracker postgres: migrate: %w", err)
@@ -107,10 +120,17 @@ func (s *Store) PutUserAndToken(ctx context.Context, user tracker.User, machineT
 	sort.Strings(roles)
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			INSERT INTO tracker_users(id, status, roles, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $4)
-			ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, roles = EXCLUDED.roles, updated_at = EXCLUDED.updated_at
-		`, user.ID, user.Status, roles, now)
+			INSERT INTO tracker_users(
+				id, github_user_id, github_login, github_avatar_url,
+				status, roles, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+			ON CONFLICT (id) DO UPDATE SET
+				github_user_id = COALESCE(EXCLUDED.github_user_id, tracker_users.github_user_id),
+				github_login = COALESCE(NULLIF(EXCLUDED.github_login, ''), tracker_users.github_login),
+				github_avatar_url = COALESCE(EXCLUDED.github_avatar_url, tracker_users.github_avatar_url),
+				status = EXCLUDED.status, roles = EXCLUDED.roles, updated_at = EXCLUDED.updated_at
+		`, user.ID, user.GitHubUserID, user.GitHubLogin, user.GitHubAvatarURL,
+			user.Status, roles, now)
 		if err != nil {
 			return err
 		}

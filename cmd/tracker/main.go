@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,10 +18,12 @@ import (
 
 	"git.saveweb.org/saveweb/hq/internal/access"
 	"git.saveweb.org/saveweb/hq/internal/endpointcheck"
+	"git.saveweb.org/saveweb/hq/internal/githuboauth"
 	"git.saveweb.org/saveweb/hq/internal/signingkey"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
 	"git.saveweb.org/saveweb/hq/internal/trackerhttp"
+	"git.saveweb.org/saveweb/hq/internal/trackerweb"
 )
 
 const keyValiditySeconds = int64(365 * 24 * 60 * 60)
@@ -39,6 +43,8 @@ func run(args []string, logger *slog.Logger) error {
 	switch args[0] {
 	case "keygen":
 		return runKeygen(args[1:])
+	case "web-keygen":
+		return runWebKeygen(args[1:])
 	case "migrate":
 		return runMigrate(args[1:])
 	case "bootstrap-user":
@@ -55,7 +61,7 @@ func run(args []string, logger *slog.Logger) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: tracker {keygen|migrate|bootstrap-user|put-project|put-shard|serve} [flags]")
+	return fmt.Errorf("usage: tracker {keygen|web-keygen|migrate|bootstrap-user|put-project|put-shard|serve} [flags]")
 }
 
 func runKeygen(args []string) error {
@@ -70,6 +76,43 @@ func runKeygen(args []string) error {
 	}
 	_, err := signingkey.Create(*out, *keyID, time.Now().Unix())
 	return err
+}
+
+func runWebKeygen(args []string) error {
+	flags := flag.NewFlagSet("web-keygen", flag.ContinueOnError)
+	out := flags.String("out", "", "new 0600 web session secret file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *out == "" {
+		return fmt.Errorf("web-keygen: --out is required")
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return fmt.Errorf("web-keygen: random: %w", err)
+	}
+	file, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("web-keygen: create: %w", err)
+	}
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(*out)
+		}
+	}()
+	if _, err := fmt.Fprintln(file, base64.RawURLEncoding.EncodeToString(random[:])); err != nil {
+		return fmt.Errorf("web-keygen: write: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("web-keygen: sync: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("web-keygen: close: %w", err)
+	}
+	remove = false
+	return nil
 }
 
 func runMigrate(args []string) error {
@@ -97,6 +140,7 @@ func runBootstrapUser(args []string) error {
 	userID := flags.String("user-id", "", "stable user identifier")
 	rolesText := flags.String("roles", "", "comma-separated admin,shard_owner,worker roles")
 	tokenFile := flags.String("machine-token-file", "", "0600 file containing the reusable machine token")
+	githubUserID := flags.Int64("github-user-id", 0, "optional stable numeric GitHub user ID")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -118,9 +162,16 @@ func runBootstrapUser(args []string) error {
 		return err
 	}
 	defer store.Close()
-	return store.PutUserAndToken(ctx, tracker.User{
+	user := tracker.User{
 		ID: *userID, Status: tracker.UserStatusActive, Roles: roles,
-	}, token, time.Now().Unix())
+	}
+	if *githubUserID < 0 {
+		return fmt.Errorf("bootstrap-user: GitHub user ID must be positive")
+	}
+	if *githubUserID > 0 {
+		user.GitHubUserID = githubUserID
+	}
+	return store.PutUserAndToken(ctx, user, token, time.Now().Unix())
 }
 
 func runPutProject(args []string) error {
@@ -185,6 +236,10 @@ func runServe(args []string, logger *slog.Logger) error {
 	sessionHeartbeatSeconds := flags.Int64("session-heartbeat-seconds", 30, "worker session heartbeat interval")
 	sessionLeaseSeconds := flags.Int64("session-lease-seconds", 120, "worker session lease")
 	accessTokenTTLSeconds := flags.Int64("access-token-ttl-seconds", 600, "shard access token TTL")
+	githubClientID := flags.String("github-client-id", os.Getenv("HQ_GITHUB_CLIENT_ID"), "GitHub OAuth app client ID")
+	githubClientSecretFile := flags.String("github-client-secret-file", os.Getenv("HQ_GITHUB_CLIENT_SECRET_FILE"), "0600 GitHub OAuth client secret file")
+	webSessionSecretFile := flags.String("web-session-secret-file", os.Getenv("HQ_WEB_SESSION_SECRET_FILE"), "0600 tracker web session secret file")
+	oauthAutoGrantWorker := flags.Bool("oauth-auto-grant-worker", false, "activate new GitHub users with worker role")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -228,6 +283,21 @@ func runServe(args []string, logger *slog.Logger) error {
 		return err
 	}
 	handler := trackerhttp.New(service, logger)
+	webSecret, oauthClient, err := configureWeb(
+		*publicURL, *githubClientID, *githubClientSecretFile, *webSessionSecretFile,
+	)
+	if err != nil {
+		return err
+	}
+	web, err := trackerweb.New(store, oauthClient, trackerweb.Config{
+		PublicURL: *publicURL, Secret: webSecret,
+		SecureCookies:   strings.HasPrefix(*publicURL, "https://"),
+		AutoGrantWorker: *oauthAutoGrantWorker,
+	}, logger)
+	if err != nil {
+		return err
+	}
+	web.Register(handler)
 	server := &http.Server{
 		Addr: *listen, Handler: handler,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
@@ -260,10 +330,47 @@ func runServe(args []string, logger *slog.Logger) error {
 func validatePublicURL(value string, allowInsecure bool) error {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Path != "" && parsed.Path != "/") ||
 		(parsed.Scheme != "https" && !(allowInsecure && parsed.Scheme == "http")) {
-		return fmt.Errorf("serve: public URL must be an HTTPS URL without credentials, query, or fragment")
+		return fmt.Errorf("serve: public URL must be a root HTTPS URL without credentials, query, or fragment")
 	}
 	return nil
+}
+
+func configureWeb(
+	publicURL, clientID, clientSecretFile, webSecretFile string,
+) ([]byte, *githuboauth.Client, error) {
+	configured := clientID != "" || clientSecretFile != "" || webSecretFile != ""
+	if !configured {
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			return nil, nil, err
+		}
+		return secret, nil, nil
+	}
+	if clientID == "" || clientSecretFile == "" || webSecretFile == "" {
+		return nil, nil, fmt.Errorf("serve: GitHub client ID, client secret file, and web session secret file must be configured together")
+	}
+	clientSecret, err := readSecretFile(clientSecretFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	encodedSecret, err := readSecretFile(webSecretFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	webSecret, err := base64.RawURLEncoding.DecodeString(encodedSecret)
+	if err != nil || len(webSecret) < 32 {
+		return nil, nil, fmt.Errorf("serve: invalid web session secret")
+	}
+	oauthClient, err := githuboauth.New(githuboauth.Config{
+		ClientID: clientID, ClientSecret: clientSecret,
+		RedirectURL: strings.TrimSuffix(publicURL, "/") + "/auth/github/callback",
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return webSecret, oauthClient, nil
 }
 
 func parseRoles(value string) (map[string]bool, error) {

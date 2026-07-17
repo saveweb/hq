@@ -140,6 +140,30 @@ func TestManagerEnforcesOwnerLeaseAndDrainStatus(t *testing.T) {
 	}
 }
 
+func TestManagerLocalClaimPauseKeepsMutationsAvailable(t *testing.T) {
+	f := newManagerFixture(t)
+	if err := f.manager.ApplyHeartbeat(context.Background(), f.heartbeat(1, managerNow+120, trackerStatusActive)); err != nil {
+		t.Fatal(err)
+	}
+	f.manager.SetClaimsPaused(true)
+	authorization, err := f.manager.Authorize(f.token(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !queueCode(authorization.AllowsClaim(), protocol.ErrorShardNotActive) || authorization.AllowsMutation() != nil {
+		t.Fatal("local pause did not reject claims while retaining mutation access")
+	}
+	status, err := f.manager.RuntimeStatus(context.Background())
+	if err != nil || !status.ClaimsPaused || len(status.Shards) != 1 {
+		t.Fatalf("runtime status = %+v, %v", status, err)
+	}
+	f.manager.SetClaimsPaused(false)
+	authorization, err = f.manager.Authorize(f.token(t, 1))
+	if err != nil || authorization.AllowsClaim() != nil {
+		t.Fatalf("resumed authorization = %+v, %v", authorization, err)
+	}
+}
+
 func TestManagerRejectsWrongScopeInvalidTokenAndUnimplementedSource(t *testing.T) {
 	f := newManagerFixture(t)
 	heartbeat := f.heartbeat(1, managerNow+120, trackerStatusActive)

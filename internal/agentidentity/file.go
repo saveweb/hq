@@ -12,20 +12,19 @@ import (
 	"path/filepath"
 )
 
-const fileVersion = 1
+const fileVersion = 2
 
 type Identity struct {
-	AgentID         string
-	Kind            string
-	LocalAdminToken string
-	CreatedAt       int64
+	AgentID   string
+	Kind      string
+	CreatedAt int64
 }
 
 type document struct {
 	Version         int    `json:"version"`
 	AgentID         string `json:"agent_id"`
 	Kind            string `json:"kind"`
-	LocalAdminToken string `json:"local_admin_token"`
+	LocalAdminToken string `json:"local_admin_token,omitempty"`
 	CreatedAt       int64  `json:"created_at"`
 }
 
@@ -37,17 +36,12 @@ func Create(path, kind string, createdAt int64) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	tokenRandom, err := random(32)
-	if err != nil {
-		return Identity{}, err
-	}
 	prefix := "sh_"
 	if kind == "worker" {
 		prefix = "wk_"
 	}
 	value := Identity{
-		AgentID: prefix + agentRandom, Kind: kind,
-		LocalAdminToken: tokenRandom, CreatedAt: createdAt,
+		AgentID: prefix + agentRandom, Kind: kind, CreatedAt: createdAt,
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return Identity{}, fmt.Errorf("agent identity: create directory: %w", err)
@@ -66,8 +60,7 @@ func Create(path, kind string, createdAt int64) (Identity, error) {
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(document{
-		Version: fileVersion, AgentID: value.AgentID, Kind: kind,
-		LocalAdminToken: value.LocalAdminToken, CreatedAt: createdAt,
+		Version: fileVersion, AgentID: value.AgentID, Kind: kind, CreatedAt: createdAt,
 	}); err != nil {
 		return Identity{}, fmt.Errorf("agent identity: write: %w", err)
 	}
@@ -103,13 +96,14 @@ func Load(path, expectedKind string) (Identity, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return Identity{}, fmt.Errorf("agent identity: expected one JSON object")
 	}
-	if value.Version != fileVersion || value.Kind != expectedKind || value.AgentID == "" ||
-		value.LocalAdminToken == "" || len(value.LocalAdminToken) < 43 || value.CreatedAt < 1 {
+	validVersion := value.Version == fileVersion ||
+		(value.Version == 1 && len(value.LocalAdminToken) >= 43)
+	if !validVersion || (value.Version == fileVersion && value.LocalAdminToken != "") ||
+		value.Kind != expectedKind || value.AgentID == "" || value.CreatedAt < 1 {
 		return Identity{}, fmt.Errorf("agent identity: invalid identity document")
 	}
 	return Identity{
-		AgentID: value.AgentID, Kind: value.Kind,
-		LocalAdminToken: value.LocalAdminToken, CreatedAt: value.CreatedAt,
+		AgentID: value.AgentID, Kind: value.Kind, CreatedAt: value.CreatedAt,
 	}, nil
 }
 

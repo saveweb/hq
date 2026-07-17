@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -48,18 +49,36 @@ type Manager struct {
 	verifier      *access.Verifier
 	owned         map[routeKey]*ownedShard
 	retiredStores []queue.Store
+	claimsPaused  bool
 	closed        bool
 }
 
 type Authorization struct {
-	Claims     access.Claims
-	Store      queue.Store
-	Assignment protocol.OwnerAssignment
+	Claims       access.Claims
+	Store        queue.Store
+	Assignment   protocol.OwnerAssignment
+	ClaimsPaused bool
 }
 
 type MaintenanceResult struct {
 	Requeued       int
 	ResetExhausted int
+}
+
+type RuntimeStatus struct {
+	AgentID      string        `json:"agent_id"`
+	ServerTime   int64         `json:"server_time"`
+	ClaimsPaused bool          `json:"claims_paused"`
+	Shards       []ShardStatus `json:"shards"`
+}
+
+type ShardStatus struct {
+	ProjectID           string      `json:"project_id"`
+	ShardID             string      `json:"shard_id"`
+	Generation          int64       `json:"generation"`
+	Status              string      `json:"status"`
+	OwnerLeaseExpiresAt int64       `json:"owner_lease_expires_at"`
+	Stats               queue.Stats `json:"stats"`
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -204,6 +223,7 @@ func (m *Manager) Authorize(token string) (Authorization, error) {
 	}
 	assignment := owned.assignment
 	store := owned.store
+	claimsPaused := m.claimsPaused
 	m.mu.RUnlock()
 	if assignment.Generation != claims.Generation {
 		return Authorization{}, &queue.Error{
@@ -217,7 +237,9 @@ func (m *Manager) Authorize(token string) (Authorization, error) {
 			Details: map[string]any{"owner_lease_expires_at": assignment.OwnerLeaseExpiresAt},
 		}
 	}
-	return Authorization{Claims: claims, Store: store, Assignment: assignment}, nil
+	return Authorization{
+		Claims: claims, Store: store, Assignment: assignment, ClaimsPaused: claimsPaused,
+	}, nil
 }
 
 func (m *Manager) Maintain(ctx context.Context, maxResets, limitPerShard int) (MaintenanceResult, error) {
@@ -257,10 +279,54 @@ func (a Authorization) CheckRoute(route protocol.SessionRoute) error {
 }
 
 func (a Authorization) AllowsClaim() error {
+	if a.ClaimsPaused {
+		return queueError(protocol.ErrorShardNotActive, "new claims are paused by local administrator", true)
+	}
 	if a.Assignment.Status != trackerStatusActive {
 		return queueError(protocol.ErrorShardNotActive, "shard is not accepting new claims", false)
 	}
 	return nil
+}
+
+func (m *Manager) SetClaimsPaused(value bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claimsPaused = value
+}
+
+func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
+	type captured struct {
+		assignment protocol.OwnerAssignment
+		store      queue.Store
+	}
+	m.mu.RLock()
+	result := RuntimeStatus{
+		AgentID: m.agentID, ServerTime: m.clock() + m.clockOffset,
+		ClaimsPaused: m.claimsPaused, Shards: make([]ShardStatus, 0, len(m.owned)),
+	}
+	values := make([]captured, 0, len(m.owned))
+	for _, owned := range m.owned {
+		values = append(values, captured{assignment: owned.assignment, store: owned.store})
+	}
+	m.mu.RUnlock()
+	for _, value := range values {
+		stats, err := value.store.Stats(ctx)
+		if err != nil {
+			return RuntimeStatus{}, err
+		}
+		result.Shards = append(result.Shards, ShardStatus{
+			ProjectID: value.assignment.ProjectID, ShardID: value.assignment.ShardID,
+			Generation: value.assignment.Generation, Status: value.assignment.Status,
+			OwnerLeaseExpiresAt: value.assignment.OwnerLeaseExpiresAt, Stats: stats,
+		})
+	}
+	sort.Slice(result.Shards, func(i, j int) bool {
+		if result.Shards[i].ProjectID != result.Shards[j].ProjectID {
+			return result.Shards[i].ProjectID < result.Shards[j].ProjectID
+		}
+		return result.Shards[i].ShardID < result.Shards[j].ShardID
+	})
+	return result, nil
 }
 
 func (a Authorization) AllowsMutation() error {

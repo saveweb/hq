@@ -13,12 +13,14 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/agentidentity"
+	"git.saveweb.org/saveweb/hq/internal/localadmin"
 	"git.saveweb.org/saveweb/hq/internal/shard"
 	"git.saveweb.org/saveweb/hq/internal/shardhttp"
 	"git.saveweb.org/saveweb/hq/internal/tlsidentity"
@@ -108,6 +110,9 @@ type serveConfig struct {
 	allowInsecureEndpoint bool
 	maxConcurrent         int
 	maxResets             int
+	adminListen           string
+	localAdminTokenFile   string
+	localAdminToken       string
 }
 
 func runServe(args []string, logger *slog.Logger) error {
@@ -129,6 +134,18 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	if err := validateTLSMode(config, parsedEndpoint); err != nil {
 		return err
+	}
+	if err := validateAdminListen(config.adminListen); err != nil {
+		return err
+	}
+	adminToken, err := localadmin.ResolveToken(config.localAdminToken, config.localAdminTokenFile)
+	if err != nil {
+		return err
+	}
+	if adminToken.FromEnv {
+		logger.Info("local admin token loaded from environment")
+	} else {
+		logger.Info("local admin token rotated", "file", adminToken.FilePath)
 	}
 	basePath := strings.TrimSuffix(parsedEndpoint.Path, "/")
 	manager, err := shard.NewManager(shard.ManagerConfig{
@@ -155,14 +172,38 @@ func runServe(args []string, logger *slog.Logger) error {
 		WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
-	serverResult := make(chan error, 1)
+	adminListener, err := net.Listen("tcp", config.adminListen)
+	if err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("shard: local admin listen: %w", err)
+	}
+	adminOrigin := "http://" + adminListener.Addr().String()
+	adminHandler, err := localadmin.NewServer(manager, adminToken.Token, adminOrigin, nil)
+	if err != nil {
+		_ = listener.Close()
+		_ = adminListener.Close()
+		return err
+	}
+	adminServer := &http.Server{
+		Handler: adminHandler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
+	}
+	type serverExit struct {
+		name string
+		err  error
+	}
+	serverResult := make(chan serverExit, 2)
 	go func() {
 		logger.Info("shard listening", "address", listener.Addr().String(), "endpoint", config.endpoint, "agent_id", identity.AgentID)
 		if config.tlsCertificateFile != "" {
-			serverResult <- server.ServeTLS(listener, config.tlsCertificateFile, config.tlsKeyFile)
+			serverResult <- serverExit{name: "queue", err: server.ServeTLS(listener, config.tlsCertificateFile, config.tlsKeyFile)}
 		} else {
-			serverResult <- server.Serve(listener)
+			serverResult <- serverExit{name: "queue", err: server.Serve(listener)}
 		}
+	}()
+	go func() {
+		logger.Info("local admin listening", "address", adminListener.Addr().String())
+		serverResult <- serverExit{name: "local admin", err: adminServer.Serve(adminListener)}
 	}()
 
 	tracker, err := trackerclient.New(trackerclient.Config{
@@ -171,6 +212,7 @@ func runServe(args []string, logger *slog.Logger) error {
 	})
 	if err != nil {
 		_ = server.Close()
+		_ = adminServer.Close()
 		return err
 	}
 	var pin *string
@@ -186,6 +228,7 @@ func runServe(args []string, logger *slog.Logger) error {
 	cancelRegister()
 	if err != nil {
 		_ = server.Close()
+		_ = adminServer.Close()
 		return fmt.Errorf("shard: register agent: %w", err)
 	}
 	heartbeatContext, cancelHeartbeat := context.WithTimeout(context.Background(), 30*time.Second)
@@ -193,10 +236,12 @@ func runServe(args []string, logger *slog.Logger) error {
 	cancelHeartbeat()
 	if err != nil {
 		_ = server.Close()
+		_ = adminServer.Close()
 		return fmt.Errorf("shard: initial heartbeat: %w", err)
 	}
 	if err := manager.ApplyHeartbeat(context.Background(), heartbeat); err != nil {
 		_ = server.Close()
+		_ = adminServer.Close()
 		return fmt.Errorf("shard: apply initial heartbeat: %w", err)
 	}
 
@@ -215,18 +260,20 @@ func runServe(args []string, logger *slog.Logger) error {
 		maintenanceLoop(loopContext, manager, config.maxResets, logger)
 	}()
 	select {
-	case err := <-serverResult:
+	case exit := <-serverResult:
 		cancelLoops()
+		_ = server.Close()
+		_ = adminServer.Close()
 		loops.Wait()
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
+		if !errors.Is(exit.err, http.ErrServerClosed) {
+			return fmt.Errorf("shard: %s server: %w", exit.name, exit.err)
 		}
 		return nil
 	case <-ctx.Done():
 		cancelLoops()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		shutdownError := server.Shutdown(shutdownContext)
+		shutdownError := errors.Join(server.Shutdown(shutdownContext), adminServer.Shutdown(shutdownContext))
 		loops.Wait()
 		if shutdownError != nil {
 			return fmt.Errorf("shard: graceful shutdown: %w", shutdownError)
@@ -255,6 +302,9 @@ func parseServeConfig(args []string) (serveConfig, error) {
 	flags.BoolVar(&config.allowInsecureEndpoint, "allow-insecure-public-endpoint", false, "allow a public HTTP endpoint")
 	flags.IntVar(&config.maxConcurrent, "max-concurrent", 128, "maximum concurrent Queue API requests")
 	flags.IntVar(&config.maxResets, "max-resets", 3, "maximum retry/reset count")
+	flags.StringVar(&config.adminListen, "admin-listen", "127.0.0.1:9081", "localhost-only admin listen address")
+	flags.StringVar(&config.localAdminTokenFile, "local-admin-token-file", "", "rotating 0600 local admin token file")
+	config.localAdminToken = os.Getenv("SAVEWEB_LOCAL_ADMIN_TOKEN")
 	if err := flags.Parse(args); err != nil {
 		return serveConfig{}, err
 	}
@@ -265,7 +315,18 @@ func parseServeConfig(args []string) (serveConfig, error) {
 	if config.trackerIssuer == "" {
 		config.trackerIssuer = config.trackerURL
 	}
+	if config.localAdminTokenFile == "" {
+		config.localAdminTokenFile = filepath.Join(config.dataDir, "runtime", "local-admin.token")
+	}
 	return config, nil
+}
+
+func validateAdminListen(value string) error {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || host != "127.0.0.1" || port == "" {
+		return fmt.Errorf("shard: local admin must listen on 127.0.0.1 with an explicit port")
+	}
+	return nil
 }
 
 func heartbeatRequest(config serveConfig) protocol.AgentHeartbeatRequest {

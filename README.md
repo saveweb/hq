@@ -66,18 +66,41 @@ deliberately separate from serving:
 
 ```bash
 go run ./cmd/tracker keygen --out ./tracker-key.json --key-id key-2026-01
+go run ./cmd/tracker web-keygen --out ./tracker-web.secret
 go run ./cmd/tracker migrate --database-url "$HQ_DATABASE_URL"
 go run ./cmd/tracker serve \
   --database-url "$HQ_DATABASE_URL" \
   --public-url https://tracker.example \
-  --signing-key-file ./tracker-key.json
+  --signing-key-file ./tracker-key.json \
+  --github-client-id "$HQ_GITHUB_CLIENT_ID" \
+  --github-client-secret-file ./github-client.secret \
+  --web-session-secret-file ./tracker-web.secret
 ```
+
+The GitHub OAuth callback is
+`https://tracker.example/auth/github/callback`. Tracker uses OAuth `state` and
+PKCE S256, requests no repository or email scope, and discards the GitHub
+access token after fetching `/user`. New users are pending by default; use
+`--oauth-auto-grant-worker` only when the deployment intentionally allows open
+worker registration. The contributor portal is at `/`, and active admins can
+review users at `/admin/users`.
 
 `bootstrap-user` exists only for creating the first administrator before the
 web administration flow is configured. It reads the reusable machine token
 from a private `0600` file and never writes the token to logs. The trusted
 tracker database retains the current value so the contributor can reuse it on
 multiple machines, as defined in the v1 design.
+
+To link the first administrator to GitHub, pass its immutable numeric GitHub
+ID during bootstrap. The login updates only display metadata and retains the
+trusted roles:
+
+```bash
+go run ./cmd/tracker bootstrap-user \
+  --database-url "$HQ_DATABASE_URL" --user-id initial-admin \
+  --github-user-id 123456 --roles admin,shard_owner,worker \
+  --machine-token-file ./initial-admin.token
+```
 
 Projects and pre-split shards are also explicit commands until the admin page
 is available:
@@ -111,6 +134,15 @@ terminated by Caddy or cloudflared instead uses `--tls-terminated-by-proxy` and
 normally omits the pin. Plain HTTP requires
 `--allow-insecure-public-endpoint`. Tracker HTTP likewise requires the separate
 `--allow-http-tracker` local-test opt-in.
+
+Shard also starts a separate management server on `127.0.0.1:9081`. By
+default, each `serve` invocation rotates a 256-bit token into
+`<data-dir>/runtime/local-admin.token` with mode `0600`; only the file path is
+logged. Set `SAVEWEB_LOCAL_ADMIN_TOKEN` to provide a stable value of at least
+32 characters. The local page can inspect assignments and queue counts and can
+pause/resume new claims without blocking completion of existing attempts. It
+cannot change tracker ownership or generation. Use an SSH tunnel for remote
+access; the admin listener cannot bind a non-loopback address.
 
 ## Go worker SDK
 

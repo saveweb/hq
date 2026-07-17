@@ -107,6 +107,7 @@ pg_port=$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')
 database_url="postgres://postgres:test@127.0.0.1:${pg_port}/saveweb_hq_e2e?sslmode=disable"
 tracker_port=$(choose_port)
 shard_port=$(choose_port)
+admin_port=$(choose_port)
 tracker_url="http://127.0.0.1:${tracker_port}"
 shard_url="https://127.0.0.1:${shard_port}"
 
@@ -134,6 +135,7 @@ wait_url "${tracker_url}/healthz"
 
 start_shard() {
   "${run_dir}/shard" serve --listen "127.0.0.1:${shard_port}" \
+    --admin-listen "127.0.0.1:${admin_port}" \
     --tracker-url "${tracker_url}" --tracker-issuer "${tracker_url}" --allow-http-tracker \
     --machine-token-file "${run_dir}/owner.token" --identity-file "${run_dir}/shard.identity" \
     --data-dir "${run_dir}/shard-data" --endpoint "${shard_url}" --endpoint-version 1 \
@@ -141,8 +143,13 @@ start_shard() {
     --tls-key-file "${run_dir}/shard.key" >"${run_dir}/shard.log" 2>&1 &
   shard_pid=$!
   wait_url "${shard_url}/healthz"
+  wait_url "http://127.0.0.1:${admin_port}/"
   sleep 0.5
   kill -0 "${shard_pid}"
+  local_admin_token=$(tr -d '\r\n' <"${run_dir}/shard-data/runtime/local-admin.token")
+  curl --fail --silent --show-error \
+    -H "Authorization: Bearer ${local_admin_token}" \
+    "http://127.0.0.1:${admin_port}/api/v1/status" | grep -q "${shard_id}"
 }
 
 printf 'Registering HTTPS shard endpoint...\n'

@@ -53,12 +53,31 @@ func IsCode(err error, code string) bool {
 }
 
 type User struct {
-	ID     string
-	Status string
-	Roles  map[string]bool
+	ID              string
+	GitHubUserID    *int64
+	GitHubLogin     string
+	GitHubAvatarURL *string
+	Status          string
+	Roles           map[string]bool
+	LastLoginAt     *int64
 }
 
 func (u User) HasRole(role string) bool { return u.Roles[role] }
+
+type GitHubIdentity struct {
+	UserID    int64
+	Login     string
+	AvatarURL *string
+}
+
+type AuditEvent struct {
+	ID        int64
+	ActorID   string
+	Action    string
+	TargetID  string
+	Reason    string
+	CreatedAt int64
+}
 
 type Agent struct {
 	ID              string

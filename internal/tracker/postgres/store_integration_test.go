@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"os"
 	"testing"
 
@@ -52,6 +53,13 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	}
 	if _, err := store.AuthenticateMachineToken(ctx, "not-a-token"); !tracker.IsCode(err, protocol.ErrorInvalidMachineToken) {
 		t.Fatalf("invalid token error = %v", err)
+	}
+	githubID := int64(99)
+	if err := store.PutUserAndToken(ctx, tracker.User{
+		ID: "admin", GitHubUserID: &githubID, Status: tracker.UserStatusActive,
+		Roles: map[string]bool{tracker.RoleAdmin: true},
+	}, "admin-token", integrationNow); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "project-1", Status: tracker.ProjectStatusActive}, integrationNow); err != nil {
 		t.Fatal(err)
@@ -125,5 +133,43 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	avatar := "https://avatars.test/admin"
+	portalAdmin, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
+		UserID: 99, Login: "admin-login", AvatarURL: &avatar,
+	}, false, integrationNow+1)
+	if err != nil || portalAdmin.ID != "admin" || !portalAdmin.HasRole(tracker.RoleAdmin) {
+		t.Fatalf("portal admin = %+v, %v", portalAdmin, err)
+	}
+	sessionHash := sha256.Sum256([]byte("integration-web-session"))
+	if err := store.CreateWebSession(ctx, "admin", sessionHash[:], integrationNow, integrationNow+60); err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := store.AuthenticateWebSession(ctx, sessionHash[:], integrationNow+1)
+	if err != nil || authenticated.ID != "admin" {
+		t.Fatalf("web session user = %+v, %v", authenticated, err)
+	}
+	newUser, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
+		UserID: 123, Login: "new-contributor",
+	}, false, integrationNow+1)
+	if err != nil || newUser.Status != tracker.UserStatusPending || len(newUser.Roles) != 0 {
+		t.Fatalf("new OAuth user = %+v, %v", newUser, err)
+	}
+	if err := store.UpdateUserAccess(ctx, "admin", newUser.ID, tracker.UserStatusActive,
+		map[string]bool{tracker.RoleWorker: true}, "approved", integrationNow+2); err != nil {
+		t.Fatal(err)
+	}
+	users, err := store.ListUsers(ctx)
+	if err != nil || len(users) < 4 {
+		t.Fatalf("users = %d, %v", len(users), err)
+	}
+	newMachineToken, err := store.ResetMachineToken(ctx, newUser.ID, integrationNow+3)
+	if err != nil || len(newMachineToken) < 43 {
+		t.Fatalf("new machine token = %q, %v", newMachineToken, err)
+	}
+	machineUser, err := store.AuthenticateMachineToken(ctx, newMachineToken)
+	if err != nil || machineUser.ID != newUser.ID || !machineUser.HasRole(tracker.RoleWorker) {
+		t.Fatalf("machine user = %+v, %v", machineUser, err)
 	}
 }
