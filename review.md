@@ -73,8 +73,9 @@ Queue complete 只保存 `outcome_uri`，不允许把 WARC 或页面正文内嵌
 
 Receiver record encoding 已与 source 统一为 `jobs-jsonl-zstd-v1`。第一版固定为
 “一次成功请求对应一个不可变对象”，默认最多 1000 条 job、8 MiB HTTP request、
-16 MiB 压缩对象；没有后台 flush、manifest 或自动 seal。仍需实现 Stage 2 merge、
-按 ID 去重和 split 工具，并根据真实 discovered jobs 流量调校这些上限。
+16 MiB 压缩对象；没有后台 flush、manifest 或自动 seal。`source merge` 已按显式
+输入顺序实现流式 merge、按 ID 去重、identity conflict 检查和定长 split。仍需
+根据真实 discovered jobs 流量调校这些上限及工具的内存预算。
 
 ### 2.6 国内用户的登录备用方案
 

@@ -16,7 +16,7 @@ explicit behavior over implicit automation.
 api/                 OpenAPI contract and cross-language conformance vectors
 cmd/tracker/         Go tracker process
 cmd/shard/           Go shard process
-cmd/source/          Immutable source packer
+cmd/source/          Immutable source pack/merge/split tool
 internal/            Go implementation packages
 pkg/protocol/        Shared public Go protocol types
 sdk/worker/          Go worker SDK
@@ -147,9 +147,24 @@ The defaults are at most 1,000 jobs and 16 MiB compressed output per request;
 `--receiver-max-object-bytes`. A worker calls Go `session.SubmitReceiver` or
 Python `session.submit_receiver`, waits for the durable success response, and
 only then completes the parent job. The worker never receives R2 credentials.
-An ambiguous retry can create another immutable object, so the operator later
-merges and deduplicates by stable job ID before explicitly creating Stage 2
-source shards.
+An ambiguous retry can create another immutable object. After listing and
+downloading the receiver objects in a deterministic order, the operator can
+merge, deduplicate, and split them into new immutable sources:
+
+```bash
+go run ./cmd/source merge \
+  --input receiver-0001.jobs.jsonl.zst \
+  --input receiver-0002.jobs.jsonl.zst \
+  --output-prefix stage-2-shard \
+  --jobs-per-file 100000
+```
+
+This creates `stage-2-shard-000001.jobs.jsonl.zst`, and so on. Input order is
+preserved; the first occurrence of an ID wins. A repeated ID with different
+`type`, `url`, or `attr` is an identity conflict and removes all outputs made
+by that invocation. Existing output paths are never overwritten. Upload the
+results to R2 and register each one as another explicit source shard. There is
+still no automatic stage transition or pipeline state.
 
 To activate a manually pre-split `jobs.txt`, pack it locally, upload the
 result to a private R2 bucket, and register its immutable URI and ETag. The

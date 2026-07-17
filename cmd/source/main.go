@@ -21,13 +21,28 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 || args[0] != "pack" {
-		return fmt.Errorf("usage: source pack --input jobs.txt --output jobs.jobs.jsonl.zst")
+	if len(args) == 0 {
+		return sourceUsage()
 	}
+	switch args[0] {
+	case "pack":
+		return runPack(args[1:])
+	case "merge":
+		return runMerge(args[1:])
+	default:
+		return sourceUsage()
+	}
+}
+
+func sourceUsage() error {
+	return fmt.Errorf("usage: source {pack|merge} [flags]")
+}
+
+func runPack(args []string) error {
 	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
 	inputPath := flags.String("input", "", "UTF-8 file with one exact URL per line, or - for stdin")
 	outputPath := flags.String("output", "", "new jobs-jsonl-zstd-v1 file")
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *inputPath == "" || *outputPath == "" || *outputPath == "-" {

@@ -21,7 +21,7 @@ func main() {
 }
 
 func run() error {
-	phase := flag.String("phase", "", "initial, receiver, verify, takeover, recover, source, or checkpoint-recovery")
+	phase := flag.String("phase", "", "initial, receiver, verify, takeover, recover, source, stage2, or checkpoint-recovery")
 	projectID := flag.String("project-id", "project-e2e", "explicit project identifier")
 	trackerURL := flag.String("tracker-url", "", "tracker base URL")
 	tokenFile := flag.String("machine-token-file", "", "worker machine token file")
@@ -63,11 +63,49 @@ func run() error {
 		return recoverJob(ctx, session)
 	case "source":
 		return consumeSource(ctx, session)
+	case "stage2":
+		return consumeStage2(ctx, session)
 	case "checkpoint-recovery":
 		return consumeCheckpointRecovery(ctx, session)
 	default:
 		return fmt.Errorf("go-worker: invalid phase %q", *phase)
 	}
+}
+
+func consumeStage2(ctx context.Context, session *worker.Session) error {
+	batch, err := session.Claim(ctx, 10, 60, []string{protocol.JobTypeSeed})
+	if err != nil {
+		return err
+	}
+	jobs := batch.Jobs()
+	if len(jobs) != 2 || batch.Route().Generation != 1 {
+		return fmt.Errorf("go-worker: unexpected Stage 2 jobs: route=%+v jobs=%+v", batch.Route(), jobs)
+	}
+	seen := map[string]bool{}
+	items := make([]protocol.CompleteItem, 0, len(jobs))
+	for _, job := range jobs {
+		seen[job.ID] = true
+		items = append(items, protocol.CompleteItem{
+			JobID: job.ID, AttemptID: job.AttemptID,
+			Outcome: protocol.Outcome{Kind: "success", Meta: protocol.Attrs{"stage": 2}},
+		})
+	}
+	if !seen["stage2-go"] || !seen["stage2-python"] {
+		return fmt.Errorf("go-worker: merged Stage 2 IDs are incomplete: %+v", jobs)
+	}
+	result, err := batch.Complete(ctx, items)
+	if err != nil {
+		return err
+	}
+	if len(result.Results) != 2 {
+		return fmt.Errorf("go-worker: incomplete Stage 2 results: %+v", result)
+	}
+	for _, item := range result.Results {
+		if item.Status != protocol.ItemStatusApplied {
+			return fmt.Errorf("go-worker: Stage 2 completion was not applied: %+v", result)
+		}
+	}
+	return nil
 }
 
 func submitReceiver(ctx context.Context, session *worker.Session) error {

@@ -197,9 +197,15 @@ id = "j1_" + lowercase_hex(
 
 ```text
 source pack --input jobs.txt --output jobs.jobs.jsonl.zst
+source merge --input receiver-1.zst --input receiver-2.zst \
+  --output-prefix stage-2-shard --jobs-per-file 100000
 ```
 
 输入的每个非空文本行作为一个 `seed` URL，工具生成默认 ID。需要多个 shard 时先手动 split，再分别 pack 和上传。
+`merge` 按参数顺序读取已下载的 receiver/source 对象，保留同一 ID 的首次记录并
+按唯一 job 数切分输出。同一 ID 的 `type`、`url` 或 `attr` 不同属于
+`identity_conflict`，命令失败并清理本次输出；`via` 和 `hops` 不属于 queue identity，
+重复时保留首次记录。输出使用 `O_EXCL`，不覆盖已有 source。
 
 ## 4. Session API
 
@@ -538,6 +544,6 @@ GitHub login
 当前实现还覆盖 immutable R2 source、receiver-only R2 ingress、generation-CAS
 checkpoint multipart 发布，以及空数据目录的新 owner 恢复；跨进程 E2E 使用
 PostgreSQL、HTTPS shard 和 S3-compatible MinIO 验证这些路径。Artifact body 上传、
-Stage 2 merge/split 工具和完整运营管理页仍属于后续阶段。容量结论仍必须用真实
+Artifact body 上传和完整运营管理页仍属于后续阶段。容量结论仍必须用真实
 平均 JobSpec 对多个 shard endpoint 压测，
 分别记录 tracker 控制面 QPS、单 shard SQLite 吞吐和系统 aggregate completed jobs/s。

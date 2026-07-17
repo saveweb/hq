@@ -228,6 +228,35 @@ if [ "${receiver_objects}" -ne 2 ]; then
   exit 1
 fi
 
+printf 'Merging receiver objects into an explicit Stage 2 source...\n'
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp -e "MC_HOST_hq=${mc_host}" -v "${run_dir}:/work" \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
+  cp --recursive hq/source/receiver-output /work/
+mapfile -t receiver_inputs < <(find "${run_dir}/receiver-output" -type f -name '*.jobs.jsonl.zst' | sort)
+if [ "${#receiver_inputs[@]}" -ne 2 ]; then
+  printf 'expected two downloaded receiver objects, got %s\n' "${#receiver_inputs[@]}" >&2
+  exit 1
+fi
+merge_args=()
+for input in "${receiver_inputs[@]}"; do
+  merge_args+=(--input "${input}")
+done
+"${run_dir}/source" merge "${merge_args[@]}" \
+  --output-prefix "${run_dir}/stage-2" --jobs-per-file 100
+docker run --rm --network host -e "MC_HOST_hq=${mc_host}" -v "${run_dir}:/work:ro" \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
+  cp /work/stage-2-000001.jobs.jsonl.zst hq/source/stage-2.jobs.jsonl.zst
+stage2_etag=$(md5sum "${run_dir}/stage-2-000001.jobs.jsonl.zst" | awk '{print $1}')
+"${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-stage2-e2e
+"${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-stage2-e2e \
+  --shard-id shard-stage2-e2e --owner-agent-id "${shard_id}" --generation 1 --status loading \
+  --source-uri s3://source/stage-2.jobs.jsonl.zst --source-format jobs-jsonl-zstd-v1 \
+  --source-etag "${stage2_etag}"
+sleep 3
+"${run_dir}/go-worker" --phase stage2 --project-id project-stage2-e2e \
+  --tracker-url "${tracker_url}" --machine-token-file "${run_dir}/worker.token"
+
 printf 'Fencing an in-flight generation and recovering its job...\n'
 "${run_dir}/go-worker" --phase takeover --tracker-url "${tracker_url}" \
   --machine-token-file "${run_dir}/worker.token" --ready-file "${run_dir}/takeover.ready" \
@@ -343,4 +372,6 @@ stop_shard
   --project-id project-e2e --shard-id shard-e2e --generation 2
 "${run_dir}/queue-tool" --mode check-source --data-dir "${run_dir}/shard-data" \
   --project-id project-source-e2e --shard-id shard-source-e2e --generation 1
+"${run_dir}/queue-tool" --mode check-source --data-dir "${run_dir}/shard-data" \
+  --project-id project-stage2-e2e --shard-id shard-stage2-e2e --generation 1
 printf 'SavewebHQ cross-process E2E passed.\n'

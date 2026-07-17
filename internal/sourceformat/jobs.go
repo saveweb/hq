@@ -32,16 +32,63 @@ type DecodeStats struct {
 	UncompressedBytes int64
 }
 
-func Encode(ctx context.Context, output io.Writer, jobs <-chan protocol.JobSpecV1) error {
+type Encoder struct {
+	zstd   *zstd.Encoder
+	json   *json.Encoder
+	closed bool
+}
+
+func NewEncoder(output io.Writer) (*Encoder, error) {
+	if output == nil {
+		return nil, fmt.Errorf("source format: output is required")
+	}
 	encoder, err := zstd.NewWriter(output,
 		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(6)),
 		zstd.WithEncoderConcurrency(1),
 	)
 	if err != nil {
-		return fmt.Errorf("source format: create zstd encoder: %w", err)
+		return nil, fmt.Errorf("source format: create zstd encoder: %w", err)
 	}
 	jsonEncoder := json.NewEncoder(encoder)
 	jsonEncoder.SetEscapeHTML(false)
+	return &Encoder{zstd: encoder, json: jsonEncoder}, nil
+}
+
+func (e *Encoder) Write(job protocol.JobSpecV1) error {
+	if e == nil || e.closed {
+		return fmt.Errorf("source format: encoder is closed")
+	}
+	if _, err := normalizeProtocolJob(job); err != nil {
+		return err
+	}
+	if job.Type == "" {
+		job.Type = protocol.JobTypeSeed
+	}
+	if job.Attrs == nil {
+		job.Attrs = map[string]any{}
+	}
+	if err := e.json.Encode(job); err != nil {
+		return fmt.Errorf("source format: encode job: %w", err)
+	}
+	return nil
+}
+
+func (e *Encoder) Close() error {
+	if e == nil || e.closed {
+		return nil
+	}
+	e.closed = true
+	if err := e.zstd.Close(); err != nil {
+		return fmt.Errorf("source format: close zstd encoder: %w", err)
+	}
+	return nil
+}
+
+func Encode(ctx context.Context, output io.Writer, jobs <-chan protocol.JobSpecV1) error {
+	encoder, err := NewEncoder(output)
+	if err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -49,24 +96,11 @@ func Encode(ctx context.Context, output io.Writer, jobs <-chan protocol.JobSpecV
 			return ctx.Err()
 		case job, ok := <-jobs:
 			if !ok {
-				if err := encoder.Close(); err != nil {
-					return fmt.Errorf("source format: close zstd encoder: %w", err)
-				}
-				return nil
+				return encoder.Close()
 			}
-			if _, err := normalizeProtocolJob(job); err != nil {
+			if err := encoder.Write(job); err != nil {
 				_ = encoder.Close()
 				return err
-			}
-			if job.Type == "" {
-				job.Type = protocol.JobTypeSeed
-			}
-			if job.Attrs == nil {
-				job.Attrs = map[string]any{}
-			}
-			if err := jsonEncoder.Encode(job); err != nil {
-				_ = encoder.Close()
-				return fmt.Errorf("source format: encode job: %w", err)
 			}
 		}
 	}
