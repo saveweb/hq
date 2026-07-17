@@ -1,0 +1,786 @@
+openapi: 3.1.0
+info:
+  title: SavewebHQ API
+  version: 1.0.0
+  summary: Explicit tracker control plane and shard queue protocol
+  description: |
+    The tracker endpoints use a user machine token. Queue endpoints use a
+    short-lived Ed25519-signed shard access token returned in an assignment.
+    All timestamps are int64 UNIX seconds. Unknown request fields are rejected.
+
+    A shard access token uses compact JWS with `alg=EdDSA`, `typ=JWT`, and a
+    required `kid`. Its claims are `iss`, `aud=saveweb-shard`, `sub` (worker
+    agent ID), `jti`, `iat`, `nbf`, `exp`, `worker_agent_id`, `session_id`,
+    `session_expires_at`, `project_id`, `shard_id`, `generation`, and
+    `owner_agent_id`. A shard verifies the signature and every scoped claim
+    locally, then separately verifies its current local owner lease.
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+
+tags:
+  - name: agents
+  - name: sessions
+  - name: queue
+  - name: health
+
+paths:
+  /api/v1/agents/{agent_id}:
+    parameters:
+      - $ref: '#/components/parameters/AgentID'
+    put:
+      tags: [agents]
+      operationId: upsertAgent
+      summary: Register an agent or explicitly update its advertised identity
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentUpsertRequest'
+      responses:
+        '200':
+          description: Agent registered or updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /api/v1/agents/{agent_id}/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/AgentID'
+    post:
+      tags: [agents]
+      operationId: heartbeatAgent
+      summary: Report liveness and renew control-plane leases
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentHeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentHeartbeatResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/v1/worker/sessions:
+    post:
+      tags: [sessions]
+      operationId: createSession
+      summary: Create a worker session for one explicit project
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/v1/worker/sessions/{session_id}/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/SessionID'
+    post:
+      tags: [sessions]
+      operationId: heartbeatSession
+      summary: Renew a worker session lease
+      security:
+        - MachineToken: []
+      responses:
+        '200':
+          description: Session renewed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /api/v1/worker/assignments:
+    post:
+      tags: [sessions]
+      operationId: getAssignment
+      summary: Get a direct route and access token for an active shard
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GetAssignmentRequest'
+      responses:
+        '200':
+          description: Assignment or an explicit empty result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetAssignmentResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /api/v1/shard/endpoint-challenge:
+    post:
+      tags: [health]
+      operationId: endpointChallenge
+      summary: Echo a tracker challenge while proving the configured agent ID
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndpointChallenge'
+      responses:
+        '200':
+          description: Exact challenge echo
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndpointChallenge'
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /api/v1/queue/claim:
+    post:
+      tags: [queue]
+      operationId: claim
+      summary: Atomically claim a batch from one shard generation
+      security:
+        - ShardAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimRequest'
+      responses:
+        '200':
+          description: Claimed jobs, possibly empty
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/v1/queue/complete:
+    post:
+      tags: [queue]
+      operationId: completeBatch
+      summary: Complete attempts and atomically enqueue same-shard discoveries
+      security:
+        - ShardAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteRequest'
+      responses:
+        '200':
+          description: One result for every input item
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResultResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/v1/queue/fail:
+    post:
+      tags: [queue]
+      operationId: failBatch
+      summary: Apply retryable or terminal execution failures
+      security:
+        - ShardAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FailRequest'
+      responses:
+        '200':
+          description: One result for every input item
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResultResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/v1/queue/extend-lease:
+    post:
+      tags: [queue]
+      operationId: extendLeaseBatch
+      summary: Extend leases for still-current attempts
+      security:
+        - ShardAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtendLeaseRequest'
+      responses:
+        '200':
+          description: One result for every input item
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResultResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+components:
+  securitySchemes:
+    MachineToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-machine-token
+    ShardAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: EdDSA-JWT
+
+  parameters:
+    AgentID:
+      name: agent_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    SessionID:
+      name: session_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+
+  headers:
+    NoStore:
+      description: Responses must not be cached or transformed by proxies.
+      schema:
+        type: string
+        const: no-store, no-cache, max-age=0
+
+  responses:
+    BadRequest:
+      description: Invalid schema, field, size, or job
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unauthorized:
+      description: Missing, invalid, expired, or incorrectly scoped token
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Forbidden:
+      description: User, role, project, or agent is not permitted
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    NotFound:
+      description: Requested resource does not exist
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Conflict:
+      description: State, generation, attempt, or identity conflict
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    TooManyRequests:
+      description: Rate limit or bounded queue backpressure
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 0}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unavailable:
+      description: Shard unavailable or owner lease expired
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9._:-]+$'
+
+    UnixTime:
+      type: integer
+      format: int64
+      minimum: 0
+
+    JSONAttrs:
+      type: object
+      additionalProperties: true
+
+    AgentKind:
+      type: string
+      enum: [shard, worker]
+
+    AgentStatus:
+      type: string
+      enum: [registered, online, offline, revoked]
+
+    EndpointStatus:
+      type: string
+      enum: [not_applicable, unchecked, healthy, insecure, unreachable, tls_failed, cache_misconfigured]
+
+    AgentUpsertRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, name, version, attrs]
+      properties:
+        kind: {$ref: '#/components/schemas/AgentKind'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        version: {type: string, minLength: 1, maxLength: 64}
+        attrs: {$ref: '#/components/schemas/JSONAttrs'}
+        endpoint:
+          type: [string, 'null']
+          format: uri
+          maxLength: 2048
+          description: Required for a shard and forbidden for a worker.
+        endpoint_version:
+          type: [integer, 'null']
+          format: int64
+          minimum: 1
+        tls_spki_sha256:
+          type: [string, 'null']
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Base64url without padding; valid only for HTTPS.
+
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, kind, name, status, endpoint, endpoint_version, tls_spki_sha256, endpoint_status, last_heartbeat_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        kind: {$ref: '#/components/schemas/AgentKind'}
+        name: {type: string}
+        status: {$ref: '#/components/schemas/AgentStatus'}
+        endpoint: {type: [string, 'null'], format: uri}
+        endpoint_version: {type: [integer, 'null'], format: int64}
+        tls_spki_sha256: {type: [string, 'null']}
+        endpoint_status: {$ref: '#/components/schemas/EndpointStatus'}
+        last_heartbeat_at:
+          oneOf:
+            - {$ref: '#/components/schemas/UnixTime'}
+            - {type: 'null'}
+
+    AgentResponse:
+      type: object
+      additionalProperties: false
+      required: [agent, heartbeat_after_seconds, server_time]
+      properties:
+        agent: {$ref: '#/components/schemas/Agent'}
+        heartbeat_after_seconds: {type: integer, minimum: 1, maximum: 300}
+        server_time: {$ref: '#/components/schemas/UnixTime'}
+
+    AgentHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [version, attrs]
+      properties:
+        version: {type: string, minLength: 1, maxLength: 64}
+        attrs: {$ref: '#/components/schemas/JSONAttrs'}
+
+    SigningKey:
+      type: object
+      additionalProperties: false
+      required: [kid, alg, public_key_ed25519, not_before, not_after]
+      properties:
+        kid: {$ref: '#/components/schemas/Identifier'}
+        alg: {type: string, const: EdDSA}
+        public_key_ed25519:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Raw 32-byte public key, base64url without padding.
+        not_before: {$ref: '#/components/schemas/UnixTime'}
+        not_after: {$ref: '#/components/schemas/UnixTime'}
+
+    OwnerAssignment:
+      type: object
+      additionalProperties: false
+      required: [project_id, shard_id, generation, status, owner_lease_expires_at, source_uri, source_format, source_etag]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        shard_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, format: int64, minimum: 1}
+        status:
+          type: string
+          enum: [loading, active, draining, paused, offline, recovering]
+        owner_lease_expires_at: {$ref: '#/components/schemas/UnixTime'}
+        source_uri: {type: [string, 'null'], maxLength: 4096}
+        source_format: {type: [string, 'null'], enum: [jobs-jsonl-zstd-v1, null]}
+        source_etag: {type: [string, 'null'], maxLength: 512}
+
+    AgentHeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required: [server_time, heartbeat_after_seconds, owner_assignments, signing_keys]
+      properties:
+        server_time: {$ref: '#/components/schemas/UnixTime'}
+        heartbeat_after_seconds: {type: integer, minimum: 1, maximum: 300}
+        owner_assignments:
+          type: array
+          maxItems: 1024
+          items: {$ref: '#/components/schemas/OwnerAssignment'}
+        signing_keys:
+          type: array
+          maxItems: 8
+          items: {$ref: '#/components/schemas/SigningKey'}
+
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id, attrs]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        attrs: {$ref: '#/components/schemas/JSONAttrs'}
+
+    SessionResponse:
+      type: object
+      additionalProperties: false
+      required: [session_id, lease_expires_at, heartbeat_after_seconds]
+      properties:
+        session_id: {$ref: '#/components/schemas/Identifier'}
+        lease_expires_at: {$ref: '#/components/schemas/UnixTime'}
+        heartbeat_after_seconds: {type: integer, minimum: 1, maximum: 300}
+
+    GetAssignmentRequest:
+      type: object
+      additionalProperties: false
+      required: [session_id, accept_types]
+      properties:
+        session_id: {$ref: '#/components/schemas/Identifier'}
+        accept_types:
+          type: array
+          uniqueItems: true
+          maxItems: 2
+          items: {$ref: '#/components/schemas/JobType'}
+
+    Assignment:
+      type: object
+      additionalProperties: false
+      required: [project_id, shard_id, generation, owner_agent_id, endpoint, endpoint_version, tls_spki_sha256, access_token, access_token_expires_at]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        shard_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, format: int64, minimum: 1}
+        owner_agent_id: {$ref: '#/components/schemas/Identifier'}
+        endpoint: {type: string, format: uri, maxLength: 2048}
+        endpoint_version: {type: integer, format: int64, minimum: 1}
+        tls_spki_sha256: {type: [string, 'null']}
+        access_token: {type: string, minLength: 64, maxLength: 4096}
+        access_token_expires_at: {$ref: '#/components/schemas/UnixTime'}
+
+    GetAssignmentResponse:
+      type: object
+      additionalProperties: false
+      required: [assignment, retry_after_ms]
+      properties:
+        assignment:
+          oneOf:
+            - {$ref: '#/components/schemas/Assignment'}
+            - {type: 'null'}
+        retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
+
+    EndpointChallenge:
+      type: object
+      additionalProperties: false
+      required: [agent_id, challenge]
+      properties:
+        agent_id: {$ref: '#/components/schemas/Identifier'}
+        challenge: {type: string, minLength: 32, maxLength: 256}
+
+    JobType:
+      type: string
+      enum: [seed, asset]
+
+    JobFields:
+      type: object
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        url: {type: string, minLength: 1, maxLength: 8192}
+        type: {$ref: '#/components/schemas/JobType'}
+        via: {type: [string, 'null'], maxLength: 8192, default: null}
+        hops: {type: integer, minimum: 0, default: 0}
+        attr: {$ref: '#/components/schemas/JSONAttrs'}
+
+    JobSpecV1:
+      allOf:
+        - $ref: '#/components/schemas/JobFields'
+      type: object
+      unevaluatedProperties: false
+      required: [id, url]
+
+    ClaimedJob:
+      allOf:
+        - $ref: '#/components/schemas/JobFields'
+      type: object
+      unevaluatedProperties: false
+      required: [id, url, attempt_id, lease_expires_at]
+      properties:
+        attempt_id: {$ref: '#/components/schemas/Identifier'}
+        lease_expires_at: {$ref: '#/components/schemas/UnixTime'}
+
+    RouteRequest:
+      type: object
+      required: [project_id, shard_id, generation, session_id]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        shard_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, format: int64, minimum: 1}
+        session_id: {$ref: '#/components/schemas/Identifier'}
+
+    ClaimRequest:
+      allOf:
+        - $ref: '#/components/schemas/RouteRequest'
+        - type: object
+          required: [max_jobs, lease_seconds, accept_types]
+          properties:
+            max_jobs: {type: integer, minimum: 1, maximum: 256, default: 64}
+            lease_seconds: {type: integer, minimum: 30, maximum: 3600, default: 300}
+            accept_types:
+              type: array
+              uniqueItems: true
+              maxItems: 2
+              items: {$ref: '#/components/schemas/JobType'}
+      unevaluatedProperties: false
+
+    ClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, shard_id, generation, jobs, retry_after_ms]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        shard_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, format: int64, minimum: 1}
+        jobs:
+          type: array
+          maxItems: 256
+          items: {$ref: '#/components/schemas/ClaimedJob'}
+        retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
+
+    Outcome:
+      type: object
+      additionalProperties: false
+      required: [kind, code, uri, meta]
+      properties:
+        kind: {type: string, enum: [success, http_error, skipped]}
+        code: {type: [integer, 'null'], minimum: 0, maximum: 999}
+        uri: {type: [string, 'null'], maxLength: 4096}
+        meta: {$ref: '#/components/schemas/JSONAttrs'}
+
+    CompleteItem:
+      type: object
+      additionalProperties: false
+      required: [job_id, attempt_id, outcome, discovered_jobs]
+      properties:
+        job_id: {$ref: '#/components/schemas/Identifier'}
+        attempt_id: {$ref: '#/components/schemas/Identifier'}
+        outcome: {$ref: '#/components/schemas/Outcome'}
+        discovered_jobs:
+          type: array
+          maxItems: 256
+          items: {$ref: '#/components/schemas/JobSpecV1'}
+
+    CompleteRequest:
+      allOf:
+        - $ref: '#/components/schemas/RouteRequest'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              minItems: 1
+              maxItems: 256
+              items: {$ref: '#/components/schemas/CompleteItem'}
+      unevaluatedProperties: false
+
+    ExecutionError:
+      type: object
+      additionalProperties: false
+      required: [code, message, details]
+      properties:
+        code: {type: string, minLength: 1, maxLength: 64}
+        message: {type: string, maxLength: 2048}
+        details: {$ref: '#/components/schemas/JSONAttrs'}
+
+    FailItem:
+      type: object
+      additionalProperties: false
+      required: [job_id, attempt_id, retryable, error]
+      properties:
+        job_id: {$ref: '#/components/schemas/Identifier'}
+        attempt_id: {$ref: '#/components/schemas/Identifier'}
+        retryable: {type: boolean}
+        error: {$ref: '#/components/schemas/ExecutionError'}
+
+    FailRequest:
+      allOf:
+        - $ref: '#/components/schemas/RouteRequest'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              minItems: 1
+              maxItems: 256
+              items: {$ref: '#/components/schemas/FailItem'}
+      unevaluatedProperties: false
+
+    AttemptRef:
+      type: object
+      additionalProperties: false
+      required: [job_id, attempt_id]
+      properties:
+        job_id: {$ref: '#/components/schemas/Identifier'}
+        attempt_id: {$ref: '#/components/schemas/Identifier'}
+
+    ExtendLeaseRequest:
+      allOf:
+        - $ref: '#/components/schemas/RouteRequest'
+        - type: object
+          required: [extend_seconds, items]
+          properties:
+            extend_seconds: {type: integer, minimum: 30, maximum: 3600}
+            items:
+              type: array
+              minItems: 1
+              maxItems: 256
+              items: {$ref: '#/components/schemas/AttemptRef'}
+      unevaluatedProperties: false
+
+    ItemResult:
+      type: object
+      additionalProperties: false
+      required: [job_id, attempt_id, status, job_status, lease_expires_at, error]
+      properties:
+        job_id: {$ref: '#/components/schemas/Identifier'}
+        attempt_id: {$ref: '#/components/schemas/Identifier'}
+        status: {type: string, enum: [applied, already_applied, rejected]}
+        job_status:
+          type: [string, 'null']
+          enum: [todo, wip, done, failed, reset_exhausted, null]
+        lease_expires_at:
+          oneOf:
+            - {$ref: '#/components/schemas/UnixTime'}
+            - {type: 'null'}
+        error:
+          oneOf:
+            - {$ref: '#/components/schemas/APIError'}
+            - {type: 'null'}
+
+    BatchResultResponse:
+      type: object
+      additionalProperties: false
+      required: [results]
+      properties:
+        results:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items: {$ref: '#/components/schemas/ItemResult'}
+
+    ErrorCode:
+      type: string
+      enum:
+        - invalid_request
+        - invalid_job
+        - invalid_machine_token
+        - invalid_access_token
+        - permission_denied
+        - agent_disabled
+        - not_found
+        - stale_generation
+        - stale_endpoint_version
+        - shard_not_active
+        - identity_conflict
+        - rate_limited
+        - backpressure
+        - shard_unavailable
+        - owner_lease_expired
+        - lease_expired
+        - stale_attempt
+        - session_expired
+        - attempt_already_finalized
+        - unsupported_operation
+
+    APIError:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable, retry_after_ms, details]
+      properties:
+        code: {$ref: '#/components/schemas/ErrorCode'}
+        message: {type: string, maxLength: 2048}
+        retryable: {type: boolean}
+        retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
+        details: {$ref: '#/components/schemas/JSONAttrs'}
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: {$ref: '#/components/schemas/APIError'}

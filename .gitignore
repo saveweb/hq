@@ -1,0 +1,29 @@
+.DS_Store
+.idea/
+.vscode/
+
+# Go
+/bin/
+/coverage/
+*.coverprofile
+
+# Python / uv
+.python-version
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+/sdk/python/dist/
+
+# Runtime state and secrets
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pem
+*.key
+.env
+send_msg_to_yzqzss.md
