@@ -163,19 +163,42 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 		!queue.ValidateIdentifier(shard.OwnerAgentID) || shard.Generation < 1 {
 		return fmt.Errorf("tracker postgres: invalid shard")
 	}
-	_, err := s.pool.Exec(ctx, `
+	if (shard.SourceURI == nil) != (shard.SourceFormat == nil) ||
+		(shard.SourceURI == nil) != (shard.SourceETag == nil) ||
+		(shard.SourceFormat != nil && *shard.SourceFormat != "jobs-jsonl-zstd-v1") ||
+		(shard.SourceURI != nil && (*shard.SourceURI == "" || *shard.SourceETag == "" || len(*shard.SourceETag) > 512)) {
+		return fmt.Errorf("tracker postgres: invalid shard source metadata")
+	}
+	result, err := s.pool.Exec(ctx, `
 		INSERT INTO tracker_shards(
 			project_id, id, status, owner_agent_id, generation, owner_lease_expires_at,
-			source_uri, source_format, source_etag, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+			source_uri, source_format, source_etag, load_error_code, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10,$10)
 		ON CONFLICT (project_id, id) DO UPDATE SET
 			status = EXCLUDED.status, owner_agent_id = EXCLUDED.owner_agent_id,
 			generation = EXCLUDED.generation, owner_lease_expires_at = EXCLUDED.owner_lease_expires_at,
 			source_uri = EXCLUDED.source_uri, source_format = EXCLUDED.source_format,
-			source_etag = EXCLUDED.source_etag, updated_at = EXCLUDED.updated_at
+			source_etag = EXCLUDED.source_etag, load_error_code = NULL,
+			updated_at = EXCLUDED.updated_at
+		WHERE EXCLUDED.generation > tracker_shards.generation OR (
+			EXCLUDED.generation = tracker_shards.generation
+			AND EXCLUDED.owner_agent_id = tracker_shards.owner_agent_id
+			AND EXCLUDED.source_uri IS NOT DISTINCT FROM tracker_shards.source_uri
+			AND EXCLUDED.source_format IS NOT DISTINCT FROM tracker_shards.source_format
+			AND EXCLUDED.source_etag IS NOT DISTINCT FROM tracker_shards.source_etag
+		)
 	`, shard.ProjectID, shard.ID, shard.Status, shard.OwnerAgentID, shard.Generation,
 		shard.OwnerLeaseExpiresAt, shard.SourceURI, shard.SourceFormat, shard.SourceETag, now)
-	return err
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return &tracker.Error{
+			Code:    protocol.ErrorStaleGeneration,
+			Message: "shard generation, owner, or immutable source identity is stale",
+		}
+	}
+	return nil
 }
 
 func tokenDigest(token string) []byte {

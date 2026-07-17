@@ -48,6 +48,8 @@ type OwnerAssignment struct {
 	SourceURI           *string `json:"source_uri"`
 	SourceFormat        *string `json:"source_format"`
 	SourceETag          *string `json:"source_etag"`
+	SourceDownloadURL   *string `json:"source_download_url"`
+	SourceURLExpiresAt  *int64  `json:"source_url_expires_at"`
 }
 
 type AgentHeartbeatResponse struct {
@@ -55,4 +57,17 @@ type AgentHeartbeatResponse struct {
 	HeartbeatAfterSeconds int64             `json:"heartbeat_after_seconds"`
 	OwnerAssignments      []OwnerAssignment `json:"owner_assignments"`
 	SigningKeys           []SigningKey      `json:"signing_keys"`
+}
+
+type ShardLoadResultRequest struct {
+	Generation int64  `json:"generation"`
+	Success    bool   `json:"success"`
+	ErrorCode  string `json:"error_code"`
+}
+
+type ShardLoadResultResponse struct {
+	ProjectID  string `json:"project_id"`
+	ShardID    string `json:"shard_id"`
+	Generation int64  `json:"generation"`
+	Status     string `json:"status"`
 }

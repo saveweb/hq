@@ -19,6 +19,7 @@ def test_openapi_contract_has_all_v1_operations() -> None:
         "/healthz": "get",
         "/api/v1/agents/{agent_id}": "put",
         "/api/v1/agents/{agent_id}/heartbeat": "post",
+        "/api/v1/shards/{project_id}/{shard_id}/load-result": "post",
         "/api/v1/worker/sessions": "post",
         "/api/v1/worker/sessions/{session_id}/heartbeat": "post",
         "/api/v1/worker/assignments": "post",

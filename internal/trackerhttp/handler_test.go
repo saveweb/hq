@@ -22,6 +22,8 @@ const testNow = int64(1_780_000_000)
 
 type healthyChecker struct{}
 
+func ptr[T any](value T) *T { return &value }
+
 func (healthyChecker) Check(context.Context, string, string, *string) (string, error) {
 	return tracker.EndpointHealthy, nil
 }
@@ -173,6 +175,20 @@ func TestFullControlPlaneHTTPFlow(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	f.store.AddShard(tracker.Shard{
+		ProjectID: "project-1", ID: "shard-loading", Status: tracker.ShardStatusLoading,
+		OwnerAgentID: "shard-1", Generation: 10, OwnerLeaseExpiresAt: testNow + 120,
+		SourceURI: ptr("s3://sources/shard-loading.zst"), SourceFormat: ptr("jobs-jsonl-zstd-v1"),
+		SourceETag: ptr("etag-loading"),
+	})
+	response = f.request(t, http.MethodPost, "/api/v1/shards/project-1/shard-loading/load-result", "owner-token", "shard-1",
+		protocol.ShardLoadResultRequest{Generation: 10, Success: true})
+	requireStatus(t, response, http.StatusOK)
+	loadResult := decode[protocol.ShardLoadResultResponse](t, response)
+	if loadResult.Status != tracker.ShardStatusActive || loadResult.Generation != 10 {
+		t.Fatalf("load result = %+v", loadResult)
 	}
 }
 

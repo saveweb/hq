@@ -21,7 +21,7 @@ func main() {
 }
 
 func run() error {
-	mode := flag.String("mode", "", "seed or check")
+	mode := flag.String("mode", "", "seed, check, or check-source")
 	dataDir := flag.String("data-dir", "", "shard data directory")
 	projectID := flag.String("project-id", "", "project identifier")
 	shardID := flag.String("shard-id", "", "shard identifier")
@@ -45,9 +45,23 @@ func run() error {
 		return seed(ctx, store, *generation)
 	case "check":
 		return check(ctx, store)
+	case "check-source":
+		return checkSource(ctx, store)
 	default:
-		return fmt.Errorf("queue-tool: --mode must be seed or check")
+		return fmt.Errorf("queue-tool: --mode must be seed, check, or check-source")
 	}
+}
+
+func checkSource(ctx context.Context, store *sqlitequeue.Store) error {
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	if stats.Todo != 0 || stats.WIP != 0 || stats.Done != 2 || stats.Failed != 0 || stats.ResetExhausted != 0 {
+		return fmt.Errorf("queue-tool: unexpected source final stats: %+v", stats)
+	}
+	fmt.Printf("source queue stats: done=%d\n", stats.Done)
+	return nil
 }
 
 func databasePath(dataDir, projectID, shardID string) string {

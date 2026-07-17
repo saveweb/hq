@@ -100,6 +100,44 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	if len(heartbeat.OwnerAssignments) != 1 || heartbeat.OwnerAssignments[0].OwnerLeaseExpiresAt != integrationNow+120 {
 		t.Fatalf("heartbeat = %+v", heartbeat)
 	}
+	sourceURI := "s3://sources/project-1/shard-source.jobs.jsonl.zst"
+	sourceFormat := "jobs-jsonl-zstd-v1"
+	sourceETag := "source-etag"
+	if err := store.PutShard(ctx, tracker.Shard{
+		ProjectID: "project-1", ID: "shard-source", Status: tracker.ShardStatusLoading,
+		OwnerAgentID: "shard-1", Generation: 4,
+		SourceURI: &sourceURI, SourceFormat: &sourceFormat, SourceETag: &sourceETag,
+	}, integrationNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.HeartbeatAgent(ctx, "owner", "shard-1", "0.1.0", map[string]any{},
+		tracker.EndpointHealthy, true, false, integrationNow, integrationNow+120); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.FinishShardLoad(ctx, "owner", "shard-1", "project-1", "shard-source", 4,
+		true, "", integrationNow)
+	if err != nil || loaded.Status != tracker.ShardStatusActive {
+		t.Fatalf("finish source load = %+v, %v", loaded, err)
+	}
+	if _, err := store.FinishShardLoad(ctx, "owner", "shard-1", "project-1", "shard-source", 4,
+		true, "", integrationNow); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("replayed source load = %v", err)
+	}
+	changedETag := "silently-changed-etag"
+	if err := store.PutShard(ctx, tracker.Shard{
+		ProjectID: "project-1", ID: "shard-source", Status: tracker.ShardStatusLoading,
+		OwnerAgentID: "shard-1", Generation: 4,
+		SourceURI: &sourceURI, SourceFormat: &sourceFormat, SourceETag: &changedETag,
+	}, integrationNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("same-generation source mutation = %v", err)
+	}
+	if err := store.PutShard(ctx, tracker.Shard{
+		ProjectID: "project-1", ID: "shard-source", Status: tracker.ShardStatusRecovering,
+		OwnerAgentID: "shard-1", Generation: 3,
+		SourceURI: &sourceURI, SourceFormat: &sourceFormat, SourceETag: &sourceETag,
+	}, integrationNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("generation rollback = %v", err)
+	}
 
 	_, err = service.UpsertAgent(ctx, "worker-token", "worker-1", protocol.AgentUpsertRequest{
 		Kind: protocol.AgentKindWorker, Name: "Worker", Version: "0.1.0", Attrs: protocol.Attrs{},

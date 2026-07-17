@@ -83,6 +83,32 @@ assignment 的 `owner_lease_expires_at`。本地时间达到 owner lease 后，s
 Worker heartbeat 不返回 owner assignment。Worker 的 job session 使用独立
 的 session heartbeat，不由 agent heartbeat 隐式续租。
 
+### 2.1 Source assignment 与载入回报
+
+状态为 `loading` 或 `recovering` 且登记了 source 的 owner assignment 同时
+包含不可变的 `source_uri`、`source_format=jobs-jsonl-zstd-v1`、
+`source_etag`，以及 tracker 刚签发的 `source_download_url` 和
+`source_url_expires_at`。后两项是敏感的短期 exact-object GET 能力：shard
+不得记录或持久化 URL，也不持有 S3/R2 credential。
+
+Shard 以 `(source_uri, source_etag, generation)` 作为装载身份。Heartbeat
+导致 URL 轮换时不得重复启动装载；进程重启或新 generation 从头流式读取，
+依靠稳定 job ID 幂等写入 SQLite。`loading`/`recovering` 不接受 claim。
+
+装载结束后，当前 owner 调用：
+
+```http
+POST /api/v1/shards/{project_id}/{shard_id}/load-result
+Authorization: Bearer <machine-token>
+X-Saveweb-Agent-ID: <agent_id>
+```
+
+Request 带 `generation`、`success` 与稳定的 `error_code`。Tracker 只在
+agent、owner、generation、owner lease 和原状态都匹配时更新同一 shard row：
+成功进入 `active`；失败进入独立的 `load_failed` 并释放 owner lease。重复、
+迟到或 takeover 后的回报返回 `409 stale_generation`。若 source 已写入但回报
+暂时失败，shard 只重试回报，不重新导入 source。
+
 第一版默认值：
 
 | 参数 | 默认值 |

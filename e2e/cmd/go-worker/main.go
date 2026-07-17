@@ -22,6 +22,7 @@ func main() {
 
 func run() error {
 	phase := flag.String("phase", "", "initial, verify, takeover, or recover")
+	projectID := flag.String("project-id", "project-e2e", "explicit project identifier")
 	trackerURL := flag.String("tracker-url", "", "tracker base URL")
 	tokenFile := flag.String("machine-token-file", "", "worker machine token file")
 	readyFile := flag.String("ready-file", "", "takeover readiness file")
@@ -41,7 +42,7 @@ func run() error {
 		TrackerURL: *trackerURL, MachineToken: token, AgentID: "worker-go-e2e",
 		AgentName: "Go E2E worker", AgentVersion: "e2e", AllowHTTPTracker: true,
 		RequestTimeout: 10 * time.Second,
-	}, "project-e2e", protocol.Attrs{"sdk": "go", "phase": *phase})
+	}, *projectID, protocol.Attrs{"sdk": "go", "phase": *phase})
 	if err != nil {
 		return err
 	}
@@ -58,9 +59,43 @@ func run() error {
 		return takeover(ctx, session, *readyFile, *continueFile)
 	case "recover":
 		return recoverJob(ctx, session)
+	case "source":
+		return consumeSource(ctx, session)
 	default:
 		return fmt.Errorf("go-worker: invalid phase %q", *phase)
 	}
+}
+
+func consumeSource(ctx context.Context, session *worker.Session) error {
+	batch, err := session.Claim(ctx, 10, 60, []string{protocol.JobTypeSeed})
+	if err != nil {
+		return err
+	}
+	jobs := batch.Jobs()
+	if len(jobs) != 2 || batch.Route().Generation != 1 {
+		return fmt.Errorf("go-worker: unexpected source jobs: route=%+v jobs=%+v", batch.Route(), jobs)
+	}
+	items := make([]protocol.CompleteItem, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, protocol.CompleteItem{
+			JobID: job.ID, AttemptID: job.AttemptID,
+			Outcome:        protocol.Outcome{Kind: "success", Meta: protocol.Attrs{"source_e2e": true}},
+			DiscoveredJobs: []protocol.JobSpecV1{},
+		})
+	}
+	result, err := batch.Complete(ctx, items)
+	if err != nil {
+		return err
+	}
+	if len(result.Results) != len(jobs) {
+		return fmt.Errorf("go-worker: incomplete source results: %+v", result)
+	}
+	for _, item := range result.Results {
+		if item.Status != protocol.ItemStatusApplied {
+			return fmt.Errorf("go-worker: source completion was not applied: %+v", result)
+		}
+	}
+	return nil
 }
 
 func initial(ctx context.Context, session *worker.Session) error {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/access"
 	"git.saveweb.org/saveweb/hq/internal/queue"
@@ -20,6 +21,12 @@ type Config struct {
 	AccessTokenTTLSeconds   int64
 	SigningKeyNotBefore     int64
 	SigningKeyNotAfter      int64
+	SourceURLTTLSeconds     int64
+	SourceURLSigner         SourceURLSigner
+}
+
+type SourceURLSigner interface {
+	PresignGet(context.Context, string, int64, time.Duration) (string, int64, error)
 }
 
 func DefaultConfig() Config {
@@ -27,6 +34,7 @@ func DefaultConfig() Config {
 		AgentHeartbeatSeconds: 30, OwnerLeaseSeconds: 120,
 		SessionHeartbeatSeconds: 30, SessionLeaseSeconds: 120,
 		AccessTokenTTLSeconds: 600,
+		SourceURLTTLSeconds:   900,
 	}
 }
 
@@ -45,7 +53,8 @@ func NewService(store Store, endpointChecker EndpointChecker, signer *access.Sig
 	}
 	if config.AgentHeartbeatSeconds < 1 || config.OwnerLeaseSeconds <= config.AgentHeartbeatSeconds ||
 		config.SessionHeartbeatSeconds < 1 || config.SessionLeaseSeconds <= config.SessionHeartbeatSeconds ||
-		config.AccessTokenTTLSeconds < 1 || config.AccessTokenTTLSeconds > access.MaxTTLSeconds {
+		config.AccessTokenTTLSeconds < 1 || config.AccessTokenTTLSeconds > access.MaxTTLSeconds ||
+		(config.SourceURLSigner != nil && (config.SourceURLTTLSeconds < 60 || config.SourceURLTTLSeconds > 86400)) {
 		return nil, fmt.Errorf("tracker: invalid lease configuration")
 	}
 	if config.SigningKeyNotBefore == 0 {
@@ -156,6 +165,30 @@ func (s *Service) HeartbeatAgent(ctx context.Context, machineToken, agentID stri
 	if err != nil {
 		return protocol.AgentHeartbeatResponse{}, err
 	}
+	for index := range heartbeat.OwnerAssignments {
+		assignment := &heartbeat.OwnerAssignments[index]
+		if assignment.SourceURI == nil ||
+			(assignment.Status != ShardStatusLoading && assignment.Status != ShardStatusRecovering) {
+			continue
+		}
+		if assignment.SourceFormat == nil || *assignment.SourceFormat != "jobs-jsonl-zstd-v1" ||
+			assignment.SourceETag == nil || *assignment.SourceETag == "" {
+			return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: incomplete source assignment")
+		}
+		if s.config.SourceURLSigner == nil || s.config.SourceURLTTLSeconds < 60 || s.config.SourceURLTTLSeconds > 86400 {
+			return protocol.AgentHeartbeatResponse{}, &Error{
+				Code: protocol.ErrorUnsupportedOperation, Message: "source object storage is not configured",
+			}
+		}
+		downloadURL, expiresAt, err := s.config.SourceURLSigner.PresignGet(
+			ctx, *assignment.SourceURI, now, time.Duration(s.config.SourceURLTTLSeconds)*time.Second,
+		)
+		if err != nil {
+			return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: presign source download: %w", err)
+		}
+		assignment.SourceDownloadURL = &downloadURL
+		assignment.SourceURLExpiresAt = &expiresAt
+	}
 	keys := []protocol.SigningKey{}
 	if heartbeat.Agent.Kind == protocol.AgentKindShard {
 		keys = append(keys, s.signingKey)
@@ -184,6 +217,37 @@ func (s *Service) CreateSession(ctx context.Context, machineToken, agentID strin
 		return protocol.SessionResponse{}, err
 	}
 	return toSessionResponse(session, s.config.SessionHeartbeatSeconds), nil
+}
+
+func (s *Service) ReportShardLoad(
+	ctx context.Context,
+	machineToken, agentID, projectID, shardID string,
+	request protocol.ShardLoadResultRequest,
+) (protocol.ShardLoadResultResponse, error) {
+	user, err := s.authenticate(ctx, machineToken)
+	if err != nil {
+		return protocol.ShardLoadResultResponse{}, err
+	}
+	if !user.HasRole(RoleShardOwner) {
+		return protocol.ShardLoadResultResponse{}, permissionDenied("shard_owner role required")
+	}
+	if !queue.ValidateIdentifier(agentID) ||
+		!queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(shardID) || request.Generation < 1 ||
+		(request.Success && request.ErrorCode != "") ||
+		(!request.Success && (!queue.ValidateIdentifier(request.ErrorCode) || len(request.ErrorCode) > 64)) {
+		return protocol.ShardLoadResultResponse{}, invalidRequest("invalid shard load result")
+	}
+	value, err := s.store.FinishShardLoad(
+		ctx, user.ID, agentID, projectID, shardID, request.Generation,
+		request.Success, request.ErrorCode, s.now(),
+	)
+	if err != nil {
+		return protocol.ShardLoadResultResponse{}, err
+	}
+	return protocol.ShardLoadResultResponse{
+		ProjectID: value.ProjectID, ShardID: value.ID,
+		Generation: value.Generation, Status: value.Status,
+	}, nil
 }
 
 func (s *Service) HeartbeatSession(ctx context.Context, machineToken, agentID, sessionID string) (protocol.SessionResponse, error) {

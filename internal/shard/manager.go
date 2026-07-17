@@ -19,13 +19,17 @@ import (
 )
 
 type StoreOpener func(ctx context.Context, path string, identity queue.Identity, now func() int64) (queue.Store, error)
+type SourceLoader func(context.Context, protocol.OwnerAssignment, queue.Store) error
+type SourceReporter func(context.Context, protocol.OwnerAssignment, error) error
 
 type ManagerConfig struct {
-	AgentID   string
-	Issuer    string
-	DataDir   string
-	Clock     func() int64
-	OpenStore StoreOpener
+	AgentID      string
+	Issuer       string
+	DataDir      string
+	Clock        func() int64
+	OpenStore    StoreOpener
+	LoadSource   SourceLoader
+	ReportSource SourceReporter
 }
 
 type routeKey struct {
@@ -36,6 +40,11 @@ type routeKey struct {
 type ownedShard struct {
 	assignment protocol.OwnerAssignment
 	store      queue.Store
+	loadKey    string
+	loadCancel context.CancelFunc
+
+	loadRunning bool
+	loadError   string
 }
 
 type Manager struct {
@@ -46,6 +55,9 @@ type Manager struct {
 	clock         func() int64
 	clockOffset   int64
 	openStore     StoreOpener
+	loadSource    SourceLoader
+	reportSource  SourceReporter
+	loaders       sync.WaitGroup
 	verifier      *access.Verifier
 	owned         map[routeKey]*ownedShard
 	retiredStores []queue.Store
@@ -79,6 +91,8 @@ type ShardStatus struct {
 	Status              string      `json:"status"`
 	OwnerLeaseExpiresAt int64       `json:"owner_lease_expires_at"`
 	Stats               queue.Stats `json:"stats"`
+	LoadRunning         bool        `json:"load_running"`
+	LoadError           string      `json:"load_error,omitempty"`
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -93,9 +107,14 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 			return sqlitequeue.Open(ctx, path, identity, sqlitequeue.WithClock(now))
 		}
 	}
+	if (config.LoadSource == nil) != (config.ReportSource == nil) {
+		return nil, fmt.Errorf("shard: source loader and reporter must be configured together")
+	}
 	return &Manager{
 		agentID: config.AgentID, issuer: config.Issuer, dataDir: config.DataDir,
-		clock: config.Clock, openStore: config.OpenStore, owned: make(map[routeKey]*ownedShard),
+		clock: config.Clock, openStore: config.OpenStore,
+		loadSource: config.LoadSource, reportSource: config.ReportSource,
+		owned: make(map[routeKey]*ownedShard),
 	}, nil
 }
 
@@ -145,6 +164,12 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 	}
 	m.clockOffset = offset
 	next := make(map[routeKey]*ownedShard, len(heartbeat.OwnerAssignments))
+	type loadRequest struct {
+		owned      *ownedShard
+		assignment protocol.OwnerAssignment
+		ctx        context.Context
+	}
+	loads := []loadRequest{}
 	opened := []queue.Store{}
 	rollbackOpened := func() {
 		for _, store := range opened {
@@ -163,10 +188,6 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 		}
 		current := m.owned[key]
 		if current == nil {
-			if assignment.SourceURI != nil {
-				rollbackOpened()
-				return &queue.Error{Code: protocol.ErrorUnsupportedOperation, Message: "source/checkpoint loading is not implemented yet"}
-			}
 			path := m.databasePath(assignment.ProjectID, assignment.ShardID)
 			store, openError := m.openStore(ctx, path, queue.Identity{
 				ProjectID: assignment.ProjectID, ShardID: assignment.ShardID, Generation: assignment.Generation,
@@ -183,16 +204,98 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 			return fmt.Errorf("shard: install fence %s/%s: %w", assignment.ProjectID, assignment.ShardID, err)
 		}
 		current.assignment = assignment
+		if assignment.SourceURI != nil &&
+			(assignment.Status == trackerStatusLoading || assignment.Status == trackerStatusRecovering) {
+			if m.loadSource == nil {
+				rollbackOpened()
+				return &queue.Error{Code: protocol.ErrorUnsupportedOperation, Message: "source loading is not configured"}
+			}
+			loadKey := sourceLoadKey(assignment)
+			if current.loadKey != loadKey {
+				if current.loadCancel != nil {
+					current.loadCancel()
+				}
+				loadContext, cancel := context.WithCancel(context.Background())
+				current.loadKey, current.loadCancel = loadKey, cancel
+				current.loadRunning, current.loadError = true, ""
+				loads = append(loads, loadRequest{owned: current, assignment: assignment, ctx: loadContext})
+			}
+		} else if current.loadCancel != nil {
+			current.loadCancel()
+			current.loadCancel, current.loadRunning = nil, false
+		}
 		next[key] = current
 	}
 	for key, value := range m.owned {
 		if _, retained := next[key]; !retained {
+			if value.loadCancel != nil {
+				value.loadCancel()
+			}
 			m.retiredStores = append(m.retiredStores, value.store)
 		}
 	}
 	m.owned = next
 	m.verifier = verifier
+	for _, request := range loads {
+		m.loaders.Add(1)
+		go m.runSourceLoad(request.ctx, request.owned, request.assignment)
+	}
 	return nil
+}
+
+func (m *Manager) runSourceLoad(ctx context.Context, owned *ownedShard, assignment protocol.OwnerAssignment) {
+	defer m.loaders.Done()
+	loadError := m.loadSource(ctx, assignment, owned.store)
+	if ctx.Err() != nil {
+		return
+	}
+	reportError := m.reportSourceUntilAccepted(ctx, owned, assignment, loadError)
+	m.mu.Lock()
+	if owned.loadKey == sourceLoadKey(assignment) {
+		owned.loadRunning = false
+		owned.loadCancel = nil
+		if loadError != nil {
+			owned.loadError = loadError.Error()
+		} else if reportError != nil {
+			owned.loadError = "report load result: " + reportError.Error()
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) reportSourceUntilAccepted(
+	ctx context.Context,
+	owned *ownedShard,
+	assignment protocol.OwnerAssignment,
+	loadError error,
+) error {
+	for {
+		reportContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := m.reportSource(reportContext, assignment, loadError)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		m.mu.Lock()
+		if owned.loadKey == sourceLoadKey(assignment) {
+			owned.loadError = "report load result: " + err.Error()
+		}
+		m.mu.Unlock()
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func sourceLoadKey(assignment protocol.OwnerAssignment) string {
+	if assignment.SourceURI == nil || assignment.SourceETag == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s\x00%s\x00%d", *assignment.SourceURI, *assignment.SourceETag, assignment.Generation)
 }
 
 func (m *Manager) Authorize(token string) (Authorization, error) {
@@ -298,6 +401,9 @@ func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
 	type captured struct {
 		assignment protocol.OwnerAssignment
 		store      queue.Store
+
+		loadRunning bool
+		loadError   string
 	}
 	m.mu.RLock()
 	result := RuntimeStatus{
@@ -306,7 +412,10 @@ func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
 	}
 	values := make([]captured, 0, len(m.owned))
 	for _, owned := range m.owned {
-		values = append(values, captured{assignment: owned.assignment, store: owned.store})
+		values = append(values, captured{
+			assignment: owned.assignment, store: owned.store,
+			loadRunning: owned.loadRunning, loadError: owned.loadError,
+		})
 	}
 	m.mu.RUnlock()
 	for _, value := range values {
@@ -318,6 +427,7 @@ func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
 			ProjectID: value.assignment.ProjectID, ShardID: value.assignment.ShardID,
 			Generation: value.assignment.Generation, Status: value.assignment.Status,
 			OwnerLeaseExpiresAt: value.assignment.OwnerLeaseExpiresAt, Stats: stats,
+			LoadRunning: value.loadRunning, LoadError: value.loadError,
 		})
 	}
 	sort.Slice(result.Shards, func(i, j int) bool {
@@ -338,11 +448,20 @@ func (a Authorization) AllowsMutation() error {
 
 func (m *Manager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return nil
 	}
 	m.closed = true
+	for _, value := range m.owned {
+		if value.loadCancel != nil {
+			value.loadCancel()
+		}
+	}
+	m.mu.Unlock()
+	m.loaders.Wait()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	seen := make(map[queue.Store]struct{})
 	var joined error
 	for _, value := range m.owned {
@@ -370,6 +489,23 @@ func validateAssignment(value protocol.OwnerAssignment, now int64) error {
 	if !queue.ValidateIdentifier(value.ProjectID) || !queue.ValidateIdentifier(value.ShardID) ||
 		value.Generation < 1 || value.OwnerLeaseExpiresAt <= now {
 		return fmt.Errorf("shard: invalid or expired owner assignment")
+	}
+	if value.SourceURI != nil {
+		if value.SourceFormat == nil || *value.SourceFormat != "jobs-jsonl-zstd-v1" ||
+			value.SourceETag == nil || *value.SourceETag == "" {
+			return fmt.Errorf("shard: invalid source assignment")
+		}
+		loading := value.Status == trackerStatusLoading || value.Status == trackerStatusRecovering
+		if loading && (value.SourceDownloadURL == nil || *value.SourceDownloadURL == "" ||
+			value.SourceURLExpiresAt == nil || *value.SourceURLExpiresAt <= now) {
+			return fmt.Errorf("shard: loading source assignment has no current download URL")
+		}
+		if !loading && (value.SourceDownloadURL != nil || value.SourceURLExpiresAt != nil) {
+			return fmt.Errorf("shard: active source assignment contains a download URL")
+		}
+	} else if value.SourceFormat != nil || value.SourceETag != nil || value.SourceDownloadURL != nil ||
+		value.SourceURLExpiresAt != nil {
+		return fmt.Errorf("shard: partial source assignment")
 	}
 	switch value.Status {
 	case trackerStatusLoading, trackerStatusActive, trackerStatusDraining,

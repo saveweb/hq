@@ -19,6 +19,7 @@ import (
 	"git.saveweb.org/saveweb/hq/internal/access"
 	"git.saveweb.org/saveweb/hq/internal/endpointcheck"
 	"git.saveweb.org/saveweb/hq/internal/githuboauth"
+	"git.saveweb.org/saveweb/hq/internal/objectstore"
 	"git.saveweb.org/saveweb/hq/internal/signingkey"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
@@ -203,6 +204,9 @@ func runPutShard(args []string) error {
 	ownerAgentID := flags.String("owner-agent-id", "", "registered shard agent identifier")
 	status := flags.String("status", tracker.ShardStatusActive, "shard lifecycle status")
 	generation := flags.Int64("generation", 1, "positive owner generation")
+	sourceURI := flags.String("source-uri", "", "immutable s3:// source object")
+	sourceFormat := flags.String("source-format", "", "source format (jobs-jsonl-zstd-v1)")
+	sourceETag := flags.String("source-etag", "", "immutable source object ETag")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -217,9 +221,22 @@ func runPutShard(args []string) error {
 		return err
 	}
 	defer store.Close()
+	var sourceURIPointer, sourceFormatPointer, sourceETagPointer *string
+	anySource := *sourceURI != "" || *sourceFormat != "" || *sourceETag != ""
+	if anySource {
+		if *sourceURI == "" || *sourceFormat != "jobs-jsonl-zstd-v1" || *sourceETag == "" ||
+			(*status != tracker.ShardStatusLoading && *status != tracker.ShardStatusRecovering) {
+			return fmt.Errorf("put-shard: source URI, jobs-jsonl-zstd-v1 format, ETag, and loading/recovering status are required together")
+		}
+		if _, err := objectstore.ParseURI(*sourceURI); err != nil {
+			return err
+		}
+		sourceURIPointer, sourceFormatPointer, sourceETagPointer = sourceURI, sourceFormat, sourceETag
+	}
 	return store.PutShard(ctx, tracker.Shard{
 		ProjectID: *projectID, ID: *shardID, Status: *status,
 		OwnerAgentID: *ownerAgentID, Generation: *generation,
+		SourceURI: sourceURIPointer, SourceFormat: sourceFormatPointer, SourceETag: sourceETagPointer,
 	}, time.Now().Unix())
 }
 
@@ -240,6 +257,13 @@ func runServe(args []string, logger *slog.Logger) error {
 	githubClientSecretFile := flags.String("github-client-secret-file", os.Getenv("HQ_GITHUB_CLIENT_SECRET_FILE"), "0600 GitHub OAuth client secret file")
 	webSessionSecretFile := flags.String("web-session-secret-file", os.Getenv("HQ_WEB_SESSION_SECRET_FILE"), "0600 tracker web session secret file")
 	oauthAutoGrantWorker := flags.Bool("oauth-auto-grant-worker", false, "activate new GitHub users with worker role")
+	s3Endpoint := flags.String("s3-endpoint", os.Getenv("HQ_S3_ENDPOINT"), "trusted S3-compatible endpoint")
+	s3Region := flags.String("s3-region", envOr("HQ_S3_REGION", "auto"), "S3-compatible signing region")
+	s3AccessKeyFile := flags.String("s3-access-key-id-file", os.Getenv("HQ_S3_ACCESS_KEY_ID_FILE"), "0600 S3 access key ID file")
+	s3SecretKeyFile := flags.String("s3-secret-access-key-file", os.Getenv("HQ_S3_SECRET_ACCESS_KEY_FILE"), "0600 S3 secret access key file")
+	s3PathStyle := flags.Bool("s3-path-style", false, "use path-style S3 object URLs")
+	allowHTTPS3 := flags.Bool("allow-http-s3", false, "allow an HTTP S3 endpoint for local testing")
+	sourceURLTTLSeconds := flags.Int64("source-url-ttl-seconds", 900, "exact-object source download URL lifetime")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -274,6 +298,14 @@ func runServe(args []string, logger *slog.Logger) error {
 	config.AccessTokenTTLSeconds = *accessTokenTTLSeconds
 	config.SigningKeyNotBefore = key.CreatedAt
 	config.SigningKeyNotAfter = key.CreatedAt + keyValiditySeconds
+	config.SourceURLTTLSeconds = *sourceURLTTLSeconds
+	objectClient, err := configureObjectStore(
+		*s3Endpoint, *s3Region, *s3AccessKeyFile, *s3SecretKeyFile, *s3PathStyle, *allowHTTPS3,
+	)
+	if err != nil {
+		return err
+	}
+	config.SourceURLSigner = objectClient
 	checker := endpointcheck.NewWithOptions(endpointcheck.Options{AllowPrivate: *allowPrivateShardEndpoints})
 	if *allowPrivateShardEndpoints {
 		logger.Warn("private shard endpoints are enabled; do not use this setting in production")
@@ -325,6 +357,31 @@ func runServe(args []string, logger *slog.Logger) error {
 		}
 		return nil
 	}
+}
+
+func configureObjectStore(
+	endpoint, region, accessKeyFile, secretKeyFile string,
+	pathStyle, allowHTTP bool,
+) (*objectstore.Client, error) {
+	configured := endpoint != "" || accessKeyFile != "" || secretKeyFile != ""
+	if !configured {
+		return nil, nil
+	}
+	if endpoint == "" || region == "" || accessKeyFile == "" || secretKeyFile == "" {
+		return nil, fmt.Errorf("serve: S3 endpoint, region, access key file, and secret key file are required together")
+	}
+	accessKey, err := readSecretFile(accessKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	secretKey, err := readSecretFile(secretKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return objectstore.New(objectstore.Config{
+		Endpoint: endpoint, Region: region, AccessKeyID: accessKey,
+		SecretAccessKey: secretKey, UsePathStyle: pathStyle, AllowHTTP: allowHTTP,
+	})
 }
 
 func validatePublicURL(value string, allowInsecure bool) error {

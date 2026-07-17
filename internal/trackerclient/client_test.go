@@ -31,6 +31,10 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 			})
 		case "/api/v1/agents/agent-1/heartbeat":
 			_ = json.NewEncoder(response).Encode(protocol.AgentHeartbeatResponse{ServerTime: 100, HeartbeatAfterSeconds: 30})
+		case "/api/v1/shards/project-1/shard-1/load-result":
+			_ = json.NewEncoder(response).Encode(protocol.ShardLoadResultResponse{
+				ProjectID: "project-1", ShardID: "shard-1", Generation: 4, Status: "active",
+			})
 		case "/api/v1/worker/sessions":
 			response.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(response).Encode(protocol.SessionResponse{SessionID: "session-1", LeaseExpiresAt: 200})
@@ -57,6 +61,12 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 	heartbeat, err := client.HeartbeatAgent(ctx, protocol.AgentHeartbeatRequest{})
 	if err != nil || heartbeat.HeartbeatAfterSeconds != 30 {
 		t.Fatalf("heartbeat = %+v, %v", heartbeat, err)
+	}
+	loadResult, err := client.ReportShardLoad(ctx, "project-1", "shard-1", protocol.ShardLoadResultRequest{
+		Generation: 4, Success: true,
+	})
+	if err != nil || loadResult.Status != "active" {
+		t.Fatalf("load result = %+v, %v", loadResult, err)
 	}
 	session, err := client.CreateSession(ctx, protocol.CreateSessionRequest{})
 	if err != nil || session.SessionID != "session-1" {

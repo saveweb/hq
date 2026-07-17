@@ -21,8 +21,10 @@ import (
 
 	"git.saveweb.org/saveweb/hq/internal/agentidentity"
 	"git.saveweb.org/saveweb/hq/internal/localadmin"
+	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/shard"
 	"git.saveweb.org/saveweb/hq/internal/shardhttp"
+	"git.saveweb.org/saveweb/hq/internal/sourceloader"
 	"git.saveweb.org/saveweb/hq/internal/tlsidentity"
 	"git.saveweb.org/saveweb/hq/internal/trackerclient"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
@@ -97,6 +99,7 @@ type serveConfig struct {
 	trackerURL            string
 	trackerIssuer         string
 	allowHTTPTracker      bool
+	allowHTTPSource       bool
 	machineTokenFile      string
 	identityFile          string
 	dataDir               string
@@ -148,8 +151,30 @@ func runServe(args []string, logger *slog.Logger) error {
 		logger.Info("local admin token rotated", "file", adminToken.FilePath)
 	}
 	basePath := strings.TrimSuffix(parsedEndpoint.Path, "/")
+	loaderConfig := sourceloader.DefaultConfig()
+	loaderConfig.AllowHTTP = config.allowHTTPSource
+	sourceLoader, err := sourceloader.New(loaderConfig)
+	if err != nil {
+		return err
+	}
+	var trackerControl *trackerclient.Client
 	manager, err := shard.NewManager(shard.ManagerConfig{
 		AgentID: identity.AgentID, Issuer: config.trackerIssuer, DataDir: config.dataDir,
+		LoadSource: func(ctx context.Context, assignment protocol.OwnerAssignment, store queue.Store) error {
+			_, err := sourceLoader.Load(ctx, assignment, store)
+			return err
+		},
+		ReportSource: func(ctx context.Context, assignment protocol.OwnerAssignment, loadError error) error {
+			request := protocol.ShardLoadResultRequest{
+				Generation: assignment.Generation,
+				Success:    loadError == nil,
+			}
+			if loadError != nil {
+				request.ErrorCode = "source_load_failed"
+			}
+			_, err := trackerControl.ReportShardLoad(ctx, assignment.ProjectID, assignment.ShardID, request)
+			return err
+		},
 	})
 	if err != nil {
 		return err
@@ -215,6 +240,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		_ = adminServer.Close()
 		return err
 	}
+	trackerControl = tracker
 	var pin *string
 	if config.tlsSPKISHA256 != "" {
 		pin = &config.tlsSPKISHA256
@@ -289,6 +315,7 @@ func parseServeConfig(args []string) (serveConfig, error) {
 	flags.StringVar(&config.trackerURL, "tracker-url", os.Getenv("HQ_TRACKER_URL"), "tracker API base URL")
 	flags.StringVar(&config.trackerIssuer, "tracker-issuer", os.Getenv("HQ_TRACKER_ISSUER"), "expected access-token issuer")
 	flags.BoolVar(&config.allowHTTPTracker, "allow-http-tracker", false, "allow an HTTP tracker for local testing")
+	flags.BoolVar(&config.allowHTTPSource, "allow-http-object-download", false, "allow HTTP object downloads for local testing")
 	flags.StringVar(&config.machineTokenFile, "machine-token-file", os.Getenv("HQ_MACHINE_TOKEN_FILE"), "0600 machine token file")
 	flags.StringVar(&config.identityFile, "identity-file", os.Getenv("HQ_SHARD_IDENTITY_FILE"), "0600 shard identity file")
 	flags.StringVar(&config.dataDir, "data-dir", envOr("HQ_SHARD_DATA_DIR", "./shard-data"), "local SQLite state directory")

@@ -13,6 +13,8 @@ type Store interface {
 	HeartbeatSession(ctx context.Context, userID, agentID, sessionID string,
 		now, leaseExpiresAt int64) (Session, error)
 	FindAssignment(ctx context.Context, userID, agentID, sessionID string, now int64) (*AssignmentCandidate, error)
+	FinishShardLoad(ctx context.Context, userID, agentID, projectID, shardID string,
+		generation int64, success bool, errorCode string, now int64) (Shard, error)
 }
 
 type EndpointChecker interface {

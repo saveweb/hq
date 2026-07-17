@@ -18,6 +18,7 @@ jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 
 tags:
   - name: agents
+  - name: shards
   - name: sessions
   - name: queue
   - name: health
@@ -172,6 +173,35 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /api/v1/shards/{project_id}/{shard_id}/load-result:
+    parameters:
+      - $ref: '#/components/parameters/ProjectID'
+      - $ref: '#/components/parameters/ShardID'
+      - $ref: '#/components/parameters/AgentIDHeader'
+    post:
+      tags: [shards]
+      operationId: reportShardLoadResult
+      summary: Atomically finish source loading for the current owner generation
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShardLoadResultRequest'
+      responses:
+        '200':
+          description: The shard became active or was marked load_failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShardLoadResultResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
 
   /api/v1/shard/endpoint-challenge:
@@ -341,6 +371,16 @@ components:
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
+    ProjectID:
+      name: project_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    ShardID:
+      name: shard_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
 
   headers:
     NoStore:
@@ -492,7 +532,7 @@ components:
     OwnerAssignment:
       type: object
       additionalProperties: false
-      required: [project_id, shard_id, generation, status, owner_lease_expires_at, source_uri, source_format, source_etag]
+      required: [project_id, shard_id, generation, status, owner_lease_expires_at, source_uri, source_format, source_etag, source_download_url, source_url_expires_at]
       properties:
         project_id: {$ref: '#/components/schemas/Identifier'}
         shard_id: {$ref: '#/components/schemas/Identifier'}
@@ -504,6 +544,11 @@ components:
         source_uri: {type: [string, 'null'], maxLength: 4096}
         source_format: {type: [string, 'null'], enum: [jobs-jsonl-zstd-v1, null]}
         source_etag: {type: [string, 'null'], maxLength: 512}
+        source_download_url:
+          type: [string, 'null']
+          maxLength: 8192
+          description: Short-lived exact-object GET URL; never log or persist it.
+        source_url_expires_at: {type: [integer, 'null'], format: int64, minimum: 0}
 
     AgentHeartbeatResponse:
       type: object
@@ -520,6 +565,28 @@ components:
           type: array
           maxItems: 8
           items: {$ref: '#/components/schemas/SigningKey'}
+
+    ShardLoadResultRequest:
+      type: object
+      additionalProperties: false
+      required: [generation, success, error_code]
+      properties:
+        generation: {type: integer, format: int64, minimum: 1}
+        success: {type: boolean}
+        error_code:
+          type: string
+          maxLength: 64
+          description: Empty on success; a stable machine-readable code on failure.
+
+    ShardLoadResultResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, shard_id, generation, status]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        shard_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [active, load_failed]}
 
     CreateSessionRequest:
       type: object

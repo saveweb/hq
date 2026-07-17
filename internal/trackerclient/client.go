@@ -76,6 +76,18 @@ func (c *Client) HeartbeatAgent(ctx context.Context, request protocol.AgentHeart
 	return result, err
 }
 
+func (c *Client) ReportShardLoad(
+	ctx context.Context,
+	projectID, shardID string,
+	request protocol.ShardLoadResultRequest,
+) (protocol.ShardLoadResultResponse, error) {
+	var result protocol.ShardLoadResultResponse
+	err := c.doJSON(ctx, http.MethodPost,
+		"/api/v1/shards/"+url.PathEscape(projectID)+"/"+url.PathEscape(shardID)+"/load-result",
+		request, &result)
+	return result, err
+}
+
 func (c *Client) CreateSession(ctx context.Context, request protocol.CreateSessionRequest) (protocol.SessionResponse, error) {
 	var result protocol.SessionResponse
 	err := c.doJSON(ctx, http.MethodPost, "/api/v1/worker/sessions", request, &result)

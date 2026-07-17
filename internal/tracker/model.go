@@ -27,6 +27,7 @@ const (
 	ShardStatusPaused     = "paused"
 	ShardStatusOffline    = "offline"
 	ShardStatusRecovering = "recovering"
+	ShardStatusLoadFailed = "load_failed"
 
 	EndpointNotApplicable = "not_applicable"
 	EndpointUnchecked     = "unchecked"

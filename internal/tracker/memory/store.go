@@ -268,6 +268,41 @@ func (s *Store) FindAssignment(
 	return nil, nil
 }
 
+func (s *Store) FinishShardLoad(
+	_ context.Context,
+	userID, agentID, projectID, shardID string,
+	generation int64,
+	success bool,
+	_ string,
+	now int64,
+) (tracker.Shard, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := shardKey(projectID, shardID)
+	value, ok := s.shards[key]
+	agent, agentOK := s.agents[agentID]
+	user := s.users[userID]
+	if !ok || !agentOK || agent.UserID != userID || value.OwnerAgentID != agentID ||
+		value.Generation != generation || value.OwnerLeaseExpiresAt <= now ||
+		value.SourceURI == nil || value.SourceFormat == nil || *value.SourceFormat != "jobs-jsonl-zstd-v1" ||
+		value.SourceETag == nil || agent.Status != "online" ||
+		(value.Status != tracker.ShardStatusLoading && value.Status != tracker.ShardStatusRecovering) ||
+		user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleShardOwner) {
+		return tracker.Shard{}, &tracker.Error{
+			Code:    protocol.ErrorStaleGeneration,
+			Message: "source load no longer belongs to this owner generation",
+		}
+	}
+	if success {
+		value.Status = tracker.ShardStatusActive
+	} else {
+		value.Status = tracker.ShardStatusLoadFailed
+		value.OwnerLeaseExpiresAt = 0
+	}
+	s.shards[key] = value
+	return cloneShard(value), nil
+}
+
 func newID(prefix string) (string, error) {
 	var value [18]byte
 	if _, err := rand.Read(value[:]); err != nil {

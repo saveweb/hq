@@ -16,6 +16,7 @@ explicit behavior over implicit automation.
 api/                 OpenAPI contract and cross-language conformance vectors
 cmd/tracker/         Go tracker process
 cmd/shard/           Go shard process
+cmd/source/          Immutable source packer
 internal/            Go implementation packages
 pkg/protocol/        Shared public Go protocol types
 sdk/worker/          Go worker SDK
@@ -42,8 +43,10 @@ Docker container:
 make test-postgres
 ```
 
-The cross-process E2E test also needs Docker. It starts PostgreSQL, tracker,
-and a pinned-HTTPS shard, then runs both worker SDKs and a generation takeover:
+The cross-process E2E test also needs Docker. It starts PostgreSQL and an
+S3-compatible MinIO test server, then exercises tracker, a pinned-HTTPS shard,
+both worker SDKs, generation takeover, and source loading through a presigned
+exact-object URL:
 
 ```bash
 make test-e2e
@@ -75,6 +78,21 @@ go run ./cmd/tracker serve \
   --github-client-id "$HQ_GITHUB_CLIENT_ID" \
   --github-client-secret-file ./github-client.secret \
   --web-session-secret-file ./tracker-web.secret
+```
+
+Cloudflare R2 uses its S3 endpoint, region `auto`, and private credential
+files. Credentials remain in the trusted tracker; a shard receives only a
+short-lived URL for its exact source object:
+
+```bash
+go run ./cmd/tracker serve \
+  --database-url "$HQ_DATABASE_URL" \
+  --public-url https://tracker.example \
+  --signing-key-file ./tracker-key.json \
+  --s3-endpoint https://ACCOUNT_ID.r2.cloudflarestorage.com \
+  --s3-region auto \
+  --s3-access-key-id-file ./r2-access-key \
+  --s3-secret-access-key-file ./r2-secret-key
 ```
 
 The GitHub OAuth callback is
@@ -111,10 +129,29 @@ go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
   --project-id project-1 --shard-id shard-1 --owner-agent-id sh_xxx
 ```
 
+To activate a manually pre-split `jobs.txt`, pack it locally, upload the
+result to a private R2 bucket, and register its immutable URI and ETag. The
+packer generates stable job IDs and refuses to overwrite its output:
+
+```bash
+go run ./cmd/source pack --input jobs.txt --output jobs.jobs.jsonl.zst
+
+go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
+  --project-id project-1 --shard-id shard-2 --owner-agent-id sh_xxx \
+  --generation 1 --status loading \
+  --source-uri s3://saveweb-sources/project-1/shard-2.jobs.jsonl.zst \
+  --source-format jobs-jsonl-zstd-v1 --source-etag ETAG_FROM_R2
+```
+
+The shard streams Zstd decoding into its fenced SQLite queue. URI, ETag, and
+generation form the idempotency identity, so rotating the presigned URL does
+not re-import the source. A successful generation-CAS changes the shard to
+`active`; failure uses the distinct `load_failed` status.
+
 ## Shard commands
 
-Initialization creates a stable agent ID and a random local-admin token in one
-private identity file:
+Initialization creates a private identity file containing only the stable
+agent ID:
 
 ```bash
 go run ./cmd/shard init --out ./shard-identity.json

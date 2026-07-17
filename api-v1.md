@@ -176,7 +176,7 @@ id = "j1_" + lowercase_hex(
 
 - `type`、`url` 和规范化后的 `attr` 都相同：视为幂等重复，保留第一次写入的 `via` 和 `hops`；
 - 任一身份输入不同：返回 `identity_conflict`，不能静默覆盖旧 job；
-- source loader 遇到 conflict 时进入 `load_failed` 并记录行号；同 shard derived job conflict 只拒绝对应 completion item，父 job 保持 `wip`。
+- source loader 遇到 conflict 时进入 `load_failed`；同 shard derived job conflict 只拒绝对应 completion item，父 job 保持 `wip`。
 
 数据库中的完整身份仍是 `(project_id, shard_id, id)`，但保留同一个 `id` 可以支持 receiver 合并后跨 shard 去重。
 
@@ -194,10 +194,10 @@ id = "j1_" + lowercase_hex(
 为保留简单的 `jobs.txt` 工作流，工具提供：
 
 ```text
-saveweb-source pack jobs.txt jobs.jobs.jsonl.zst
+source pack --input jobs.txt --output jobs.jobs.jsonl.zst
 ```
 
-输入的每个非空文本行作为一个 `seed` URL，工具生成默认 ID。手动 split 可以发生在 pack 前，也可以由同一工具按目标记录数执行。
+输入的每个非空文本行作为一个 `seed` URL，工具生成默认 ID。需要多个 shard 时先手动 split，再分别 pack 和上传。
 
 ## 4. Session API
 

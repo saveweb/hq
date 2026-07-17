@@ -3,7 +3,8 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 run_dir=$(mktemp -d)
-container="saveweb-hq-e2e-$$"
+postgres_container="saveweb-hq-e2e-pg-$$"
+minio_container="saveweb-hq-e2e-s3-$$"
 tracker_pid=""
 shard_pid=""
 
@@ -18,7 +19,7 @@ cleanup() {
     kill -TERM "${tracker_pid}" >/dev/null 2>&1 || true
     wait "${tracker_pid}" >/dev/null 2>&1 || true
   fi
-  docker rm -f "${container}" >/dev/null 2>&1 || true
+  docker rm -f "${postgres_container}" "${minio_container}" >/dev/null 2>&1 || true
   if [ "${status}" -ne 0 ]; then
     for log in tracker shard takeover; do
       if [ -s "${run_dir}/${log}.log" ]; then
@@ -80,10 +81,11 @@ done
 printf 'Building E2E binaries...\n'
 go build -o "${run_dir}/tracker" ./cmd/tracker
 go build -o "${run_dir}/shard" ./cmd/shard
+go build -o "${run_dir}/source" ./cmd/source
 go build -o "${run_dir}/queue-tool" ./e2e/cmd/queue-tool
 go build -o "${run_dir}/go-worker" ./e2e/cmd/go-worker
 
-docker run --rm -d --name "${container}" \
+docker run --rm -d --name "${postgres_container}" \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=saveweb_hq_e2e \
   -p 127.0.0.1::5432 \
@@ -91,7 +93,7 @@ docker run --rm -d --name "${container}" \
 
 ready=0
 for _ in $(seq 1 300); do
-  ready_count=$(docker logs "${container}" 2>&1 | grep -c 'database system is ready to accept connections' || true)
+  ready_count=$(docker logs "${postgres_container}" 2>&1 | grep -c 'database system is ready to accept connections' || true)
   if [ "${ready_count}" -ge 2 ]; then
     ready=1
     break
@@ -99,12 +101,25 @@ for _ in $(seq 1 300); do
   sleep 0.1
 done
 if [ "${ready}" -ne 1 ]; then
-  docker logs "${container}" >&2
+  docker logs "${postgres_container}" >&2
   exit 1
 fi
 
-pg_port=$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')
+pg_port=$(docker port "${postgres_container}" 5432/tcp | sed -n 's/.*://p')
 database_url="postgres://postgres:test@127.0.0.1:${pg_port}/saveweb_hq_e2e?sslmode=disable"
+
+minio_access_key="saveweb-e2e-access"
+minio_secret_key="saveweb-e2e-secret-0123456789"
+docker run --rm -d --name "${minio_container}" \
+  -e "MINIO_ROOT_USER=${minio_access_key}" \
+  -e "MINIO_ROOT_PASSWORD=${minio_secret_key}" \
+  -p 127.0.0.1::9000 \
+  quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z \
+  server /data --address :9000 >/dev/null
+minio_port=$(docker port "${minio_container}" 9000/tcp | sed -n 's/.*://p')
+minio_url="http://127.0.0.1:${minio_port}"
+wait_url "${minio_url}/minio/health/ready"
+
 tracker_port=$(choose_port)
 shard_port=$(choose_port)
 admin_port=$(choose_port)
@@ -114,6 +129,17 @@ shard_url="https://127.0.0.1:${shard_port}"
 umask 077
 printf '%s\n' 'e2e-owner-token-0123456789abcdef0123456789abcdef' >"${run_dir}/owner.token"
 printf '%s\n' 'e2e-worker-token-0123456789abcdef0123456789abcdef' >"${run_dir}/worker.token"
+printf '%s\n' "${minio_access_key}" >"${run_dir}/s3-access-key"
+printf '%s\n' "${minio_secret_key}" >"${run_dir}/s3-secret-key"
+printf '%s\n' 'https://source.example/a' 'https://source.example/b' >"${run_dir}/source-jobs.txt"
+"${run_dir}/source" pack --input "${run_dir}/source-jobs.txt" --output "${run_dir}/source.jobs.jsonl.zst"
+mc_host="${minio_url/http:\/\//http:\/\/${minio_access_key}:${minio_secret_key}@}"
+docker run --rm --network host -e "MC_HOST_hq=${mc_host}" \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z mb --ignore-existing hq/source
+docker run --rm --network host -e "MC_HOST_hq=${mc_host}" -v "${run_dir}:/work:ro" \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
+  cp /work/source.jobs.jsonl.zst hq/source/source.jobs.jsonl.zst
+source_etag=$(md5sum "${run_dir}/source.jobs.jsonl.zst" | awk '{print $1}')
 "${run_dir}/tracker" keygen --out "${run_dir}/signing.key" --key-id e2e-key
 "${run_dir}/tracker" migrate --database-url "${database_url}"
 "${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id owner-e2e \
@@ -129,7 +155,10 @@ tls_pin=$("${run_dir}/shard" tls-init --key-out "${run_dir}/shard.key" \
   --database-url "${database_url}" --public-url "${tracker_url}" \
   --signing-key-file "${run_dir}/signing.key" --allow-insecure-public-url \
   --allow-private-shard-endpoints --agent-heartbeat-seconds 1 --owner-lease-seconds 30 \
-  --session-heartbeat-seconds 1 --session-lease-seconds 30 >"${run_dir}/tracker.log" 2>&1 &
+  --session-heartbeat-seconds 1 --session-lease-seconds 30 \
+  --s3-endpoint "${minio_url}" --s3-region us-east-1 --s3-path-style --allow-http-s3 \
+  --s3-access-key-id-file "${run_dir}/s3-access-key" \
+  --s3-secret-access-key-file "${run_dir}/s3-secret-key" >"${run_dir}/tracker.log" 2>&1 &
 tracker_pid=$!
 wait_url "${tracker_url}/healthz"
 
@@ -137,6 +166,7 @@ start_shard() {
   "${run_dir}/shard" serve --listen "127.0.0.1:${shard_port}" \
     --admin-listen "127.0.0.1:${admin_port}" \
     --tracker-url "${tracker_url}" --tracker-issuer "${tracker_url}" --allow-http-tracker \
+    --allow-http-object-download \
     --machine-token-file "${run_dir}/owner.token" --identity-file "${run_dir}/shard.identity" \
     --data-dir "${run_dir}/shard-data" --endpoint "${shard_url}" --endpoint-version 1 \
     --tls-spki-sha256 "${tls_pin}" --tls-cert-file "${run_dir}/shard.pem" \
@@ -183,7 +213,19 @@ wait "${takeover_pid}"
 "${run_dir}/go-worker" --phase recover --tracker-url "${tracker_url}" \
   --machine-token-file "${run_dir}/worker.token"
 
+printf 'Loading an immutable S3-compatible source through a presigned URL...\n'
+"${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-source-e2e
+"${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-source-e2e \
+  --shard-id shard-source-e2e --owner-agent-id "${shard_id}" --generation 1 --status loading \
+  --source-uri s3://source/source.jobs.jsonl.zst --source-format jobs-jsonl-zstd-v1 \
+  --source-etag "${source_etag}"
+sleep 3
+"${run_dir}/go-worker" --phase source --project-id project-source-e2e --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token"
+
 stop_shard
 "${run_dir}/queue-tool" --mode check --data-dir "${run_dir}/shard-data" \
   --project-id project-e2e --shard-id shard-e2e --generation 2
+"${run_dir}/queue-tool" --mode check-source --data-dir "${run_dir}/shard-data" \
+  --project-id project-source-e2e --shard-id shard-source-e2e --generation 1
 printf 'SavewebHQ cross-process E2E passed.\n'
