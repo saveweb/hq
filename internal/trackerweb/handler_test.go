@@ -15,6 +15,7 @@ import (
 	"github.com/labstack/echo/v5"
 
 	"git.saveweb.org/saveweb/hq/internal/tracker"
+	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
 const webTestNow = int64(1_780_000_000)
@@ -51,6 +52,9 @@ type fakeStore struct {
 	sessions     map[string]string
 	machineToken string
 	updatedUser  string
+	putProject   tracker.Project
+	putShard     tracker.Shard
+	putReceiver  tracker.Receiver
 }
 
 func newFakeStore() *fakeStore {
@@ -108,6 +112,53 @@ func (s *fakeStore) UpdateUserAccess(_ context.Context, _, target, _ string, _ m
 	return nil
 }
 
+func (s *fakeStore) ListProjects(context.Context) ([]tracker.Project, error) {
+	return []tracker.Project{{ID: "project-1", Status: tracker.ProjectStatusActive}}, nil
+}
+
+func (s *fakeStore) ListAdminShards(context.Context) ([]tracker.AdminShard, error) {
+	return []tracker.AdminShard{{Shard: tracker.Shard{
+		ProjectID: "project-1", ID: "shard-1", Status: tracker.ShardStatusActive,
+		OwnerAgentID: "shard-agent-1", Generation: 3, OwnerLeaseExpiresAt: webTestNow + 120,
+	}}}, nil
+}
+
+func (s *fakeStore) ListReceivers(context.Context) ([]tracker.Receiver, error) {
+	return []tracker.Receiver{{
+		ProjectID: "project-1", ID: "receiver-1", Status: tracker.ReceiverStatusActive,
+		SinkURI: "s3://receiver/stage-1", Format: "jobs-jsonl-zstd-v1",
+	}}, nil
+}
+
+func (s *fakeStore) ListShardAgents(context.Context) ([]tracker.Agent, error) {
+	return []tracker.Agent{{
+		ID: "shard-agent-1", Kind: protocol.AgentKindShard, Name: "Shard",
+		Status: "online", EndpointStatus: tracker.EndpointHealthy,
+	}}, nil
+}
+
+func (s *fakeStore) ListAuditEvents(context.Context, int) ([]tracker.AuditEvent, error) {
+	return []tracker.AuditEvent{{
+		ID: 1, ActorID: "admin", Action: "project.put", TargetID: "project-1",
+		Reason: "created", CreatedAt: webTestNow,
+	}}, nil
+}
+
+func (s *fakeStore) AdminPutProject(_ context.Context, _ string, project tracker.Project, _ string, _ int64) error {
+	s.putProject = project
+	return nil
+}
+
+func (s *fakeStore) AdminPutShard(_ context.Context, _ string, shard tracker.Shard, _ string, _ int64) error {
+	s.putShard = shard
+	return nil
+}
+
+func (s *fakeStore) AdminPutReceiver(_ context.Context, _ string, receiver tracker.Receiver, _ string, _ int64) error {
+	s.putReceiver = receiver
+	return nil
+}
+
 func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 	store, oauth := newFakeStore(), &fakeOAuth{}
 	handler, err := New(store, oauth, Config{
@@ -162,6 +213,82 @@ func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 	update := perform(server, http.MethodPost, "/admin/users/target/access", updateForm, sessionCookie, "http://tracker.test")
 	if update.Code != http.StatusSeeOther || store.updatedUser != "target" {
 		t.Fatalf("update = %d target=%q", update.Code, store.updatedUser)
+	}
+
+	projects := perform(server, http.MethodGet, "/admin/projects", "", sessionCookie, "")
+	if projects.Code != http.StatusOK || !strings.Contains(projects.Body.String(), "Project administration") ||
+		!strings.Contains(projects.Body.String(), "project-1/shard-1") ||
+		!strings.Contains(projects.Body.String(), "s3://receiver/stage-1") {
+		t.Fatalf("projects = %d %q", projects.Code, projects.Body.String())
+	}
+	projectForm := url.Values{
+		"csrf": {csrfMatch[1]}, "project_id": {"project-2"}, "status": {"active"},
+		"reason": {"new archive project"},
+	}.Encode()
+	projectUpdate := perform(server, http.MethodPost, "/admin/projects", projectForm, sessionCookie, "http://tracker.test")
+	if projectUpdate.Code != http.StatusSeeOther || store.putProject.ID != "project-2" {
+		t.Fatalf("project update = %d %+v", projectUpdate.Code, store.putProject)
+	}
+	shardForm := url.Values{
+		"csrf": {csrfMatch[1]}, "project_id": {"project-2"}, "shard_id": {"shard-2"},
+		"owner_agent_id": {"shard-agent-1"}, "status": {"loading"}, "generation": {"1"},
+		"source_uri":    {"s3://sources/shard-2.jobs.jsonl.zst"},
+		"source_format": {"jobs-jsonl-zstd-v1"}, "source_etag": {"etag-2"},
+		"reason": {"attach immutable source"},
+	}.Encode()
+	shardUpdate := perform(server, http.MethodPost, "/admin/shards", shardForm, sessionCookie, "http://tracker.test")
+	if shardUpdate.Code != http.StatusSeeOther || store.putShard.ID != "shard-2" ||
+		store.putShard.SourceURI == nil || *store.putShard.SourceURI != "s3://sources/shard-2.jobs.jsonl.zst" {
+		t.Fatalf("shard update = %d %+v", shardUpdate.Code, store.putShard)
+	}
+	unsafeShardForm := url.Values{
+		"csrf": {csrfMatch[1]}, "project_id": {"project-2"}, "shard_id": {"shard-2"},
+		"owner_agent_id": {"shard-agent-1"}, "status": {"active"}, "generation": {"2"},
+		"reason": {"unsafe state edit"},
+	}.Encode()
+	unsafeShard := perform(server, http.MethodPost, "/admin/shards", unsafeShardForm, sessionCookie, "http://tracker.test")
+	if unsafeShard.Code != http.StatusBadRequest || store.putShard.Generation != 1 {
+		t.Fatalf("unsafe shard update = %d %+v", unsafeShard.Code, store.putShard)
+	}
+	receiverForm := url.Values{
+		"csrf": {csrfMatch[1]}, "project_id": {"project-2"}, "receiver_id": {"stage-output"},
+		"status": {"active"}, "sink_uri": {"s3://receiver/project-2/stage-output/"},
+		"reason": {"collect next-stage jobs"},
+	}.Encode()
+	receiverUpdate := perform(server, http.MethodPost, "/admin/receivers", receiverForm, sessionCookie, "http://tracker.test")
+	if receiverUpdate.Code != http.StatusSeeOther || store.putReceiver.ID != "stage-output" ||
+		store.putReceiver.SinkURI != "s3://receiver/project-2/stage-output" {
+		t.Fatalf("receiver update = %d %+v", receiverUpdate.Code, store.putReceiver)
+	}
+}
+
+func TestProjectAdministrationRequiresActiveAdmin(t *testing.T) {
+	store := newFakeStore()
+	store.user.Roles = map[string]bool{tracker.RoleWorker: true}
+	handler, err := New(store, nil, Config{
+		PublicURL: "http://tracker.test", Secret: []byte("0123456789abcdef0123456789abcdef"),
+		Clock: func() int64 { return webTestNow },
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := echo.New()
+	handler.Register(server)
+	sessionToken := strings.Repeat("a", 43)
+	store.sessions[base64.RawURLEncoding.EncodeToString(sessionHash(sessionToken))] = store.user.ID
+	cookie := &http.Cookie{Name: sessionCookieName, Value: sessionToken}
+
+	response := perform(server, http.MethodGet, "/admin/projects", "", cookie, "")
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "Administrator role required") {
+		t.Fatalf("non-admin project page = %d %q", response.Code, response.Body.String())
+	}
+	csrf := handler.csrfToken(sessionToken)
+	form := url.Values{
+		"csrf": {csrf}, "project_id": {"forbidden"}, "status": {"active"}, "reason": {"no access"},
+	}.Encode()
+	response = perform(server, http.MethodPost, "/admin/projects", form, cookie, "http://tracker.test")
+	if response.Code != http.StatusForbidden || store.putProject.ID != "" {
+		t.Fatalf("non-admin project command = %d %+v", response.Code, store.putProject)
 	}
 }
 

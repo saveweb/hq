@@ -41,6 +41,14 @@ type Store interface {
 	ListUserAgents(context.Context, string) ([]tracker.Agent, error)
 	ListUsers(context.Context) ([]tracker.User, error)
 	UpdateUserAccess(context.Context, string, string, string, map[string]bool, string, int64) error
+	ListProjects(context.Context) ([]tracker.Project, error)
+	ListAdminShards(context.Context) ([]tracker.AdminShard, error)
+	ListReceivers(context.Context) ([]tracker.Receiver, error)
+	ListShardAgents(context.Context) ([]tracker.Agent, error)
+	ListAuditEvents(context.Context, int) ([]tracker.AuditEvent, error)
+	AdminPutProject(context.Context, string, tracker.Project, string, int64) error
+	AdminPutShard(context.Context, string, tracker.Shard, string, int64) error
+	AdminPutReceiver(context.Context, string, tracker.Receiver, string, int64) error
 }
 
 type OAuth interface {
@@ -104,6 +112,10 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.POST("/logout", h.logout)
 	server.GET("/admin/users", h.adminUsers)
 	server.POST("/admin/users/:user_id/access", h.updateUserAccess)
+	server.GET("/admin/projects", h.adminProjects)
+	server.POST("/admin/projects", h.putProject)
+	server.POST("/admin/shards", h.putShard)
+	server.POST("/admin/receivers", h.putReceiver)
 }
 
 func (h *Handler) landing(ctx *echo.Context) error {
@@ -260,12 +272,9 @@ func (h *Handler) adminUsers(ctx *echo.Context) error {
 
 func (h *Handler) updateUserAccess(ctx *echo.Context) error {
 	h.webHeaders(ctx.Response().Header())
-	actor, _, ok := h.authorizePost(ctx)
+	actor, ok := h.authorizeAdminPost(ctx)
 	if !ok {
 		return nil
-	}
-	if actor.Status != tracker.UserStatusActive || !actor.HasRole(tracker.RoleAdmin) {
-		return h.pageError(ctx, http.StatusForbidden, "Administrator role required")
 	}
 	roles := map[string]bool{
 		tracker.RoleAdmin:      ctx.FormValue("role_admin") == "on",
@@ -279,6 +288,116 @@ func (h *Handler) updateUserAccess(ctx *echo.Context) error {
 		return h.pageError(ctx, http.StatusBadRequest, "User access update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/users")
+}
+
+func (h *Handler) adminProjects(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, sessionToken, err := h.currentUser(ctx)
+	if err != nil {
+		return ctx.Redirect(http.StatusSeeOther, "/")
+	}
+	if user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleAdmin) {
+		return h.pageError(ctx, http.StatusForbidden, "Administrator role required")
+	}
+	projects, err := h.store.ListProjects(ctx.Request().Context())
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	shards, err := h.store.ListAdminShards(ctx.Request().Context())
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	receivers, err := h.store.ListReceivers(ctx.Request().Context())
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	agents, err := h.store.ListShardAgents(ctx.Request().Context())
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	audit, err := h.store.ListAuditEvents(ctx.Request().Context(), 100)
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	return render(ctx, http.StatusOK, adminProjectsTemplate, map[string]any{
+		"Projects": projects, "Shards": shards, "Receivers": receivers,
+		"ShardAgents": agents, "Audit": audit, "CSRF": h.csrfToken(sessionToken),
+	})
+}
+
+func (h *Handler) putProject(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	actor, ok := h.authorizeAdminPost(ctx)
+	if !ok {
+		return nil
+	}
+	project := tracker.Project{ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status")}
+	if err := h.store.AdminPutProject(
+		ctx.Request().Context(), actor.ID, project, ctx.FormValue("reason"), h.clock(),
+	); err != nil {
+		h.logger.Warn("project admin command rejected", "actor", actor.ID, "project", project.ID, "error", err)
+		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects")
+}
+
+func (h *Handler) putShard(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	actor, ok := h.authorizeAdminPost(ctx)
+	if !ok {
+		return nil
+	}
+	generation, err := strconv.ParseInt(ctx.FormValue("generation"), 10, 64)
+	if err != nil || generation < 1 {
+		return h.pageError(ctx, http.StatusBadRequest, "Shard generation must be a positive integer")
+	}
+	status := ctx.FormValue("status")
+	if status != tracker.ShardStatusLoading && status != tracker.ShardStatusRecovering {
+		return h.pageError(ctx, http.StatusBadRequest, "Web shard commands only allow loading or recovering")
+	}
+	shard := tracker.Shard{
+		ProjectID: ctx.FormValue("project_id"), ID: ctx.FormValue("shard_id"),
+		OwnerAgentID: ctx.FormValue("owner_agent_id"), Status: status, Generation: generation,
+	}
+	sourceURI, sourceETag := ctx.FormValue("source_uri"), ctx.FormValue("source_etag")
+	if status == tracker.ShardStatusLoading {
+		sourceFormat := ctx.FormValue("source_format")
+		if sourceURI == "" || sourceETag == "" || sourceFormat != "jobs-jsonl-zstd-v1" {
+			return h.pageError(ctx, http.StatusBadRequest, "Loading requires an immutable source URI, format, and ETag")
+		}
+		shard.SourceURI, shard.SourceFormat, shard.SourceETag = &sourceURI, &sourceFormat, &sourceETag
+	} else if sourceURI != "" || sourceETag != "" || ctx.FormValue("source_format") != "" {
+		return h.pageError(ctx, http.StatusBadRequest, "Recovery uses the published checkpoint and cannot include source fields")
+	}
+	if err := h.store.AdminPutShard(
+		ctx.Request().Context(), actor.ID, shard, ctx.FormValue("reason"), h.clock(),
+	); err != nil {
+		h.logger.Warn("shard admin command rejected", "actor", actor.ID, "project", shard.ProjectID,
+			"shard", shard.ID, "generation", shard.Generation, "error", err)
+		return h.pageError(ctx, http.StatusBadRequest, "Shard attach or recovery was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects")
+}
+
+func (h *Handler) putReceiver(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	actor, ok := h.authorizeAdminPost(ctx)
+	if !ok {
+		return nil
+	}
+	receiver := tracker.Receiver{
+		ProjectID: ctx.FormValue("project_id"), ID: ctx.FormValue("receiver_id"),
+		Status: ctx.FormValue("status"), SinkURI: strings.TrimSuffix(ctx.FormValue("sink_uri"), "/"),
+		Format: "jobs-jsonl-zstd-v1",
+	}
+	if err := h.store.AdminPutReceiver(
+		ctx.Request().Context(), actor.ID, receiver, ctx.FormValue("reason"), h.clock(),
+	); err != nil {
+		h.logger.Warn("receiver admin command rejected", "actor", actor.ID, "project", receiver.ProjectID,
+			"receiver", receiver.ID, "error", err)
+		return h.pageError(ctx, http.StatusBadRequest, "Job Receiver update was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects")
 }
 
 func (h *Handler) currentUser(ctx *echo.Context) (tracker.User, string, error) {
@@ -314,6 +433,18 @@ func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) 
 		return tracker.User{}, "", false
 	}
 	return user, sessionToken, true
+}
+
+func (h *Handler) authorizeAdminPost(ctx *echo.Context) (tracker.User, bool) {
+	user, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return tracker.User{}, false
+	}
+	if user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleAdmin) {
+		_ = h.pageError(ctx, http.StatusForbidden, "Administrator role required")
+		return tracker.User{}, false
+	}
+	return user, true
 }
 
 func (h *Handler) csrfToken(sessionToken string) string {

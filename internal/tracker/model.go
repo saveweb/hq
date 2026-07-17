@@ -154,6 +154,22 @@ type Shard struct {
 	SourceETag          *string
 }
 
+// AdminShard contains read-only operational details shown in the tracker
+// administration page. Queue routing continues to use the smaller Shard
+// value above.
+type AdminShard struct {
+	Shard
+	LoadErrorCode             *string
+	RecoveryErrorCode         *string
+	CheckpointURI             *string
+	CheckpointSequence        int64
+	CheckpointGeneration      *int64
+	CheckpointSize            *int64
+	CheckpointAt              *int64
+	CheckpointUploadID        *string
+	CheckpointUploadStartedAt *int64
+}
+
 type CheckpointUpload struct {
 	ProjectID  string
 	ShardID    string

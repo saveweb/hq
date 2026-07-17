@@ -4,21 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
+	"git.saveweb.org/saveweb/hq/internal/objectstore"
 	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
 func (s *Store) PutReceiver(ctx context.Context, receiver tracker.Receiver, now int64) error {
+	return putReceiver(ctx, s.pool, receiver, now)
+}
+
+func putReceiver(ctx context.Context, db commandDB, receiver tracker.Receiver, now int64) error {
 	if !queue.ValidateIdentifier(receiver.ProjectID) || !queue.ValidateIdentifier(receiver.ID) ||
 		(receiver.Status != tracker.ReceiverStatusActive && receiver.Status != tracker.ReceiverStatusRemoved) ||
-		receiver.SinkURI == "" || receiver.Format != "jobs-jsonl-zstd-v1" {
+		receiver.SinkURI == "" || strings.HasSuffix(receiver.SinkURI, "/") ||
+		receiver.Format != "jobs-jsonl-zstd-v1" {
 		return fmt.Errorf("tracker postgres: invalid receiver")
 	}
-	command, err := s.pool.Exec(ctx, `
+	if _, err := objectstore.ParseURI(receiver.SinkURI + "/probe"); err != nil {
+		return fmt.Errorf("tracker postgres: invalid receiver sink URI: %w", err)
+	}
+	command, err := db.Exec(ctx, `
 		INSERT INTO tracker_receivers(project_id, id, status, sink_uri, format, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$6)
 		ON CONFLICT (project_id, id) DO UPDATE SET

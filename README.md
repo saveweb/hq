@@ -122,8 +122,12 @@ go run ./cmd/tracker bootstrap-user \
   --machine-token-file ./initial-admin.token
 ```
 
-Projects and pre-split shards are also explicit commands until the admin page
-is available:
+Active administrators can inspect and manage Projects, source-loading or
+checkpoint-recovering shards, Job Receivers, owner/generation/lease state,
+checkpoint pointers, and recent audit events at `/admin/projects`. Every web
+mutation requires a reason and is audited in the same PostgreSQL transaction.
+The equivalent explicit commands remain available for bootstrap and
+automation:
 
 ```bash
 go run ./cmd/tracker put-project --database-url "$HQ_DATABASE_URL" --project-id project-1

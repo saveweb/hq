@@ -14,8 +14,10 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"git.saveweb.org/saveweb/hq/internal/objectstore"
 	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
@@ -28,6 +30,11 @@ var _ tracker.Store = (*Store)(nil)
 
 type Store struct {
 	pool *pgxpool.Pool
+}
+
+type commandDB interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
@@ -146,11 +153,15 @@ func (s *Store) PutUserAndToken(ctx context.Context, user tracker.User, machineT
 }
 
 func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int64) error {
+	return putProject(ctx, s.pool, project, now)
+}
+
+func putProject(ctx context.Context, db commandDB, project tracker.Project, now int64) error {
 	if !queue.ValidateIdentifier(project.ID) ||
 		(project.Status != tracker.ProjectStatusActive && project.Status != tracker.ProjectStatusDraining && project.Status != tracker.ProjectStatusArchived) {
 		return fmt.Errorf("tracker postgres: invalid project")
 	}
-	_, err := s.pool.Exec(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO tracker_projects(id, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $3)
 		ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, updated_at = EXCLUDED.updated_at
@@ -159,8 +170,12 @@ func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int
 }
 
 func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) error {
+	return putShard(ctx, s.pool, shard, now)
+}
+
+func putShard(ctx context.Context, db commandDB, shard tracker.Shard, now int64) error {
 	if !queue.ValidateIdentifier(shard.ProjectID) || !queue.ValidateIdentifier(shard.ID) ||
-		!queue.ValidateIdentifier(shard.OwnerAgentID) || shard.Generation < 1 {
+		!queue.ValidateIdentifier(shard.OwnerAgentID) || shard.Generation < 1 || !validShardStatus(shard.Status) {
 		return fmt.Errorf("tracker postgres: invalid shard")
 	}
 	if (shard.SourceURI == nil) != (shard.SourceFormat == nil) ||
@@ -171,8 +186,26 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 		(shard.Status == tracker.ShardStatusLoading && shard.SourceURI == nil) {
 		return fmt.Errorf("tracker postgres: invalid shard source metadata")
 	}
+	if shard.SourceURI != nil {
+		if _, err := objectstore.ParseURI(*shard.SourceURI); err != nil {
+			return fmt.Errorf("tracker postgres: invalid shard source URI: %w", err)
+		}
+	}
+	var ownerKind, ownerStatus, ownerUserStatus string
+	var ownerHasRole bool
+	if err := db.QueryRow(ctx, `
+		SELECT a.kind, a.status, u.status, 'shard_owner'=ANY(u.roles)
+		FROM tracker_agents a JOIN tracker_users u ON u.id=a.user_id
+		WHERE a.id=$1
+	`, shard.OwnerAgentID).Scan(&ownerKind, &ownerStatus, &ownerUserStatus, &ownerHasRole); err != nil {
+		return fmt.Errorf("tracker postgres: find shard owner: %w", err)
+	}
+	if ownerKind != protocol.AgentKindShard || ownerStatus == "revoked" ||
+		ownerUserStatus != tracker.UserStatusActive || !ownerHasRole {
+		return fmt.Errorf("tracker postgres: owner agent is not an available shard")
+	}
 	if shard.Status == tracker.ShardStatusRecovering {
-		result, err := s.pool.Exec(ctx, `
+		result, err := db.Exec(ctx, `
 			UPDATE tracker_shards SET
 				status='recovering', owner_agent_id=$3, generation=$4,
 				owner_lease_expires_at=$5,
@@ -198,7 +231,7 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 		}
 		return nil
 	}
-	result, err := s.pool.Exec(ctx, `
+	result, err := db.Exec(ctx, `
 		INSERT INTO tracker_shards(
 			project_id, id, status, owner_agent_id, generation, owner_lease_expires_at,
 			source_uri, source_format, source_etag, load_error_code, created_at, updated_at
@@ -236,6 +269,17 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 		}
 	}
 	return nil
+}
+
+func validShardStatus(status string) bool {
+	switch status {
+	case tracker.ShardStatusLoading, tracker.ShardStatusActive, tracker.ShardStatusDraining,
+		tracker.ShardStatusPaused, tracker.ShardStatusOffline, tracker.ShardStatusRecovering,
+		tracker.ShardStatusLoadFailed, tracker.ShardStatusRecoveryFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func tokenDigest(token string) []byte {

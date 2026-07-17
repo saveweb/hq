@@ -274,4 +274,103 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	if err != nil || machineUser.ID != newUser.ID || !machineUser.HasRole(tracker.RoleWorker) {
 		t.Fatalf("machine user = %+v, %v", machineUser, err)
 	}
+
+	if err := store.AdminPutProject(ctx, "worker", tracker.Project{
+		ID: "project-admin-denied", Status: tracker.ProjectStatusActive,
+	}, "worker must not administer projects", integrationNow+4); err == nil {
+		t.Fatal("non-admin project command unexpectedly succeeded")
+	}
+	if err := store.AdminPutProject(ctx, "admin", tracker.Project{
+		ID: "project-admin", Status: tracker.ProjectStatusActive,
+	}, "create from project administration", integrationNow+4); err != nil {
+		t.Fatal(err)
+	}
+	adminSourceURI := "s3://sources/project-admin/shard-admin.jobs.jsonl.zst"
+	adminSourceFormat := "jobs-jsonl-zstd-v1"
+	adminSourceETag := "admin-source-etag"
+	if err := store.AdminPutShard(ctx, "admin", tracker.Shard{
+		ProjectID: "project-admin", ID: "shard-admin", Status: tracker.ShardStatusLoading,
+		OwnerAgentID: "worker-1", Generation: 1,
+		SourceURI: &adminSourceURI, SourceFormat: &adminSourceFormat, SourceETag: &adminSourceETag,
+	}, "worker agent must not own shard", integrationNow+5); err == nil {
+		t.Fatal("worker agent unexpectedly accepted as shard owner")
+	}
+	if err := store.AdminPutShard(ctx, "admin", tracker.Shard{
+		ProjectID: "project-admin", ID: "shard-admin", Status: tracker.ShardStatusLoading,
+		OwnerAgentID: "shard-1", Generation: 1,
+		SourceURI: &adminSourceURI, SourceFormat: &adminSourceFormat, SourceETag: &adminSourceETag,
+	}, "attach immutable source", integrationNow+5); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdminPutReceiver(ctx, "admin", tracker.Receiver{
+		ProjectID: "project-admin", ID: "stage-output", Status: tracker.ReceiverStatusActive,
+		SinkURI: "s3://receiver-output/project-admin/stage-output", Format: "jobs-jsonl-zstd-v1",
+	}, "collect next-stage jobs", integrationNow+6); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil || !hasProject(projects, "project-admin") {
+		t.Fatalf("admin projects = %+v, %v", projects, err)
+	}
+	adminShards, err := store.ListAdminShards(ctx)
+	if err != nil || !hasAdminShard(adminShards, "project-admin", "shard-admin") {
+		t.Fatalf("admin shards = %+v, %v", adminShards, err)
+	}
+	receivers, err := store.ListReceivers(ctx)
+	if err != nil || !hasReceiver(receivers, "project-admin", "stage-output") {
+		t.Fatalf("admin receivers = %+v, %v", receivers, err)
+	}
+	shardAgents, err := store.ListShardAgents(ctx)
+	if err != nil || !hasAgent(shardAgents, "shard-1") || hasAgent(shardAgents, "worker-1") {
+		t.Fatalf("shard agents = %+v, %v", shardAgents, err)
+	}
+	audit, err := store.ListAuditEvents(ctx, 100)
+	if err != nil || !hasAuditAction(audit, "receiver.put", "project-admin/stage-output") {
+		t.Fatalf("audit events = %+v, %v", audit, err)
+	}
+}
+
+func hasProject(projects []tracker.Project, id string) bool {
+	for _, project := range projects {
+		if project.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAdminShard(shards []tracker.AdminShard, projectID, shardID string) bool {
+	for _, shard := range shards {
+		if shard.ProjectID == projectID && shard.ID == shardID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReceiver(receivers []tracker.Receiver, projectID, receiverID string) bool {
+	for _, receiver := range receivers {
+		if receiver.ProjectID == projectID && receiver.ID == receiverID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAgent(agents []tracker.Agent, id string) bool {
+	for _, agent := range agents {
+		if agent.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAuditAction(events []tracker.AuditEvent, action, target string) bool {
+	for _, event := range events {
+		if event.Action == action && event.TargetID == target {
+			return true
+		}
+	}
+	return false
 }

@@ -247,6 +247,197 @@ func (s *Store) UpdateUserAccess(
 	})
 }
 
+func (s *Store) ListProjects(ctx context.Context) ([]tracker.Project, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, status FROM tracker_projects ORDER BY id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []tracker.Project{}
+	for rows.Next() {
+		var project tracker.Project
+		if err := rows.Scan(&project.ID, &project.Status); err != nil {
+			return nil, err
+		}
+		result = append(result, project)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListAdminShards(ctx context.Context) ([]tracker.AdminShard, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT project_id, id, status, owner_agent_id, generation,
+			owner_lease_expires_at, source_uri, source_format, source_etag,
+			load_error_code, recovery_error_code,
+			checkpoint_uri, checkpoint_seq, checkpoint_generation,
+			checkpoint_size, checkpoint_at,
+			checkpoint_upload_id, checkpoint_upload_started_at
+		FROM tracker_shards ORDER BY project_id, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []tracker.AdminShard{}
+	for rows.Next() {
+		var shard tracker.AdminShard
+		if err := rows.Scan(
+			&shard.ProjectID, &shard.ID, &shard.Status, &shard.OwnerAgentID,
+			&shard.Generation, &shard.OwnerLeaseExpiresAt,
+			&shard.SourceURI, &shard.SourceFormat, &shard.SourceETag,
+			&shard.LoadErrorCode, &shard.RecoveryErrorCode,
+			&shard.CheckpointURI, &shard.CheckpointSequence,
+			&shard.CheckpointGeneration, &shard.CheckpointSize, &shard.CheckpointAt,
+			&shard.CheckpointUploadID, &shard.CheckpointUploadStartedAt,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, shard)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListReceivers(ctx context.Context) ([]tracker.Receiver, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT project_id, id, status, sink_uri, format
+		FROM tracker_receivers ORDER BY project_id, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []tracker.Receiver{}
+	for rows.Next() {
+		var receiver tracker.Receiver
+		if err := rows.Scan(
+			&receiver.ProjectID, &receiver.ID, &receiver.Status,
+			&receiver.SinkURI, &receiver.Format,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, receiver)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListShardAgents(ctx context.Context) ([]tracker.Agent, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+agentColumns+` FROM tracker_agents
+		WHERE kind='shard' ORDER BY status, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []tracker.Agent{}
+	for rows.Next() {
+		agent, err := scanAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, agent)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListAuditEvents(ctx context.Context, limit int) ([]tracker.AuditEvent, error) {
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("tracker postgres: invalid audit event limit")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, actor_user_id, action, target_id, reason, created_at
+		FROM tracker_audit_log ORDER BY created_at DESC, id DESC LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []tracker.AuditEvent{}
+	for rows.Next() {
+		var event tracker.AuditEvent
+		if err := rows.Scan(
+			&event.ID, &event.ActorID, &event.Action, &event.TargetID,
+			&event.Reason, &event.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, event)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) AdminPutProject(
+	ctx context.Context,
+	actorID string,
+	project tracker.Project,
+	reason string,
+	now int64,
+) error {
+	return s.adminCommand(ctx, actorID, "project.put", project.ID, reason, now, func(tx pgx.Tx) error {
+		return putProject(ctx, tx, project, now)
+	})
+}
+
+func (s *Store) AdminPutShard(
+	ctx context.Context,
+	actorID string,
+	shard tracker.Shard,
+	reason string,
+	now int64,
+) error {
+	target := shard.ProjectID + "/" + shard.ID
+	return s.adminCommand(ctx, actorID, "shard.put", target, reason, now, func(tx pgx.Tx) error {
+		return putShard(ctx, tx, shard, now)
+	})
+}
+
+func (s *Store) AdminPutReceiver(
+	ctx context.Context,
+	actorID string,
+	receiver tracker.Receiver,
+	reason string,
+	now int64,
+) error {
+	target := receiver.ProjectID + "/" + receiver.ID
+	return s.adminCommand(ctx, actorID, "receiver.put", target, reason, now, func(tx pgx.Tx) error {
+		return putReceiver(ctx, tx, receiver, now)
+	})
+}
+
+func (s *Store) adminCommand(
+	ctx context.Context,
+	actorID, action, target, reason string,
+	now int64,
+	command func(pgx.Tx) error,
+) error {
+	reason = strings.TrimSpace(reason)
+	if actorID == "" || action == "" || target == "" || reason == "" || len(reason) > 1000 || now < 0 {
+		return fmt.Errorf("tracker postgres: invalid admin command")
+	}
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var status string
+		var roles []string
+		if err := tx.QueryRow(ctx, `
+			SELECT status, roles FROM tracker_users WHERE id=$1 FOR UPDATE
+		`, actorID).Scan(&status, &roles); err != nil {
+			return err
+		}
+		if status != tracker.UserStatusActive || !roleMap(roles)[tracker.RoleAdmin] {
+			return fmt.Errorf("administrator role required")
+		}
+		if err := command(tx); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO tracker_audit_log(actor_user_id, action, target_id, reason, created_at)
+			VALUES ($1,$2,$3,$4,$5)
+		`, actorID, action, target, reason, now)
+		return err
+	})
+}
+
 func scanPortalUser(row rowScanner) (tracker.User, error) {
 	var user tracker.User
 	var roles []string
