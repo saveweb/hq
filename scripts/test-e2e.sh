@@ -157,6 +157,7 @@ tls_pin=$("${run_dir}/shard" tls-init --key-out "${run_dir}/shard.key" \
   --allow-private-shard-endpoints --agent-heartbeat-seconds 1 --owner-lease-seconds 30 \
   --session-heartbeat-seconds 1 --session-lease-seconds 30 \
   --s3-endpoint "${minio_url}" --s3-region us-east-1 --s3-path-style --allow-http-s3 \
+  --checkpoint-prefix-uri s3://source/checkpoints \
   --s3-access-key-id-file "${run_dir}/s3-access-key" \
   --s3-secret-access-key-file "${run_dir}/s3-secret-key" >"${run_dir}/tracker.log" 2>&1 &
 tracker_pid=$!
@@ -167,6 +168,7 @@ start_shard() {
     --admin-listen "127.0.0.1:${admin_port}" \
     --tracker-url "${tracker_url}" --tracker-issuer "${tracker_url}" --allow-http-tracker \
     --allow-http-object-download \
+    --checkpoint-interval-seconds 2 \
     --machine-token-file "${run_dir}/owner.token" --identity-file "${run_dir}/shard.identity" \
     --data-dir "${run_dir}/shard-data" --endpoint "${shard_url}" --endpoint-version 1 \
     --tls-spki-sha256 "${tls_pin}" --tls-cert-file "${run_dir}/shard.pem" \
@@ -222,6 +224,21 @@ printf 'Loading an immutable S3-compatible source through a presigned URL...\n'
 sleep 3
 "${run_dir}/go-worker" --phase source --project-id project-source-e2e --tracker-url "${tracker_url}" \
   --machine-token-file "${run_dir}/worker.token"
+sleep 3
+
+checkpoint_rows=$(docker exec "${postgres_container}" psql -U postgres -d saveweb_hq_e2e -Atc \
+  "SELECT count(*) FROM tracker_shards WHERE checkpoint_uri IS NOT NULL AND checkpoint_format='sqlite-zstd-v1'")
+if [ "${checkpoint_rows}" -lt 2 ]; then
+  printf 'expected published checkpoint pointers, got %s\n' "${checkpoint_rows}" >&2
+  exit 1
+fi
+checkpoint_objects=$(docker run --rm --network host -e "MC_HOST_hq=${mc_host}" \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
+  find hq/source/checkpoints --name '*.sqlite.zst' | wc -l)
+if [ "${checkpoint_objects}" -lt 2 ]; then
+  printf 'expected checkpoint objects, got %s\n' "${checkpoint_objects}" >&2
+  exit 1
+fi
 
 stop_shard
 "${run_dir}/queue-tool" --mode check --data-dir "${run_dir}/shard-data" \

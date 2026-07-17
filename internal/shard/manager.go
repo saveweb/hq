@@ -58,6 +58,7 @@ type Manager struct {
 	loadSource    SourceLoader
 	reportSource  SourceReporter
 	loaders       sync.WaitGroup
+	snapshots     sync.WaitGroup
 	verifier      *access.Verifier
 	owned         map[routeKey]*ownedShard
 	retiredStores []queue.Store
@@ -93,6 +94,12 @@ type ShardStatus struct {
 	Stats               queue.Stats `json:"stats"`
 	LoadRunning         bool        `json:"load_running"`
 	LoadError           string      `json:"load_error,omitempty"`
+}
+
+type CheckpointTarget struct {
+	ProjectID  string
+	ShardID    string
+	Generation int64
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -439,6 +446,58 @@ func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
 	return result, nil
 }
 
+func (m *Manager) CheckpointTargets() []CheckpointTarget {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := m.clock() + m.clockOffset
+	result := make([]CheckpointTarget, 0, len(m.owned))
+	for _, owned := range m.owned {
+		if (owned.assignment.Status != trackerStatusActive && owned.assignment.Status != trackerStatusDraining) ||
+			now >= owned.assignment.OwnerLeaseExpiresAt {
+			continue
+		}
+		if _, ok := owned.store.(queue.Snapshotter); !ok {
+			continue
+		}
+		result = append(result, CheckpointTarget{
+			ProjectID: owned.assignment.ProjectID, ShardID: owned.assignment.ShardID,
+			Generation: owned.assignment.Generation,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ProjectID != result[j].ProjectID {
+			return result[i].ProjectID < result[j].ProjectID
+		}
+		return result[i].ShardID < result[j].ShardID
+	})
+	return result
+}
+
+func (m *Manager) Snapshot(ctx context.Context, target CheckpointTarget, destination string) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return fmt.Errorf("shard: manager is closed")
+	}
+	owned := m.owned[routeKey{projectID: target.ProjectID, shardID: target.ShardID}]
+	now := m.clock() + m.clockOffset
+	if owned == nil || owned.assignment.Generation != target.Generation ||
+		(owned.assignment.Status != trackerStatusActive && owned.assignment.Status != trackerStatusDraining) ||
+		now >= owned.assignment.OwnerLeaseExpiresAt {
+		m.mu.Unlock()
+		return staleOwnerOrGeneration()
+	}
+	snapshotter, ok := owned.store.(queue.Snapshotter)
+	if !ok {
+		m.mu.Unlock()
+		return queueError(protocol.ErrorUnsupportedOperation, "queue backend cannot create checkpoints", false)
+	}
+	m.snapshots.Add(1)
+	m.mu.Unlock()
+	defer m.snapshots.Done()
+	return snapshotter.Snapshot(ctx, destination)
+}
+
 func (a Authorization) AllowsMutation() error {
 	if a.Assignment.Status != trackerStatusActive && a.Assignment.Status != trackerStatusDraining {
 		return queueError(protocol.ErrorShardNotActive, "shard is not accepting queue mutations", false)
@@ -460,6 +519,7 @@ func (m *Manager) Close() error {
 	}
 	m.mu.Unlock()
 	m.loaders.Wait()
+	m.snapshots.Wait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seen := make(map[queue.Store]struct{})

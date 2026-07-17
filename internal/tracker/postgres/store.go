@@ -179,6 +179,14 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 			generation = EXCLUDED.generation, owner_lease_expires_at = EXCLUDED.owner_lease_expires_at,
 			source_uri = EXCLUDED.source_uri, source_format = EXCLUDED.source_format,
 			source_etag = EXCLUDED.source_etag, load_error_code = NULL,
+			checkpoint_upload_id = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_id END,
+			checkpoint_s3_upload_id = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_s3_upload_id END,
+			checkpoint_upload_uri = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_uri END,
+			checkpoint_upload_seq = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_seq END,
+			checkpoint_upload_generation = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_generation END,
+			checkpoint_upload_checksum = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_checksum END,
+			checkpoint_upload_size = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_size END,
+			checkpoint_upload_started_at = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_started_at END,
 			updated_at = EXCLUDED.updated_at
 		WHERE EXCLUDED.generation > tracker_shards.generation OR (
 			EXCLUDED.generation = tracker_shards.generation

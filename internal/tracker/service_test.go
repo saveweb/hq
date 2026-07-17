@@ -3,11 +3,14 @@ package tracker_test
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/access"
+	"git.saveweb.org/saveweb/hq/internal/objectstorage"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/memory"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
@@ -25,6 +28,45 @@ type sourceSigner struct {
 	uri string
 	now int64
 	ttl time.Duration
+}
+
+type checkpointObjects struct {
+	size      int64
+	created   int
+	completed int
+	aborted   int
+}
+
+func (o *checkpointObjects) CreateMultipart(context.Context, string) (string, error) {
+	o.created++
+	return "s3-upload-1", nil
+}
+
+func (o *checkpointObjects) PresignUploadPart(
+	_ context.Context, _ string, _ string, _ int32, _ int64, contentMD5 string, now int64, ttl time.Duration,
+) (objectstorage.PartURL, error) {
+	return objectstorage.PartURL{
+		URL:       "https://objects.example/upload?signature=secret",
+		Headers:   map[string]string{"Content-Md5": contentMD5},
+		ExpiresAt: now + int64(ttl/time.Second),
+	}, nil
+}
+
+func (o *checkpointObjects) CompleteMultipart(_ context.Context, _, _ string, parts []objectstorage.CompletedPart) error {
+	if len(parts) != 1 || parts[0].PartNumber != 1 {
+		return errors.New("unexpected completed parts")
+	}
+	o.completed++
+	return nil
+}
+
+func (o *checkpointObjects) AbortMultipart(context.Context, string, string) error {
+	o.aborted++
+	return nil
+}
+
+func (o *checkpointObjects) Head(context.Context, string) (int64, string, error) {
+	return o.size, "etag", nil
 }
 
 func (s *sourceSigner) PresignGet(_ context.Context, uri string, now int64, ttl time.Duration) (string, int64, error) {
@@ -235,6 +277,59 @@ func TestFailedSourceLoadHasDistinctTerminalStatus(t *testing.T) {
 		protocol.ShardLoadResultRequest{Generation: 3, Success: false, ErrorCode: "source_decode_failed"})
 	if err != nil || result.Status != tracker.ShardStatusLoadFailed {
 		t.Fatalf("failed load result = %+v, %v", result, err)
+	}
+}
+
+func TestCheckpointMultipartIsGenerationCASPublished(t *testing.T) {
+	f := newFixture(t)
+	f.registerShard(t)
+	f.store.AddShard(tracker.Shard{
+		ProjectID: "project-1", ID: "shard-checkpoint", Status: tracker.ShardStatusActive,
+		OwnerAgentID: "agent-shard-1", Generation: 5,
+	})
+	objects := &checkpointObjects{size: 123}
+	_, privateKey, err := access.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := access.NewSigner("https://tracker.example", "key-checkpoint", privateKey, func() int64 { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := tracker.DefaultConfig()
+	config.CheckpointStore = objects
+	config.CheckpointPrefixURI = "s3://checkpoints/saveweb"
+	service, err := tracker.NewService(f.store, f.checker, signer, func() int64 { return f.now }, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.HeartbeatAgent(context.Background(), "token-owner", "agent-shard-1", protocol.AgentHeartbeatRequest{
+		Version: "0.1.0", Attrs: protocol.Attrs{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	begin, err := service.BeginCheckpoint(context.Background(), "token-owner", "agent-shard-1",
+		"project-1", "shard-checkpoint", protocol.BeginCheckpointRequest{
+			Generation: 5, SizeBytes: 123, SHA256: strings.Repeat("a", 64),
+		})
+	if err != nil || begin.UploadID == "" || objects.created != 1 {
+		t.Fatalf("begin = %+v, created=%d, error=%v", begin, objects.created, err)
+	}
+	md5Value := base64.StdEncoding.EncodeToString(make([]byte, 16))
+	part, err := service.PresignCheckpointPart(context.Background(), "token-owner", "agent-shard-1",
+		"project-1", "shard-checkpoint", begin.UploadID, protocol.CheckpointPartURLRequest{
+			Generation: 5, PartNumber: 1, SizeBytes: 123, ContentMD5: md5Value,
+		})
+	if err != nil || part.ExpiresAt != f.now+3600 || part.Headers["Content-Md5"] != md5Value {
+		t.Fatalf("part = %+v, %v", part, err)
+	}
+	checkpoint, err := service.CompleteCheckpoint(context.Background(), "token-owner", "agent-shard-1",
+		"project-1", "shard-checkpoint", begin.UploadID, protocol.CompleteCheckpointRequest{
+			Generation: 5, Parts: []protocol.CheckpointPart{{PartNumber: 1, ETag: `"part-etag"`}},
+		})
+	if err != nil || checkpoint.Sequence != 1 || checkpoint.SizeBytes != 123 ||
+		checkpoint.Format != "sqlite-zstd-v1" || objects.completed != 1 {
+		t.Fatalf("checkpoint = %+v, completed=%d, error=%v", checkpoint, objects.completed, err)
 	}
 }
 

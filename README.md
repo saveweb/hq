@@ -92,7 +92,8 @@ go run ./cmd/tracker serve \
   --s3-endpoint https://ACCOUNT_ID.r2.cloudflarestorage.com \
   --s3-region auto \
   --s3-access-key-id-file ./r2-access-key \
-  --s3-secret-access-key-file ./r2-secret-key
+  --s3-secret-access-key-file ./r2-secret-key \
+  --checkpoint-prefix-uri s3://saveweb-checkpoints/checkpoints
 ```
 
 The GitHub OAuth callback is
@@ -171,6 +172,14 @@ terminated by Caddy or cloudflared instead uses `--tls-terminated-by-proxy` and
 normally omits the pin. Plain HTTP requires
 `--allow-insecure-public-endpoint`. Tracker HTTP likewise requires the separate
 `--allow-http-tracker` local-test opt-in.
+
+Set `--checkpoint-interval-seconds` to enable periodic publication. Each run
+uses SQLite `VACUUM INTO`, Zstd level 6, and SHA-256. The tracker creates the
+multipart upload and returns one exact presigned URL at a time; the shard never
+receives R2 credentials and checkpoint bytes do not pass through tracker. The
+URL TTL limits one part only, so a slow contributor can request fresh URLs for
+later or retried parts without a fixed total upload window. Temporary files are
+kept under `<data-dir>/runtime/checkpoints` and deleted after each attempt.
 
 Shard also starts a separate management server on `127.0.0.1:9081`. By
 default, each `serve` invocation rotates a 256-bit token into

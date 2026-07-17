@@ -88,6 +88,54 @@ func (c *Client) ReportShardLoad(
 	return result, err
 }
 
+func (c *Client) BeginCheckpoint(
+	ctx context.Context,
+	projectID, shardID string,
+	request protocol.BeginCheckpointRequest,
+) (protocol.BeginCheckpointResponse, error) {
+	var result protocol.BeginCheckpointResponse
+	err := c.doJSON(ctx, http.MethodPost, checkpointPath(projectID, shardID), request, &result)
+	return result, err
+}
+
+func (c *Client) PresignCheckpointPart(
+	ctx context.Context,
+	projectID, shardID, uploadID string,
+	request protocol.CheckpointPartURLRequest,
+) (protocol.CheckpointPartURLResponse, error) {
+	var result protocol.CheckpointPartURLResponse
+	err := c.doJSON(ctx, http.MethodPost, checkpointUploadPath(projectID, shardID, uploadID)+"/parts", request, &result)
+	return result, err
+}
+
+func (c *Client) CompleteCheckpoint(
+	ctx context.Context,
+	projectID, shardID, uploadID string,
+	request protocol.CompleteCheckpointRequest,
+) (protocol.CheckpointResponse, error) {
+	var result protocol.CheckpointResponse
+	err := c.doJSON(ctx, http.MethodPost, checkpointUploadPath(projectID, shardID, uploadID)+"/complete", request, &result)
+	return result, err
+}
+
+func (c *Client) AbortCheckpoint(
+	ctx context.Context,
+	projectID, shardID, uploadID string,
+	request protocol.AbortCheckpointRequest,
+) (protocol.AbortCheckpointResponse, error) {
+	var result protocol.AbortCheckpointResponse
+	err := c.doJSON(ctx, http.MethodPost, checkpointUploadPath(projectID, shardID, uploadID)+"/abort", request, &result)
+	return result, err
+}
+
+func checkpointPath(projectID, shardID string) string {
+	return "/api/v1/shards/" + url.PathEscape(projectID) + "/" + url.PathEscape(shardID) + "/checkpoints"
+}
+
+func checkpointUploadPath(projectID, shardID, uploadID string) string {
+	return checkpointPath(projectID, shardID) + "/" + url.PathEscape(uploadID)
+}
+
 func (c *Client) CreateSession(ctx context.Context, request protocol.CreateSessionRequest) (protocol.SessionResponse, error) {
 	var result protocol.SessionResponse
 	err := c.doJSON(ctx, http.MethodPost, "/api/v1/worker/sessions", request, &result)

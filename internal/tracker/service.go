@@ -3,12 +3,17 @@ package tracker
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/access"
+	"git.saveweb.org/saveweb/hq/internal/objectstorage"
 	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
@@ -23,6 +28,11 @@ type Config struct {
 	SigningKeyNotAfter      int64
 	SourceURLTTLSeconds     int64
 	SourceURLSigner         SourceURLSigner
+	CheckpointStore         objectstorage.CheckpointStore
+	CheckpointPrefixURI     string
+	CheckpointPartURLTTL    int64
+	CheckpointPartSizeBytes int64
+	CheckpointMaxBytes      int64
 }
 
 type SourceURLSigner interface {
@@ -35,6 +45,8 @@ func DefaultConfig() Config {
 		SessionHeartbeatSeconds: 30, SessionLeaseSeconds: 120,
 		AccessTokenTTLSeconds: 600,
 		SourceURLTTLSeconds:   900,
+		CheckpointPartURLTTL:  3600, CheckpointPartSizeBytes: 8 << 20,
+		CheckpointMaxBytes: 64 << 30,
 	}
 }
 
@@ -54,7 +66,13 @@ func NewService(store Store, endpointChecker EndpointChecker, signer *access.Sig
 	if config.AgentHeartbeatSeconds < 1 || config.OwnerLeaseSeconds <= config.AgentHeartbeatSeconds ||
 		config.SessionHeartbeatSeconds < 1 || config.SessionLeaseSeconds <= config.SessionHeartbeatSeconds ||
 		config.AccessTokenTTLSeconds < 1 || config.AccessTokenTTLSeconds > access.MaxTTLSeconds ||
-		(config.SourceURLSigner != nil && (config.SourceURLTTLSeconds < 60 || config.SourceURLTTLSeconds > 86400)) {
+		(config.SourceURLSigner != nil && (config.SourceURLTTLSeconds < 60 || config.SourceURLTTLSeconds > 86400)) ||
+		(config.CheckpointStore == nil) != (config.CheckpointPrefixURI == "") ||
+		(config.CheckpointStore != nil && (config.CheckpointPartURLTTL < 60 || config.CheckpointPartURLTTL > 86400 ||
+			config.CheckpointPartSizeBytes < 5<<20 || config.CheckpointPartSizeBytes > 64<<20 ||
+			config.CheckpointMaxBytes < 1 || config.CheckpointMaxBytes > 5<<40 ||
+			config.CheckpointMaxBytes > config.CheckpointPartSizeBytes*10_000 ||
+			!validS3Prefix(config.CheckpointPrefixURI))) {
 		return nil, fmt.Errorf("tracker: invalid lease configuration")
 	}
 	if config.SigningKeyNotBefore == 0 {
@@ -71,6 +89,247 @@ func NewService(store Store, endpointChecker EndpointChecker, signer *access.Sig
 			NotBefore:        config.SigningKeyNotBefore, NotAfter: config.SigningKeyNotAfter,
 		},
 	}, nil
+}
+
+func (s *Service) BeginCheckpoint(
+	ctx context.Context,
+	machineToken, agentID, projectID, shardID string,
+	request protocol.BeginCheckpointRequest,
+) (protocol.BeginCheckpointResponse, error) {
+	user, err := s.authenticateCheckpointRequest(machineToken, ctx, agentID, projectID, shardID, request.Generation)
+	if err != nil {
+		return protocol.BeginCheckpointResponse{}, err
+	}
+	if s.config.CheckpointStore == nil || request.SizeBytes < 1 || request.SizeBytes > s.config.CheckpointMaxBytes ||
+		!validSHA256(request.SHA256) {
+		return protocol.BeginCheckpointResponse{}, invalidRequest("invalid or unsupported checkpoint request")
+	}
+	now := s.now()
+	if _, err := s.store.GetCheckpointTarget(ctx, user.ID, agentID, projectID, shardID, request.Generation, now); err != nil {
+		return protocol.BeginCheckpointResponse{}, err
+	}
+	current, err := s.store.GetCurrentCheckpointUpload(ctx, user.ID, agentID, projectID, shardID, request.Generation, now)
+	if err != nil {
+		return protocol.BeginCheckpointResponse{}, err
+	}
+	if current != nil && current.SizeBytes == request.SizeBytes && current.SHA256 == request.SHA256 {
+		return s.checkpointUploadResponse(*current), nil
+	}
+	if current != nil {
+		if err := s.config.CheckpointStore.AbortMultipart(ctx, current.URI, current.S3UploadID); err != nil {
+			return protocol.BeginCheckpointResponse{}, fmt.Errorf("tracker: abort superseded checkpoint: %w", err)
+		}
+		if err := s.store.AbortCheckpoint(ctx, user.ID, agentID, projectID, shardID, current.ID, request.Generation, s.now()); err != nil {
+			return protocol.BeginCheckpointResponse{}, err
+		}
+	}
+	uploadID, err := randomControlID("cp_")
+	if err != nil {
+		return protocol.BeginCheckpointResponse{}, err
+	}
+	uri := checkpointObjectURI(s.config.CheckpointPrefixURI, projectID, shardID, request.Generation, uploadID)
+	s3UploadID, err := s.config.CheckpointStore.CreateMultipart(ctx, uri)
+	if err != nil {
+		return protocol.BeginCheckpointResponse{}, fmt.Errorf("tracker: create checkpoint multipart: %w", err)
+	}
+	upload, err := s.store.ReserveCheckpoint(ctx, user.ID, agentID, CheckpointUpload{
+		ProjectID: projectID, ShardID: shardID, Generation: request.Generation,
+		ID: uploadID, S3UploadID: s3UploadID, URI: uri,
+		SizeBytes: request.SizeBytes, SHA256: request.SHA256,
+	}, s.now())
+	if err != nil {
+		abortContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = s.config.CheckpointStore.AbortMultipart(abortContext, uri, s3UploadID)
+		cancel()
+		return protocol.BeginCheckpointResponse{}, err
+	}
+	return s.checkpointUploadResponse(upload), nil
+}
+
+func (s *Service) PresignCheckpointPart(
+	ctx context.Context,
+	machineToken, agentID, projectID, shardID, uploadID string,
+	request protocol.CheckpointPartURLRequest,
+) (protocol.CheckpointPartURLResponse, error) {
+	user, err := s.authenticateCheckpointRequest(machineToken, ctx, agentID, projectID, shardID, request.Generation)
+	if err != nil {
+		return protocol.CheckpointPartURLResponse{}, err
+	}
+	if s.config.CheckpointStore == nil || !queue.ValidateIdentifier(uploadID) || request.PartNumber < 1 ||
+		request.PartNumber > 10_000 || request.SizeBytes < 1 || request.SizeBytes > 5<<30 ||
+		!validMD5(request.ContentMD5) {
+		return protocol.CheckpointPartURLResponse{}, invalidRequest("invalid checkpoint part request")
+	}
+	now := s.now()
+	upload, err := s.store.GetCheckpointUpload(ctx, user.ID, agentID, projectID, shardID, uploadID, request.Generation, now)
+	if err != nil {
+		return protocol.CheckpointPartURLResponse{}, err
+	}
+	partCount := (upload.SizeBytes + s.config.CheckpointPartSizeBytes - 1) / s.config.CheckpointPartSizeBytes
+	expectedSize := s.config.CheckpointPartSizeBytes
+	if int64(request.PartNumber) == partCount {
+		expectedSize = upload.SizeBytes - (partCount-1)*s.config.CheckpointPartSizeBytes
+	}
+	if int64(request.PartNumber) > partCount || request.SizeBytes != expectedSize {
+		return protocol.CheckpointPartURLResponse{}, invalidRequest("checkpoint part does not match declared object size")
+	}
+	part, err := s.config.CheckpointStore.PresignUploadPart(
+		ctx, upload.URI, upload.S3UploadID, request.PartNumber, request.SizeBytes,
+		request.ContentMD5, now, time.Duration(s.config.CheckpointPartURLTTL)*time.Second,
+	)
+	if err != nil {
+		return protocol.CheckpointPartURLResponse{}, fmt.Errorf("tracker: presign checkpoint part: %w", err)
+	}
+	return protocol.CheckpointPartURLResponse{
+		UploadID: upload.ID, PartNumber: request.PartNumber,
+		URL: part.URL, Headers: part.Headers, ExpiresAt: part.ExpiresAt,
+	}, nil
+}
+
+func (s *Service) CompleteCheckpoint(
+	ctx context.Context,
+	machineToken, agentID, projectID, shardID, uploadID string,
+	request protocol.CompleteCheckpointRequest,
+) (protocol.CheckpointResponse, error) {
+	user, err := s.authenticateCheckpointRequest(machineToken, ctx, agentID, projectID, shardID, request.Generation)
+	if err != nil {
+		return protocol.CheckpointResponse{}, err
+	}
+	parts, err := validateCheckpointParts(request.Parts)
+	if s.config.CheckpointStore == nil || !queue.ValidateIdentifier(uploadID) || err != nil {
+		return protocol.CheckpointResponse{}, invalidRequest("invalid checkpoint completion")
+	}
+	upload, err := s.store.GetCheckpointUpload(ctx, user.ID, agentID, projectID, shardID, uploadID, request.Generation, s.now())
+	if err != nil {
+		return protocol.CheckpointResponse{}, err
+	}
+	expectedParts := (upload.SizeBytes + s.config.CheckpointPartSizeBytes - 1) / s.config.CheckpointPartSizeBytes
+	if int64(len(parts)) != expectedParts {
+		return protocol.CheckpointResponse{}, invalidRequest("checkpoint part count does not match declared object size")
+	}
+	completeError := s.config.CheckpointStore.CompleteMultipart(ctx, upload.URI, upload.S3UploadID, parts)
+	size, _, headError := s.config.CheckpointStore.Head(ctx, upload.URI)
+	if completeError != nil && headError != nil {
+		return protocol.CheckpointResponse{}, fmt.Errorf("tracker: complete checkpoint multipart: %w", completeError)
+	}
+	if headError != nil {
+		return protocol.CheckpointResponse{}, fmt.Errorf("tracker: verify checkpoint object: %w", headError)
+	}
+	if size != upload.SizeBytes {
+		return protocol.CheckpointResponse{}, fmt.Errorf("tracker: checkpoint object size mismatch")
+	}
+	checkpoint, err := s.store.PublishCheckpoint(
+		ctx, user.ID, agentID, projectID, shardID, uploadID, request.Generation, s.now(),
+	)
+	if err != nil {
+		return protocol.CheckpointResponse{}, err
+	}
+	return toCheckpointResponse(checkpoint), nil
+}
+
+func (s *Service) AbortCheckpoint(
+	ctx context.Context,
+	machineToken, agentID, projectID, shardID, uploadID string,
+	request protocol.AbortCheckpointRequest,
+) (protocol.AbortCheckpointResponse, error) {
+	user, err := s.authenticateCheckpointRequest(machineToken, ctx, agentID, projectID, shardID, request.Generation)
+	if err != nil {
+		return protocol.AbortCheckpointResponse{}, err
+	}
+	if s.config.CheckpointStore == nil || !queue.ValidateIdentifier(uploadID) {
+		return protocol.AbortCheckpointResponse{}, invalidRequest("invalid checkpoint abort")
+	}
+	upload, err := s.store.GetCheckpointUpload(ctx, user.ID, agentID, projectID, shardID, uploadID, request.Generation, s.now())
+	if err != nil {
+		return protocol.AbortCheckpointResponse{}, err
+	}
+	if err := s.config.CheckpointStore.AbortMultipart(ctx, upload.URI, upload.S3UploadID); err != nil {
+		return protocol.AbortCheckpointResponse{}, fmt.Errorf("tracker: abort checkpoint multipart: %w", err)
+	}
+	if err := s.store.AbortCheckpoint(ctx, user.ID, agentID, projectID, shardID, uploadID, request.Generation, s.now()); err != nil {
+		return protocol.AbortCheckpointResponse{}, err
+	}
+	return protocol.AbortCheckpointResponse{UploadID: uploadID, Status: "aborted"}, nil
+}
+
+func (s *Service) authenticateCheckpointRequest(
+	machineToken string,
+	ctx context.Context,
+	agentID, projectID, shardID string,
+	generation int64,
+) (User, error) {
+	user, err := s.authenticate(ctx, machineToken)
+	if err != nil {
+		return User{}, err
+	}
+	if !user.HasRole(RoleShardOwner) {
+		return User{}, permissionDenied("shard_owner role required")
+	}
+	if !queue.ValidateIdentifier(agentID) || !queue.ValidateIdentifier(projectID) ||
+		!queue.ValidateIdentifier(shardID) || generation < 1 {
+		return User{}, invalidRequest("invalid checkpoint route")
+	}
+	return user, nil
+}
+
+func (s *Service) checkpointUploadResponse(upload CheckpointUpload) protocol.BeginCheckpointResponse {
+	return protocol.BeginCheckpointResponse{
+		ProjectID: upload.ProjectID, ShardID: upload.ShardID, Generation: upload.Generation,
+		UploadID: upload.ID, PartSizeBytes: s.config.CheckpointPartSizeBytes, CreatedAt: upload.CreatedAt,
+	}
+}
+
+func validateCheckpointParts(values []protocol.CheckpointPart) ([]objectstorage.CompletedPart, error) {
+	if len(values) < 1 || len(values) > 10_000 {
+		return nil, fmt.Errorf("invalid part count")
+	}
+	result := make([]objectstorage.CompletedPart, len(values))
+	for index, value := range values {
+		if value.PartNumber != int32(index+1) || value.ETag == "" || len(value.ETag) > 512 ||
+			strings.ContainsAny(value.ETag, "\r\n") {
+			return nil, fmt.Errorf("invalid part")
+		}
+		result[index] = objectstorage.CompletedPart{PartNumber: value.PartNumber, ETag: value.ETag}
+	}
+	return result, nil
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32 && value == strings.ToLower(value)
+}
+
+func validMD5(value string) bool {
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	return err == nil && len(decoded) == 16
+}
+
+func validS3Prefix(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "s3" && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && parsed.Fragment == "" && !strings.HasSuffix(parsed.Path, "/")
+}
+
+func checkpointObjectURI(prefix, projectID, shardID string, generation int64, uploadID string) string {
+	project := base64.RawURLEncoding.EncodeToString([]byte(projectID))
+	shard := base64.RawURLEncoding.EncodeToString([]byte(shardID))
+	return prefix + "/" + project + "/" + shard + "/" + strconv.FormatInt(generation, 10) + "/" + uploadID + ".sqlite.zst"
+}
+
+func randomControlID(prefix string) (string, error) {
+	var value [18]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("tracker: random control ID: %w", err)
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(value[:]), nil
+}
+
+func toCheckpointResponse(value Checkpoint) protocol.CheckpointResponse {
+	return protocol.CheckpointResponse{
+		ProjectID: value.ProjectID, ShardID: value.ShardID, Generation: value.Generation,
+		Sequence: value.Sequence, URI: value.URI, Format: value.Format,
+		SHA256: value.SHA256, SizeBytes: value.SizeBytes, CreatedAt: value.CreatedAt,
+	}
 }
 
 func (s *Service) UpsertAgent(ctx context.Context, machineToken, agentID string, request protocol.AgentUpsertRequest) (protocol.AgentResponse, error) {

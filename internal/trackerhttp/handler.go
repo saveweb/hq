@@ -15,7 +15,10 @@ import (
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
-const trackerBodyLimit = int64(64 << 10)
+const (
+	trackerBodyLimit            = int64(64 << 10)
+	checkpointCompleteBodyLimit = int64(8 << 20)
+)
 
 type Handler struct {
 	service *tracker.Service
@@ -33,7 +36,7 @@ func New(service *tracker.Service, logger *slog.Logger) *echo.Echo {
 	server.Pre(sanitizeRequestID)
 	server.Use(middleware.RequestID())
 	server.Use(middleware.Recover())
-	server.Use(middleware.BodyLimit(trackerBodyLimit))
+	server.Use(middleware.BodyLimit(checkpointCompleteBodyLimit))
 	server.Use(middleware.Secure())
 	server.Use(noStoreAPI)
 
@@ -41,6 +44,10 @@ func New(service *tracker.Service, logger *slog.Logger) *echo.Echo {
 	server.PUT("/api/v1/agents/:agent_id", handler.upsertAgent)
 	server.POST("/api/v1/agents/:agent_id/heartbeat", handler.heartbeatAgent)
 	server.POST("/api/v1/shards/:project_id/:shard_id/load-result", handler.shardLoadResult)
+	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints", handler.beginCheckpoint)
+	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints/:upload_id/parts", handler.checkpointPart)
+	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints/:upload_id/complete", handler.completeCheckpoint)
+	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints/:upload_id/abort", handler.abortCheckpoint)
 	server.POST("/api/v1/worker/sessions", handler.createSession)
 	server.POST("/api/v1/worker/sessions/:session_id/heartbeat", handler.heartbeatSession)
 	server.POST("/api/v1/worker/assignments", handler.getAssignment)
@@ -155,6 +162,74 @@ func (h *Handler) shardLoadResult(ctx *echo.Context) error {
 	return ctx.JSON(http.StatusOK, result)
 }
 
+func (h *Handler) beginCheckpoint(ctx *echo.Context) error {
+	token, agentID, ok := machineCredentials(ctx)
+	if !ok {
+		return nil
+	}
+	var body protocol.BeginCheckpointRequest
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), trackerBodyLimit, &body); err != nil {
+		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
+	}
+	result, err := h.service.BeginCheckpoint(ctx.Request().Context(), token, agentID,
+		ctx.Param("project_id"), ctx.Param("shard_id"), body)
+	if err != nil {
+		return h.writeDomainError(ctx, err)
+	}
+	return ctx.JSON(http.StatusCreated, result)
+}
+
+func (h *Handler) checkpointPart(ctx *echo.Context) error {
+	token, agentID, ok := machineCredentials(ctx)
+	if !ok {
+		return nil
+	}
+	var body protocol.CheckpointPartURLRequest
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), trackerBodyLimit, &body); err != nil {
+		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
+	}
+	result, err := h.service.PresignCheckpointPart(ctx.Request().Context(), token, agentID,
+		ctx.Param("project_id"), ctx.Param("shard_id"), ctx.Param("upload_id"), body)
+	if err != nil {
+		return h.writeDomainError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) completeCheckpoint(ctx *echo.Context) error {
+	token, agentID, ok := machineCredentials(ctx)
+	if !ok {
+		return nil
+	}
+	var body protocol.CompleteCheckpointRequest
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), checkpointCompleteBodyLimit, &body); err != nil {
+		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
+	}
+	result, err := h.service.CompleteCheckpoint(ctx.Request().Context(), token, agentID,
+		ctx.Param("project_id"), ctx.Param("shard_id"), ctx.Param("upload_id"), body)
+	if err != nil {
+		return h.writeDomainError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) abortCheckpoint(ctx *echo.Context) error {
+	token, agentID, ok := machineCredentials(ctx)
+	if !ok {
+		return nil
+	}
+	var body protocol.AbortCheckpointRequest
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), trackerBodyLimit, &body); err != nil {
+		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
+	}
+	result, err := h.service.AbortCheckpoint(ctx.Request().Context(), token, agentID,
+		ctx.Param("project_id"), ctx.Param("shard_id"), ctx.Param("upload_id"), body)
+	if err != nil {
+		return h.writeDomainError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, result)
+}
+
 func (h *Handler) createSession(ctx *echo.Context) error {
 	token, agentID, ok := machineCredentials(ctx)
 	if !ok {
@@ -242,7 +317,7 @@ func statusForCode(code string) int {
 		return http.StatusNotFound
 	case protocol.ErrorStaleGeneration, protocol.ErrorStaleEndpointVersion,
 		protocol.ErrorShardNotActive, protocol.ErrorIdentityConflict,
-		protocol.ErrorSessionExpired:
+		protocol.ErrorSessionExpired, protocol.ErrorCheckpointInProgress:
 		return http.StatusConflict
 	case protocol.ErrorRateLimited, protocol.ErrorBackpressure:
 		return http.StatusTooManyRequests

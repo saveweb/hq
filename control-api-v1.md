@@ -109,6 +109,29 @@ agent、owner、generation、owner lease 和原状态都匹配时更新同一 sh
 迟到或 takeover 后的回报返回 `409 stale_generation`。若 source 已写入但回报
 暂时失败，shard 只重试回报，不重新导入 source。
 
+### 2.2 Checkpoint multipart 与发布点
+
+当前 `active` 或 `draining` owner 可以发布 `sqlite-zstd-v1` checkpoint：
+
+1. `POST /api/v1/shards/{project_id}/{shard_id}/checkpoints` 声明 generation、
+   压缩后 size 和 SHA-256；tracker 验证 owner lease，分配不可变 object key，
+   并代表 shard 创建 multipart upload；
+2. 对每个 part 调用 `.../{upload_id}/parts`，携带 part number、精确 size 和
+   Base64 `Content-MD5`。Tracker 只签发该 object/upload/part 的 URL 与必要
+   header；part number 和 size 必须与最初声明的完整对象严格对应；
+3. Shard 直接 PUT 到 R2，并保存响应 ETag。某个 URL 到期或请求结果不确定时，
+   可以为同一 part 重新申请 URL 并覆盖上传；已确认 part 不重传；
+4. `.../{upload_id}/complete` 提交从 1 开始、连续有序的 ETag 清单。Tracker
+   完成 multipart 并 `HeadObject` 检查 size，最后才以 PostgreSQL 条件更新
+   发布 pointer；
+5. `.../{upload_id}/abort` 显式放弃当前 upload。新 generation 会清空旧 upload
+   控制状态，遗留 multipart 由 R2 lifecycle 清理。
+
+所有步骤都重新验证 machine token、role、agent、owner、generation 和 tracker
+时间的 lease。Presigned URL TTL 不是总上传时限；只要 lease 仍有效，可以逐
+part 续签。R2 complete 不是提交点，`checkpoint_uri` 的 generation-CAS 才是。
+旧 owner 即使上传成功，CAS 失败后对象也不能用于恢复。
+
 第一版默认值：
 
 | 参数 | 默认值 |
@@ -118,6 +141,9 @@ agent、owner、generation、owner lease 和原状态都匹配时更新同一 sh
 | session heartbeat interval | 30 秒 |
 | session lease | 120 秒 |
 | shard access token TTL | 600 秒 |
+| source GET URL TTL | 900 秒 |
+| checkpoint part URL TTL | 3600 秒 |
+| checkpoint recommended part size | 8 MiB |
 | clock skew allowance | 30 秒 |
 
 这些值是 tracker 配置，不由 client request 覆盖。Job lease 仍由 Queue API

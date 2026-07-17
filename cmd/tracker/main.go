@@ -264,6 +264,10 @@ func runServe(args []string, logger *slog.Logger) error {
 	s3PathStyle := flags.Bool("s3-path-style", false, "use path-style S3 object URLs")
 	allowHTTPS3 := flags.Bool("allow-http-s3", false, "allow an HTTP S3 endpoint for local testing")
 	sourceURLTTLSeconds := flags.Int64("source-url-ttl-seconds", 900, "exact-object source download URL lifetime")
+	checkpointPrefixURI := flags.String("checkpoint-prefix-uri", os.Getenv("HQ_CHECKPOINT_PREFIX_URI"), "trusted s3:// bucket/prefix for checkpoints")
+	checkpointPartURLTTL := flags.Int64("checkpoint-part-url-ttl-seconds", 3600, "per-part upload URL lifetime")
+	checkpointPartSize := flags.Int64("checkpoint-part-size-bytes", 8<<20, "recommended multipart checkpoint part size")
+	checkpointMaxBytes := flags.Int64("checkpoint-max-bytes", 64<<30, "maximum compressed checkpoint size")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -306,6 +310,13 @@ func runServe(args []string, logger *slog.Logger) error {
 		return err
 	}
 	config.SourceURLSigner = objectClient
+	config.CheckpointPrefixURI = strings.TrimSuffix(*checkpointPrefixURI, "/")
+	if config.CheckpointPrefixURI != "" {
+		config.CheckpointStore = objectClient
+	}
+	config.CheckpointPartURLTTL = *checkpointPartURLTTL
+	config.CheckpointPartSizeBytes = *checkpointPartSize
+	config.CheckpointMaxBytes = *checkpointMaxBytes
 	checker := endpointcheck.NewWithOptions(endpointcheck.Options{AllowPrivate: *allowPrivateShardEndpoints})
 	if *allowPrivateShardEndpoints {
 		logger.Warn("private shard endpoints are enabled; do not use this setting in production")

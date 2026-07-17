@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/agentidentity"
+	"git.saveweb.org/saveweb/hq/internal/checkpointupload"
 	"git.saveweb.org/saveweb/hq/internal/localadmin"
 	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/shard"
@@ -116,6 +117,8 @@ type serveConfig struct {
 	adminListen           string
 	localAdminTokenFile   string
 	localAdminToken       string
+	checkpointInterval    int64
+	checkpointWorkDir     string
 }
 
 func runServe(args []string, logger *slog.Logger) error {
@@ -270,6 +273,17 @@ func runServe(args []string, logger *slog.Logger) error {
 		_ = adminServer.Close()
 		return fmt.Errorf("shard: apply initial heartbeat: %w", err)
 	}
+	var checkpointUploader *checkpointupload.Uploader
+	if config.checkpointInterval > 0 {
+		checkpointUploader, err = checkpointupload.New(manager, tracker, checkpointupload.Config{
+			WorkDir: config.checkpointWorkDir, AllowHTTP: config.allowHTTPSource,
+		})
+		if err != nil {
+			_ = server.Close()
+			_ = adminServer.Close()
+			return err
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -281,6 +295,13 @@ func runServe(args []string, logger *slog.Logger) error {
 		defer loops.Done()
 		heartbeatLoop(loopContext, tracker, manager, config, heartbeat.HeartbeatAfterSeconds, logger)
 	}()
+	if checkpointUploader != nil {
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			checkpointLoop(loopContext, checkpointUploader, config.checkpointInterval, logger)
+		}()
+	}
 	go func() {
 		defer loops.Done()
 		maintenanceLoop(loopContext, manager, config.maxResets, logger)
@@ -315,7 +336,7 @@ func parseServeConfig(args []string) (serveConfig, error) {
 	flags.StringVar(&config.trackerURL, "tracker-url", os.Getenv("HQ_TRACKER_URL"), "tracker API base URL")
 	flags.StringVar(&config.trackerIssuer, "tracker-issuer", os.Getenv("HQ_TRACKER_ISSUER"), "expected access-token issuer")
 	flags.BoolVar(&config.allowHTTPTracker, "allow-http-tracker", false, "allow an HTTP tracker for local testing")
-	flags.BoolVar(&config.allowHTTPSource, "allow-http-object-download", false, "allow HTTP object downloads for local testing")
+	flags.BoolVar(&config.allowHTTPSource, "allow-http-object-download", false, "allow HTTP object transfers for local testing")
 	flags.StringVar(&config.machineTokenFile, "machine-token-file", os.Getenv("HQ_MACHINE_TOKEN_FILE"), "0600 machine token file")
 	flags.StringVar(&config.identityFile, "identity-file", os.Getenv("HQ_SHARD_IDENTITY_FILE"), "0600 shard identity file")
 	flags.StringVar(&config.dataDir, "data-dir", envOr("HQ_SHARD_DATA_DIR", "./shard-data"), "local SQLite state directory")
@@ -331,6 +352,8 @@ func parseServeConfig(args []string) (serveConfig, error) {
 	flags.IntVar(&config.maxResets, "max-resets", 3, "maximum retry/reset count")
 	flags.StringVar(&config.adminListen, "admin-listen", "127.0.0.1:9081", "localhost-only admin listen address")
 	flags.StringVar(&config.localAdminTokenFile, "local-admin-token-file", "", "rotating 0600 local admin token file")
+	flags.Int64Var(&config.checkpointInterval, "checkpoint-interval-seconds", 0, "periodic checkpoint interval; 0 disables publication")
+	flags.StringVar(&config.checkpointWorkDir, "checkpoint-work-dir", "", "bounded local checkpoint work directory")
 	config.localAdminToken = os.Getenv("SAVEWEB_LOCAL_ADMIN_TOKEN")
 	if err := flags.Parse(args); err != nil {
 		return serveConfig{}, err
@@ -344,6 +367,12 @@ func parseServeConfig(args []string) (serveConfig, error) {
 	}
 	if config.localAdminTokenFile == "" {
 		config.localAdminTokenFile = filepath.Join(config.dataDir, "runtime", "local-admin.token")
+	}
+	if config.checkpointInterval < 0 {
+		return serveConfig{}, fmt.Errorf("serve: checkpoint interval cannot be negative")
+	}
+	if config.checkpointWorkDir == "" {
+		config.checkpointWorkDir = filepath.Join(config.dataDir, "runtime", "checkpoints")
 	}
 	return config, nil
 }
@@ -414,6 +443,28 @@ func maintenanceLoop(ctx context.Context, manager *shard.Manager, maxResets int,
 			} else if result.Requeued > 0 || result.ResetExhausted > 0 {
 				logger.Info("queue leases reaped", "requeued", result.Requeued, "reset_exhausted", result.ResetExhausted)
 			}
+		}
+	}
+}
+
+func checkpointLoop(ctx context.Context, uploader *checkpointupload.Uploader, intervalSeconds int64, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		for _, result := range uploader.RunOnce(ctx) {
+			if result.Err != nil {
+				logger.Warn("checkpoint publication failed", "project_id", result.Target.ProjectID,
+					"shard_id", result.Target.ShardID, "generation", result.Target.Generation, "error", result.Err)
+				continue
+			}
+			logger.Info("checkpoint published", "project_id", result.Target.ProjectID,
+				"shard_id", result.Target.ShardID, "generation", result.Target.Generation,
+				"sequence", result.Checkpoint.Sequence, "size_bytes", result.Checkpoint.SizeBytes)
 		}
 	}
 }

@@ -172,6 +172,39 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	upload, err := store.ReserveCheckpoint(ctx, "owner", "shard-1", tracker.CheckpointUpload{
+		ProjectID: "project-1", ShardID: "shard-a", Generation: 3,
+		ID: "cp-integration-1", S3UploadID: "s3-integration-1",
+		URI:       "s3://checkpoints/project-1/shard-a/cp-integration-1.sqlite.zst",
+		SizeBytes: 1234, SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}, integrationNow)
+	if err != nil || upload.Sequence != 1 {
+		t.Fatalf("reserve checkpoint = %+v, %v", upload, err)
+	}
+	checkpoint, err := store.PublishCheckpoint(ctx, "owner", "shard-1", "project-1", "shard-a",
+		upload.ID, 3, integrationNow+1)
+	if err != nil || checkpoint.Sequence != 1 || checkpoint.Format != "sqlite-zstd-v1" {
+		t.Fatalf("publish checkpoint = %+v, %v", checkpoint, err)
+	}
+	upload, err = store.ReserveCheckpoint(ctx, "owner", "shard-1", tracker.CheckpointUpload{
+		ProjectID: "project-1", ShardID: "shard-a", Generation: 3,
+		ID: "cp-integration-stale", S3UploadID: "s3-integration-stale",
+		URI:       "s3://checkpoints/project-1/shard-a/cp-integration-stale.sqlite.zst",
+		SizeBytes: 1235, SHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}, integrationNow+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutShard(ctx, tracker.Shard{
+		ProjectID: "project-1", ID: "shard-a", Status: tracker.ShardStatusActive,
+		OwnerAgentID: "shard-1", Generation: 4,
+	}, integrationNow+2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishCheckpoint(ctx, "owner", "shard-1", "project-1", "shard-a",
+		upload.ID, 3, integrationNow+2); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("stale checkpoint publication = %v", err)
+	}
 
 	avatar := "https://avatars.test/admin"
 	portalAdmin, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{

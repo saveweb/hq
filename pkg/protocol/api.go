@@ -41,6 +41,7 @@ const (
 	ErrorSessionExpired          = "session_expired"
 	ErrorAttemptAlreadyFinalized = "attempt_already_finalized"
 	ErrorUnsupportedOperation    = "unsupported_operation"
+	ErrorCheckpointInProgress    = "checkpoint_in_progress"
 )
 
 type APIError struct {

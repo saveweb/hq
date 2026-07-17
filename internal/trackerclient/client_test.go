@@ -35,6 +35,25 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 			_ = json.NewEncoder(response).Encode(protocol.ShardLoadResultResponse{
 				ProjectID: "project-1", ShardID: "shard-1", Generation: 4, Status: "active",
 			})
+		case "/api/v1/shards/project-1/shard-1/checkpoints":
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(protocol.BeginCheckpointResponse{
+				ProjectID: "project-1", ShardID: "shard-1", Generation: 4,
+				UploadID: "cp-1", PartSizeBytes: 8 << 20, CreatedAt: 100,
+			})
+		case "/api/v1/shards/project-1/shard-1/checkpoints/cp-1/parts":
+			_ = json.NewEncoder(response).Encode(protocol.CheckpointPartURLResponse{
+				UploadID: "cp-1", PartNumber: 1, URL: "https://objects.test/part",
+				Headers: map[string]string{"Content-Md5": "AAAAAAAAAAAAAAAAAAAAAA=="}, ExpiresAt: 200,
+			})
+		case "/api/v1/shards/project-1/shard-1/checkpoints/cp-1/complete":
+			_ = json.NewEncoder(response).Encode(protocol.CheckpointResponse{
+				ProjectID: "project-1", ShardID: "shard-1", Generation: 4, Sequence: 1,
+				URI: "s3://bucket/checkpoint", Format: "sqlite-zstd-v1", SHA256: strings.Repeat("a", 64),
+				SizeBytes: 100, CreatedAt: 101,
+			})
+		case "/api/v1/shards/project-1/shard-1/checkpoints/cp-1/abort":
+			_ = json.NewEncoder(response).Encode(protocol.AbortCheckpointResponse{UploadID: "cp-1", Status: "aborted"})
 		case "/api/v1/worker/sessions":
 			response.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(response).Encode(protocol.SessionResponse{SessionID: "session-1", LeaseExpiresAt: 200})
@@ -67,6 +86,22 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 	})
 	if err != nil || loadResult.Status != "active" {
 		t.Fatalf("load result = %+v, %v", loadResult, err)
+	}
+	checkpoint, err := client.BeginCheckpoint(ctx, "project-1", "shard-1", protocol.BeginCheckpointRequest{Generation: 4})
+	if err != nil || checkpoint.UploadID != "cp-1" {
+		t.Fatalf("begin checkpoint = %+v, %v", checkpoint, err)
+	}
+	part, err := client.PresignCheckpointPart(ctx, "project-1", "shard-1", "cp-1", protocol.CheckpointPartURLRequest{})
+	if err != nil || part.PartNumber != 1 {
+		t.Fatalf("checkpoint part = %+v, %v", part, err)
+	}
+	published, err := client.CompleteCheckpoint(ctx, "project-1", "shard-1", "cp-1", protocol.CompleteCheckpointRequest{})
+	if err != nil || published.Sequence != 1 {
+		t.Fatalf("complete checkpoint = %+v, %v", published, err)
+	}
+	aborted, err := client.AbortCheckpoint(ctx, "project-1", "shard-1", "cp-1", protocol.AbortCheckpointRequest{})
+	if err != nil || aborted.Status != "aborted" {
+		t.Fatalf("abort checkpoint = %+v, %v", aborted, err)
 	}
 	session, err := client.CreateSession(ctx, protocol.CreateSessionRequest{})
 	if err != nil || session.SessionID != "session-1" {

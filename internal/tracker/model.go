@@ -126,6 +126,31 @@ type Shard struct {
 	SourceETag          *string
 }
 
+type CheckpointUpload struct {
+	ProjectID  string
+	ShardID    string
+	Generation int64
+	ID         string
+	S3UploadID string
+	URI        string
+	Sequence   int64
+	SizeBytes  int64
+	SHA256     string
+	CreatedAt  int64
+}
+
+type Checkpoint struct {
+	ProjectID  string
+	ShardID    string
+	Generation int64
+	Sequence   int64
+	URI        string
+	Format     string
+	SizeBytes  int64
+	SHA256     string
+	CreatedAt  int64
+}
+
 type Session struct {
 	ID              string
 	ProjectID       string

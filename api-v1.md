@@ -458,6 +458,7 @@ Item-level rejection 把同一个 `error` object 放入对应 result。`message`
 | 409 | `stale_generation` | shard generation 已改变 | outcome 直接丢弃；claim 刷新后重试 |
 | 409 | `shard_not_active` | shard 不可消费 | claim 选择其他 shard |
 | 409 | `identity_conflict` | 相同 job ID 对应不同身份输入 | 不重试相同 payload |
+| 409 | `checkpoint_in_progress` | 同一 shard 已有另一份 checkpoint upload | 等待或显式 abort 后重试 |
 | 429 | `rate_limited` / `backpressure` | 配额或 shard 有界队列已满 | 按 `retry_after_ms` + jitter 重试 |
 | 503 | `shard_unavailable` / `owner_lease_expired` | shard 正在停止或其 owner lease 已失效 | 刷新 assignment；outcome 不转交新 owner |
 

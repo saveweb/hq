@@ -116,3 +116,10 @@ type Store interface {
 	Stats(ctx context.Context) (Stats, error)
 	Close() error
 }
+
+// Snapshotter is an optional backend capability. Snapshot must create a new,
+// compact, self-contained database at destination without modifying the live
+// queue.
+type Snapshotter interface {
+	Snapshot(ctx context.Context, destination string) error
+}

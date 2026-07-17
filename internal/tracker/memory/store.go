@@ -16,13 +16,15 @@ import (
 var _ tracker.Store = (*Store)(nil)
 
 type Store struct {
-	mu         sync.RWMutex
-	users      map[string]tracker.User
-	tokenUsers map[string]string
-	agents     map[string]tracker.Agent
-	projects   map[string]tracker.Project
-	shards     map[string]tracker.Shard
-	sessions   map[string]tracker.Session
+	mu                sync.RWMutex
+	users             map[string]tracker.User
+	tokenUsers        map[string]string
+	agents            map[string]tracker.Agent
+	projects          map[string]tracker.Project
+	shards            map[string]tracker.Shard
+	sessions          map[string]tracker.Session
+	checkpointUploads map[string]tracker.CheckpointUpload
+	checkpoints       map[string]tracker.Checkpoint
 }
 
 func New() *Store {
@@ -30,6 +32,8 @@ func New() *Store {
 		users: make(map[string]tracker.User), tokenUsers: make(map[string]string),
 		agents: make(map[string]tracker.Agent), projects: make(map[string]tracker.Project),
 		shards: make(map[string]tracker.Shard), sessions: make(map[string]tracker.Session),
+		checkpointUploads: make(map[string]tracker.CheckpointUpload),
+		checkpoints:       make(map[string]tracker.Checkpoint),
 	}
 }
 
