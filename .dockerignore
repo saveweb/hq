@@ -4,6 +4,7 @@
 .vscode
 .env
 secrets
+data
 sdk/python/.venv
 **/__pycache__
 **/.pytest_cache

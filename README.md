@@ -71,12 +71,15 @@ binaries into one small runtime image. [compose.yml](./compose.yml) runs the
 Tracker with a private PostgreSQL service and publishes it only on
 `127.0.0.74:8080` for a host Caddy reverse proxy. PostgreSQL has no host port;
 its trust authentication is confined to an internal Docker network containing
-only PostgreSQL and Tracker.
+only PostgreSQL and Tracker. Its data is bind-mounted at `data/postgres/` so it
+can be inspected and backed up directly from the deployment directory.
 
 ```bash
 cp .env.example .env
 mkdir -p secrets
 chmod 700 secrets
+mkdir -p data/postgres
+chmod 700 data/postgres
 docker compose config
 docker compose build
 docker compose up -d
