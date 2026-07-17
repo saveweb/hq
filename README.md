@@ -64,6 +64,36 @@ uv sync --project sdk/python --dev
 uv run --project sdk/python pytest
 ```
 
+## Container deployment
+
+The root [Dockerfile](./Dockerfile) builds the `tracker`, `shard`, and `source`
+binaries into one small runtime image. [compose.yml](./compose.yml) runs the
+Tracker with a private PostgreSQL service and publishes it only on
+`127.0.0.74:8080` for a host Caddy reverse proxy. PostgreSQL has no host port;
+its trust authentication is confined to an internal Docker network containing
+only PostgreSQL and Tracker.
+
+```bash
+cp .env.example .env
+mkdir -p secrets
+chmod 700 secrets
+docker compose config
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+The one-shot `tracker-init` service creates persistent `0600` signing and web
+session secrets under `secrets/`. Tracker runs migrations on every start. To
+enable GitHub OAuth, set `HQ_GITHUB_CLIENT_ID` and create
+`secrets/github-client.secret`; to enable R2, set the `HQ_S3_*` values and
+create `secrets/r2-access-key` plus `secrets/r2-secret-key`. Those paths and
+`.env` are ignored by Git. The container fails closed when only half of either
+optional configuration is present.
+
+Production serves the loopback port through HTTPS. The included deployment is
+configured for `https://hq.saveweb.org`; do not expose port 8080 directly.
+
 See [api-v1.md](./api-v1.md) for protocol semantics and
 [design.md](./design.md) for the full design. The current pilot deployment,
 planned pause/recovery, R2 lifecycle, and shutdown procedures are in

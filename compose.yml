@@ -1,0 +1,105 @@
+name: saveweb-hq
+
+x-hq-image: &hq-image
+  build:
+    context: .
+    args:
+      VERSION: ${HQ_VERSION:-dev}
+      COMMIT: ${HQ_COMMIT:-unknown}
+  image: saveweb-hq:${HQ_VERSION:-dev}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hq
+      POSTGRES_USER: hq
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hq -d hq"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  tracker-init:
+    <<: *hq-image
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir -p /run/secrets
+        chmod 0700 /run/secrets
+        if [ ! -e /run/secrets/tracker-signing.json ]; then
+          tracker keygen --out /run/secrets/tracker-signing.json --key-id "$${HQ_SIGNING_KEY_ID:-key-1}"
+        fi
+        if [ ! -e /run/secrets/tracker-web.secret ]; then
+          tracker web-keygen --out /run/secrets/tracker-web.secret
+        fi
+        chown 65532:65532 /run/secrets
+        for secret in tracker-signing.json tracker-web.secret github-client.secret r2-access-key r2-secret-key; do
+          if [ -e "/run/secrets/$${secret}" ]; then
+            chown 65532:65532 "/run/secrets/$${secret}"
+            chmod 0600 "/run/secrets/$${secret}"
+          fi
+        done
+    environment:
+      HQ_SIGNING_KEY_ID: ${HQ_SIGNING_KEY_ID:-key-1}
+    volumes:
+      - ./secrets:/run/secrets
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  tracker:
+    <<: *hq-image
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tracker-init:
+        condition: service_completed_successfully
+    environment:
+      HQ_DATABASE_URL: postgres://hq@postgres:5432/hq?sslmode=disable
+      HQ_PUBLIC_URL: https://hq.saveweb.org
+      HQ_GITHUB_CLIENT_ID: ${HQ_GITHUB_CLIENT_ID:-}
+      HQ_OAUTH_AUTO_GRANT_WORKER: ${HQ_OAUTH_AUTO_GRANT_WORKER:-0}
+      HQ_S3_ENDPOINT: ${HQ_S3_ENDPOINT:-}
+      HQ_S3_REGION: ${HQ_S3_REGION:-auto}
+      HQ_S3_PATH_STYLE: ${HQ_S3_PATH_STYLE:-0}
+      HQ_CHECKPOINT_PREFIX_URI: ${HQ_CHECKPOINT_PREFIX_URI:-}
+    volumes:
+      - ./secrets:/run/secrets:ro
+    ports:
+      - 127.0.0.74:8080:8080
+    networks:
+      - default
+      - database
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  postgres-data:
+
+networks:
+  database:
+    internal: true

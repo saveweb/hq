@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.vscode
+.env
+secrets
+sdk/python/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+*.db
+*.sqlite
+*.key
+*.pem
+send_msg_to_yzqzss.md

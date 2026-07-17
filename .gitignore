@@ -26,4 +26,5 @@ __pycache__/
 *.pem
 *.key
 .env
+/secrets/
 send_msg_to_yzqzss.md
