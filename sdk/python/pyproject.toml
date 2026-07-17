@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Python worker SDK for SavewebHQ"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "cryptography>=49,<50",
+]
 
 [build-system]
 requires = ["uv_build>=0.9,<0.10"]
