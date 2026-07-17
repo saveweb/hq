@@ -27,7 +27,7 @@ review.md            Scoped design review
 
 ## Development
 
-Prerequisites are Go 1.24 or newer and `uv` 0.9 or newer.
+Prerequisites are Go 1.25 or newer and `uv` 0.9 or newer.
 
 ```bash
 make test

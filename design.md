@@ -427,14 +427,16 @@ Queue API v1 中，`complete` 只接受 `success`、`http_error`、`skipped` 三
 第一版只有 SQLite 实现。这里定义接口不是为了立即支持多种 backend，而是为了让队列主逻辑、调度器和 loader 不直接散落 SQLite 操作：
 
 ```text
-enqueue(generation, jobs)             仅供 loader 使用，批量写入并按 job.id 幂等
-claim_batch(generation, session_id, limit, lease_ttl)
+set_fence(generation, now, owner_lease_expires_at)
+                                      安装或续租 tracker owner fence；generation 增加时恢复 WIP
+enqueue(generation, now, jobs)        仅供 loader 使用，批量写入并按 job.id 幂等
+claim_batch(generation, now, session_id, limit, lease_ttl)
                                       原子认领 todo 任务
-complete_batch(generation, session_id, items)
+complete_batch(generation, now, session_id, items)
                                       batch transaction 内逐项完成并写入派生任务
-fail_batch(generation, session_id, items)
+fail_batch(generation, now, session_id, items)
                                       batch transaction 内逐项 reset 或进入 failed
-extend_lease_batch(generation, session_id, attempts, ttl)
+extend_lease_batch(generation, now, session_id, attempts, ttl)
                                       续租长时间运行的任务
 requeue_expired(generation, now, max_resets)
                                       回收过期 wip；超限进入 reset_exhausted
@@ -446,6 +448,7 @@ SQLite 实现必须保证：
 - `enqueue` 可以安全重试；
 - `claim_batch` 在单个分片内使用一个 transaction 原子执行，为每个 job 生成新的 `attempt_id`；同一时刻不能把同一 job 分给两个有效租约；
 - 所有在线操作先校验 generation 和 owner lease；`complete`、`fail` 和续租还必须校验 `session_id`、`attempt_id` 与任务租约，拒绝旧 owner、旧 attempt 或迟到 worker 的覆盖；
+- 写事务在开始和 commit 前各校验一次 owner lease；commit 前使用服务端可注入时钟，跨过 owner lease 截止点的整个 batch 回滚；
 - `explicit` Project 中，完成父任务与写入同 shard 的 `discovered_jobs` 必须在一个事务内提交；这样队列清空判断不会漏掉派生任务；
 - complete/fail batch 使用一个外层 SQLite transaction，逐 item 预校验或使用 savepoint 隔离，并返回 `applied`、`already_applied` 或稳定 error code；不能静默部分成功。单个 complete item 内的 outcome、父任务终态和 discovered jobs 是一个原子单元；外层 commit 失败则整个 batch 返回 batch-level error，不得报告已应用。
 
