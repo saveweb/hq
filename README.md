@@ -44,9 +44,9 @@ make test-postgres
 ```
 
 The cross-process E2E test also needs Docker. It starts PostgreSQL and an
-S3-compatible MinIO test server, then exercises tracker, a pinned-HTTPS shard,
-both worker SDKs, generation takeover, and source loading through a presigned
-exact-object URL:
+S3-compatible MinIO test server, then exercises tracker, pinned-HTTPS shards,
+both worker SDKs, generation takeover, source loading, multipart checkpoint
+publication, and restoration onto a blank replacement machine:
 
 ```bash
 make test-e2e
@@ -180,6 +180,21 @@ receives R2 credentials and checkpoint bytes do not pass through tracker. The
 URL TTL limits one part only, so a slow contributor can request fresh URLs for
 later or retried parts without a fixed total upload window. Temporary files are
 kept under `<data-dir>/runtime/checkpoints` and deleted after each attempt.
+
+To move a published shard to another registered machine, use a strictly newer
+generation and the explicit `recovering` status:
+
+```bash
+go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
+  --project-id project-1 --shard-id shard-1 --owner-agent-id sh_new \
+  --generation 2 --status recovering
+```
+
+The new shard receives an exact checkpoint GET URL, verifies compressed size,
+SHA-256, Zstd limits, SQLite integrity and queue identity, atomically installs
+the file, advances its generation fence, and only then reports `active`.
+Failure uses the distinct `recovery_failed` status. A recovering shard cannot
+serve queue claims or mutations.
 
 Shard also starts a separate management server on `127.0.0.1:9081`. By
 default, each `serve` invocation rotates a 256-bit token into

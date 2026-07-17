@@ -57,6 +57,12 @@ func (s *Store) AddShard(shard tracker.Shard) {
 	s.shards[shardKey(shard.ProjectID, shard.ID)] = cloneShard(shard)
 }
 
+func (s *Store) AddCheckpoint(checkpoint tracker.Checkpoint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpoints[shardKey(checkpoint.ProjectID, checkpoint.ShardID)] = checkpoint
+}
+
 func (s *Store) AuthenticateMachineToken(_ context.Context, machineToken string) (tracker.User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -159,12 +165,21 @@ func (s *Store) HeartbeatAgent(
 			}
 			shard.OwnerLeaseExpiresAt = ownerLeaseExpiresAt
 			s.shards[key] = shard
-			assignments = append(assignments, protocol.OwnerAssignment{
+			assignment := protocol.OwnerAssignment{
 				Route:  protocol.Route{ProjectID: shard.ProjectID, ShardID: shard.ID, Generation: shard.Generation},
 				Status: shard.Status, OwnerLeaseExpiresAt: shard.OwnerLeaseExpiresAt,
 				SourceURI: cloneString(shard.SourceURI), SourceFormat: cloneString(shard.SourceFormat),
 				SourceETag: cloneString(shard.SourceETag),
-			})
+			}
+			if checkpoint, ok := s.checkpoints[key]; ok && shard.Status == tracker.ShardStatusRecovering {
+				assignment.Checkpoint = &protocol.CheckpointRestore{
+					URI:        checkpoint.URI,
+					Generation: checkpoint.Generation, Sequence: checkpoint.Sequence,
+					Format: checkpoint.Format, SHA256: checkpoint.SHA256,
+					SizeBytes: checkpoint.SizeBytes, CreatedAt: checkpoint.CreatedAt,
+				}
+			}
+			assignments = append(assignments, assignment)
 		}
 	}
 	return tracker.AgentHeartbeat{Agent: cloneAgent(agent), OwnerAssignments: assignments}, nil
@@ -290,7 +305,7 @@ func (s *Store) FinishShardLoad(
 		value.Generation != generation || value.OwnerLeaseExpiresAt <= now ||
 		value.SourceURI == nil || value.SourceFormat == nil || *value.SourceFormat != "jobs-jsonl-zstd-v1" ||
 		value.SourceETag == nil || agent.Status != "online" ||
-		(value.Status != tracker.ShardStatusLoading && value.Status != tracker.ShardStatusRecovering) ||
+		value.Status != tracker.ShardStatusLoading ||
 		user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleShardOwner) {
 		return tracker.Shard{}, &tracker.Error{
 			Code:    protocol.ErrorStaleGeneration,
@@ -301,6 +316,41 @@ func (s *Store) FinishShardLoad(
 		value.Status = tracker.ShardStatusActive
 	} else {
 		value.Status = tracker.ShardStatusLoadFailed
+		value.OwnerLeaseExpiresAt = 0
+	}
+	s.shards[key] = value
+	return cloneShard(value), nil
+}
+
+func (s *Store) FinishShardRecovery(
+	_ context.Context,
+	userID, agentID, projectID, shardID string,
+	generation int64,
+	success bool,
+	_ string,
+	now int64,
+) (tracker.Shard, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := shardKey(projectID, shardID)
+	value, ok := s.shards[key]
+	agent, agentOK := s.agents[agentID]
+	user := s.users[userID]
+	checkpoint, checkpointOK := s.checkpoints[key]
+	if !ok || !agentOK || agent.UserID != userID || value.OwnerAgentID != agentID ||
+		value.Generation != generation || value.OwnerLeaseExpiresAt <= now ||
+		value.Status != tracker.ShardStatusRecovering || !checkpointOK ||
+		checkpoint.Generation > generation || agent.Status != "online" ||
+		user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleShardOwner) {
+		return tracker.Shard{}, &tracker.Error{
+			Code:    protocol.ErrorStaleGeneration,
+			Message: "checkpoint recovery no longer belongs to this owner generation",
+		}
+	}
+	if success {
+		value.Status = tracker.ShardStatusActive
+	} else {
+		value.Status = tracker.ShardStatusRecoveryFailed
 		value.OwnerLeaseExpiresAt = 0
 	}
 	s.shards[key] = value

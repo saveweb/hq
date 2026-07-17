@@ -531,4 +531,8 @@ GitHub login
   → SQLite state verified
 ```
 
-第一阶段不包含 R2 checkpoint、receiver、artifact body 上传和完整 admin 页面。完成这条链路后，用真实平均 JobSpec 对多个 shard endpoint 做压测，分别记录 tracker 控制面 QPS、单 shard SQLite 吞吐和系统 aggregate completed jobs/s。
+当前实现还覆盖 immutable R2 source、generation-CAS checkpoint multipart 发布，
+以及空数据目录的新 owner 恢复；跨进程 E2E 使用 PostgreSQL、HTTPS shard 和
+S3-compatible MinIO 验证这些路径。Receiver、artifact body 上传和完整运营管理页
+仍属于后续阶段。容量结论仍必须用真实平均 JobSpec 对多个 shard endpoint 压测，
+分别记录 tracker 控制面 QPS、单 shard SQLite 吞吐和系统 aggregate completed jobs/s。

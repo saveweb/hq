@@ -88,6 +88,18 @@ func (c *Client) ReportShardLoad(
 	return result, err
 }
 
+func (c *Client) ReportShardRecovery(
+	ctx context.Context,
+	projectID, shardID string,
+	request protocol.ShardRecoveryResultRequest,
+) (protocol.ShardRecoveryResultResponse, error) {
+	var result protocol.ShardRecoveryResultResponse
+	err := c.doJSON(ctx, http.MethodPost,
+		"/api/v1/shards/"+url.PathEscape(projectID)+"/"+url.PathEscape(shardID)+"/recovery-result",
+		request, &result)
+	return result, err
+}
+
 func (c *Client) BeginCheckpoint(
 	ctx context.Context,
 	projectID, shardID string,

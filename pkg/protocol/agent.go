@@ -43,13 +43,29 @@ type SigningKey struct {
 
 type OwnerAssignment struct {
 	Route
-	Status              string  `json:"status"`
-	OwnerLeaseExpiresAt int64   `json:"owner_lease_expires_at"`
-	SourceURI           *string `json:"source_uri"`
-	SourceFormat        *string `json:"source_format"`
-	SourceETag          *string `json:"source_etag"`
-	SourceDownloadURL   *string `json:"source_download_url"`
-	SourceURLExpiresAt  *int64  `json:"source_url_expires_at"`
+	Status              string             `json:"status"`
+	OwnerLeaseExpiresAt int64              `json:"owner_lease_expires_at"`
+	SourceURI           *string            `json:"source_uri"`
+	SourceFormat        *string            `json:"source_format"`
+	SourceETag          *string            `json:"source_etag"`
+	SourceDownloadURL   *string            `json:"source_download_url"`
+	SourceURLExpiresAt  *int64             `json:"source_url_expires_at"`
+	Checkpoint          *CheckpointRestore `json:"checkpoint"`
+}
+
+// CheckpointRestore is the immutable, read-only checkpoint selected by the
+// tracker for one recovering owner assignment. URI and object credentials stay
+// inside the tracker; the shard only receives an exact-object download URL.
+type CheckpointRestore struct {
+	URI          string `json:"-"`
+	Generation   int64  `json:"generation"`
+	Sequence     int64  `json:"sequence"`
+	Format       string `json:"format"`
+	SHA256       string `json:"sha256"`
+	SizeBytes    int64  `json:"size_bytes"`
+	CreatedAt    int64  `json:"created_at"`
+	DownloadURL  string `json:"download_url"`
+	URLExpiresAt int64  `json:"url_expires_at"`
 }
 
 type AgentHeartbeatResponse struct {
@@ -66,6 +82,19 @@ type ShardLoadResultRequest struct {
 }
 
 type ShardLoadResultResponse struct {
+	ProjectID  string `json:"project_id"`
+	ShardID    string `json:"shard_id"`
+	Generation int64  `json:"generation"`
+	Status     string `json:"status"`
+}
+
+type ShardRecoveryResultRequest struct {
+	Generation int64  `json:"generation"`
+	Success    bool   `json:"success"`
+	ErrorCode  string `json:"error_code"`
+}
+
+type ShardRecoveryResultResponse struct {
 	ProjectID  string `json:"project_id"`
 	ShardID    string `json:"shard_id"`
 	Generation int64  `json:"generation"`

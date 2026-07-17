@@ -15,6 +15,8 @@ type Store interface {
 	FindAssignment(ctx context.Context, userID, agentID, sessionID string, now int64) (*AssignmentCandidate, error)
 	FinishShardLoad(ctx context.Context, userID, agentID, projectID, shardID string,
 		generation int64, success bool, errorCode string, now int64) (Shard, error)
+	FinishShardRecovery(ctx context.Context, userID, agentID, projectID, shardID string,
+		generation int64, success bool, errorCode string, now int64) (Shard, error)
 	GetCheckpointTarget(ctx context.Context, userID, agentID, projectID, shardID string,
 		generation, now int64) (Shard, error)
 	GetCurrentCheckpointUpload(ctx context.Context, userID, agentID, projectID, shardID string,

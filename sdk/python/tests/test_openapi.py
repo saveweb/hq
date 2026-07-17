@@ -20,6 +20,7 @@ def test_openapi_contract_has_all_v1_operations() -> None:
         "/api/v1/agents/{agent_id}": "put",
         "/api/v1/agents/{agent_id}/heartbeat": "post",
         "/api/v1/shards/{project_id}/{shard_id}/load-result": "post",
+        "/api/v1/shards/{project_id}/{shard_id}/recovery-result": "post",
         "/api/v1/shards/{project_id}/{shard_id}/checkpoints": "post",
         "/api/v1/shards/{project_id}/{shard_id}/checkpoints/{upload_id}/parts": "post",
         "/api/v1/shards/{project_id}/{shard_id}/checkpoints/{upload_id}/complete": "post",

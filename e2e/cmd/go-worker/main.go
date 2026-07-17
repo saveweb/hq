@@ -21,7 +21,7 @@ func main() {
 }
 
 func run() error {
-	phase := flag.String("phase", "", "initial, verify, takeover, or recover")
+	phase := flag.String("phase", "", "initial, verify, takeover, recover, source, or checkpoint-recovery")
 	projectID := flag.String("project-id", "project-e2e", "explicit project identifier")
 	trackerURL := flag.String("tracker-url", "", "tracker base URL")
 	tokenFile := flag.String("machine-token-file", "", "worker machine token file")
@@ -61,9 +61,34 @@ func run() error {
 		return recoverJob(ctx, session)
 	case "source":
 		return consumeSource(ctx, session)
+	case "checkpoint-recovery":
+		return consumeCheckpointRecovery(ctx, session)
 	default:
 		return fmt.Errorf("go-worker: invalid phase %q", *phase)
 	}
+}
+
+func consumeCheckpointRecovery(ctx context.Context, session *worker.Session) error {
+	batch, err := session.Claim(ctx, 1, 60, []string{protocol.JobTypeSeed})
+	if err != nil {
+		return err
+	}
+	jobs := batch.Jobs()
+	if len(jobs) != 1 || jobs[0].ID != "checkpoint-recovery" || batch.Route().Generation != 2 {
+		return fmt.Errorf("go-worker: unexpected checkpoint recovery claim: route=%+v jobs=%+v", batch.Route(), jobs)
+	}
+	result, err := batch.Complete(ctx, []protocol.CompleteItem{{
+		JobID: jobs[0].ID, AttemptID: jobs[0].AttemptID,
+		Outcome:        protocol.Outcome{Kind: "success", Meta: protocol.Attrs{"checkpoint_recovery": true}},
+		DiscoveredJobs: []protocol.JobSpecV1{},
+	}})
+	if err != nil {
+		return err
+	}
+	if len(result.Results) != 1 || result.Results[0].Status != protocol.ItemStatusApplied {
+		return fmt.Errorf("go-worker: checkpoint recovery completion was not applied: %+v", result)
+	}
+	return nil
 }
 
 func consumeSource(ctx context.Context, session *worker.Session) error {

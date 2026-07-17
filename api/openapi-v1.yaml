@@ -204,6 +204,35 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
 
+  /api/v1/shards/{project_id}/{shard_id}/recovery-result:
+    parameters:
+      - $ref: '#/components/parameters/ProjectID'
+      - $ref: '#/components/parameters/ShardID'
+      - $ref: '#/components/parameters/AgentIDHeader'
+    post:
+      tags: [shards]
+      operationId: reportShardRecoveryResult
+      summary: Atomically finish checkpoint recovery for the current owner generation
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShardRecoveryResultRequest'
+      responses:
+        '200':
+          description: The shard became active or was marked recovery_failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShardRecoveryResultResponse'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
   /api/v1/shards/{project_id}/{shard_id}/checkpoints:
     parameters:
       - $ref: '#/components/parameters/ProjectID'
@@ -648,7 +677,7 @@ components:
     OwnerAssignment:
       type: object
       additionalProperties: false
-      required: [project_id, shard_id, generation, status, owner_lease_expires_at, source_uri, source_format, source_etag, source_download_url, source_url_expires_at]
+      required: [project_id, shard_id, generation, status, owner_lease_expires_at, source_uri, source_format, source_etag, source_download_url, source_url_expires_at, checkpoint]
       properties:
         project_id: {$ref: '#/components/schemas/Identifier'}
         shard_id: {$ref: '#/components/schemas/Identifier'}
@@ -665,6 +694,28 @@ components:
           maxLength: 8192
           description: Short-lived exact-object GET URL; never log or persist it.
         source_url_expires_at: {type: [integer, 'null'], format: int64, minimum: 0}
+        checkpoint:
+          oneOf:
+            - {$ref: '#/components/schemas/CheckpointRestore'}
+            - {type: 'null'}
+
+    CheckpointRestore:
+      type: object
+      additionalProperties: false
+      required: [generation, sequence, format, sha256, size_bytes, created_at, download_url, url_expires_at]
+      properties:
+        generation: {type: integer, format: int64, minimum: 1}
+        sequence: {type: integer, format: int64, minimum: 1}
+        format: {type: string, const: sqlite-zstd-v1}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        size_bytes: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/UnixTime'}
+        download_url:
+          type: string
+          format: uri
+          maxLength: 8192
+          description: Short-lived exact-object GET URL; never log or persist it.
+        url_expires_at: {$ref: '#/components/schemas/UnixTime'}
 
     AgentHeartbeatResponse:
       type: object
@@ -703,6 +754,28 @@ components:
         shard_id: {$ref: '#/components/schemas/Identifier'}
         generation: {type: integer, format: int64, minimum: 1}
         status: {type: string, enum: [active, load_failed]}
+
+    ShardRecoveryResultRequest:
+      type: object
+      additionalProperties: false
+      required: [generation, success, error_code]
+      properties:
+        generation: {type: integer, format: int64, minimum: 1}
+        success: {type: boolean}
+        error_code:
+          type: string
+          maxLength: 64
+          description: Empty on success; a stable machine-readable code on failure.
+
+    ShardRecoveryResultResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, shard_id, generation, status]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        shard_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [active, recovery_failed]}
 
     BeginCheckpointRequest:
       type: object

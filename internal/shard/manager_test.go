@@ -11,6 +11,7 @@ import (
 
 	"git.saveweb.org/saveweb/hq/internal/access"
 	"git.saveweb.org/saveweb/hq/internal/queue"
+	"git.saveweb.org/saveweb/hq/internal/sqlitequeue"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
@@ -260,6 +261,68 @@ func TestManagerLoadsSourceOnceAndReportsResult(t *testing.T) {
 	status, err := f.manager.RuntimeStatus(context.Background())
 	if err != nil || len(status.Shards) != 1 || status.Shards[0].Stats.Todo != 1 || status.Shards[0].LoadRunning {
 		t.Fatalf("runtime status = %+v, %v", status, err)
+	}
+}
+
+func TestManagerRestoresBlankQueueBeforeReportingSuccess(t *testing.T) {
+	reported := make(chan error, 1)
+	var restores atomic.Int64
+	f := newManagerFixture(t, func(config *ManagerConfig) {
+		config.RestoreCheckpoint = func(ctx context.Context, assignment protocol.OwnerAssignment, destination string) error {
+			restores.Add(1)
+			store, err := sqlitequeue.Open(ctx, destination, queue.Identity{
+				ProjectID: assignment.ProjectID, ShardID: assignment.ShardID,
+				Generation: assignment.Checkpoint.Generation,
+			}, sqlitequeue.WithClock(func() int64 { return managerNow }))
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			if err := store.SetFence(ctx, assignment.Checkpoint.Generation, managerNow, managerNow+120); err != nil {
+				return err
+			}
+			_, err = store.Enqueue(ctx, assignment.Checkpoint.Generation, managerNow, []queue.JobSpec{{
+				ID: "checkpoint-job-1", URL: "https://example.test/", Type: protocol.JobTypeSeed,
+				Attrs: map[string]any{},
+			}})
+			return err
+		}
+		config.ReportRecovery = func(_ context.Context, _ protocol.OwnerAssignment, recoveryError error) error {
+			reported <- recoveryError
+			return nil
+		}
+	})
+	heartbeat := f.heartbeat(2, managerNow+120, trackerStatusRecovering)
+	heartbeat.OwnerAssignments[0].Checkpoint = &protocol.CheckpointRestore{
+		Generation: 1, Sequence: 3, Format: "sqlite-zstd-v1",
+		SHA256:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SizeBytes: 123, CreatedAt: managerNow - 30,
+		DownloadURL: "https://objects.test/checkpoint?signature=secret", URLExpiresAt: managerNow + 60,
+	}
+	if err := f.manager.ApplyHeartbeat(context.Background(), heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-reported:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkpoint recovery result was not reported")
+	}
+	if restores.Load() != 1 {
+		t.Fatalf("restores = %d", restores.Load())
+	}
+	status, err := f.manager.RuntimeStatus(context.Background())
+	if err != nil || len(status.Shards) != 1 || status.Shards[0].Stats.Todo != 1 || status.Shards[0].RecoveryRunning {
+		t.Fatalf("recovery status = %+v, %v", status, err)
+	}
+	if err := f.manager.ApplyHeartbeat(context.Background(), f.heartbeat(2, managerNow+180, trackerStatusActive)); err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := f.manager.Authorize(f.token(t, 2))
+	if err != nil || authorization.AllowsClaim() != nil {
+		t.Fatalf("restored authorization = %+v, %v", authorization, err)
 	}
 }
 

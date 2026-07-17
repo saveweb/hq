@@ -30,6 +30,8 @@ type Config struct {
 	SourceURLSigner         SourceURLSigner
 	CheckpointStore         objectstorage.CheckpointStore
 	CheckpointPrefixURI     string
+	CheckpointURLSigner     SourceURLSigner
+	CheckpointURLTTLSeconds int64
 	CheckpointPartURLTTL    int64
 	CheckpointPartSizeBytes int64
 	CheckpointMaxBytes      int64
@@ -43,9 +45,10 @@ func DefaultConfig() Config {
 	return Config{
 		AgentHeartbeatSeconds: 30, OwnerLeaseSeconds: 120,
 		SessionHeartbeatSeconds: 30, SessionLeaseSeconds: 120,
-		AccessTokenTTLSeconds: 600,
-		SourceURLTTLSeconds:   900,
-		CheckpointPartURLTTL:  3600, CheckpointPartSizeBytes: 8 << 20,
+		AccessTokenTTLSeconds:   600,
+		SourceURLTTLSeconds:     900,
+		CheckpointURLTTLSeconds: 3600,
+		CheckpointPartURLTTL:    3600, CheckpointPartSizeBytes: 8 << 20,
 		CheckpointMaxBytes: 64 << 30,
 	}
 }
@@ -67,13 +70,15 @@ func NewService(store Store, endpointChecker EndpointChecker, signer *access.Sig
 		config.SessionHeartbeatSeconds < 1 || config.SessionLeaseSeconds <= config.SessionHeartbeatSeconds ||
 		config.AccessTokenTTLSeconds < 1 || config.AccessTokenTTLSeconds > access.MaxTTLSeconds ||
 		(config.SourceURLSigner != nil && (config.SourceURLTTLSeconds < 60 || config.SourceURLTTLSeconds > 86400)) ||
-		(config.CheckpointStore == nil) != (config.CheckpointPrefixURI == "") ||
+		((config.CheckpointStore == nil) != (config.CheckpointPrefixURI == "") ||
+			(config.CheckpointStore == nil) != (config.CheckpointURLSigner == nil)) ||
 		(config.CheckpointStore != nil && (config.CheckpointPartURLTTL < 60 || config.CheckpointPartURLTTL > 86400 ||
+			config.CheckpointURLTTLSeconds < 60 || config.CheckpointURLTTLSeconds > 86400 ||
 			config.CheckpointPartSizeBytes < 5<<20 || config.CheckpointPartSizeBytes > 64<<20 ||
 			config.CheckpointMaxBytes < 1 || config.CheckpointMaxBytes > 5<<40 ||
 			config.CheckpointMaxBytes > config.CheckpointPartSizeBytes*10_000 ||
 			!validS3Prefix(config.CheckpointPrefixURI))) {
-		return nil, fmt.Errorf("tracker: invalid lease configuration")
+		return nil, fmt.Errorf("tracker: invalid service configuration")
 	}
 	if config.SigningKeyNotBefore == 0 {
 		config.SigningKeyNotBefore = now()
@@ -426,27 +431,46 @@ func (s *Service) HeartbeatAgent(ctx context.Context, machineToken, agentID stri
 	}
 	for index := range heartbeat.OwnerAssignments {
 		assignment := &heartbeat.OwnerAssignments[index]
-		if assignment.SourceURI == nil ||
-			(assignment.Status != ShardStatusLoading && assignment.Status != ShardStatusRecovering) {
-			continue
-		}
-		if assignment.SourceFormat == nil || *assignment.SourceFormat != "jobs-jsonl-zstd-v1" ||
-			assignment.SourceETag == nil || *assignment.SourceETag == "" {
-			return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: incomplete source assignment")
-		}
-		if s.config.SourceURLSigner == nil || s.config.SourceURLTTLSeconds < 60 || s.config.SourceURLTTLSeconds > 86400 {
-			return protocol.AgentHeartbeatResponse{}, &Error{
-				Code: protocol.ErrorUnsupportedOperation, Message: "source object storage is not configured",
+		switch assignment.Status {
+		case ShardStatusLoading:
+			if assignment.SourceURI == nil || assignment.SourceFormat == nil || *assignment.SourceFormat != "jobs-jsonl-zstd-v1" ||
+				assignment.SourceETag == nil || *assignment.SourceETag == "" || assignment.Checkpoint != nil {
+				return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: incomplete source assignment")
 			}
+			if s.config.SourceURLSigner == nil || s.config.SourceURLTTLSeconds < 60 || s.config.SourceURLTTLSeconds > 86400 {
+				return protocol.AgentHeartbeatResponse{}, &Error{
+					Code: protocol.ErrorUnsupportedOperation, Message: "source object storage is not configured",
+				}
+			}
+			downloadURL, expiresAt, err := s.config.SourceURLSigner.PresignGet(
+				ctx, *assignment.SourceURI, now, time.Duration(s.config.SourceURLTTLSeconds)*time.Second,
+			)
+			if err != nil {
+				return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: presign source download: %w", err)
+			}
+			assignment.SourceDownloadURL = &downloadURL
+			assignment.SourceURLExpiresAt = &expiresAt
+		case ShardStatusRecovering:
+			checkpoint := assignment.Checkpoint
+			if assignment.SourceURI != nil || assignment.SourceFormat != nil || assignment.SourceETag != nil ||
+				checkpoint == nil || checkpoint.URI == "" || checkpoint.Format != "sqlite-zstd-v1" ||
+				checkpoint.Generation < 1 || checkpoint.Generation > assignment.Generation || checkpoint.Sequence < 1 ||
+				checkpoint.SizeBytes < 1 || !validSHA256(checkpoint.SHA256) {
+				return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: incomplete checkpoint recovery assignment")
+			}
+			if s.config.CheckpointURLSigner == nil {
+				return protocol.AgentHeartbeatResponse{}, &Error{
+					Code: protocol.ErrorUnsupportedOperation, Message: "checkpoint object storage is not configured",
+				}
+			}
+			downloadURL, expiresAt, err := s.config.CheckpointURLSigner.PresignGet(
+				ctx, checkpoint.URI, now, time.Duration(s.config.CheckpointURLTTLSeconds)*time.Second,
+			)
+			if err != nil {
+				return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: presign checkpoint download: %w", err)
+			}
+			checkpoint.DownloadURL, checkpoint.URLExpiresAt, checkpoint.URI = downloadURL, expiresAt, ""
 		}
-		downloadURL, expiresAt, err := s.config.SourceURLSigner.PresignGet(
-			ctx, *assignment.SourceURI, now, time.Duration(s.config.SourceURLTTLSeconds)*time.Second,
-		)
-		if err != nil {
-			return protocol.AgentHeartbeatResponse{}, fmt.Errorf("tracker: presign source download: %w", err)
-		}
-		assignment.SourceDownloadURL = &downloadURL
-		assignment.SourceURLExpiresAt = &expiresAt
 	}
 	keys := []protocol.SigningKey{}
 	if heartbeat.Agent.Kind == protocol.AgentKindShard {
@@ -504,6 +528,37 @@ func (s *Service) ReportShardLoad(
 		return protocol.ShardLoadResultResponse{}, err
 	}
 	return protocol.ShardLoadResultResponse{
+		ProjectID: value.ProjectID, ShardID: value.ID,
+		Generation: value.Generation, Status: value.Status,
+	}, nil
+}
+
+func (s *Service) ReportShardRecovery(
+	ctx context.Context,
+	machineToken, agentID, projectID, shardID string,
+	request protocol.ShardRecoveryResultRequest,
+) (protocol.ShardRecoveryResultResponse, error) {
+	user, err := s.authenticate(ctx, machineToken)
+	if err != nil {
+		return protocol.ShardRecoveryResultResponse{}, err
+	}
+	if !user.HasRole(RoleShardOwner) {
+		return protocol.ShardRecoveryResultResponse{}, permissionDenied("shard_owner role required")
+	}
+	if !queue.ValidateIdentifier(agentID) || !queue.ValidateIdentifier(projectID) ||
+		!queue.ValidateIdentifier(shardID) || request.Generation < 1 ||
+		(request.Success && request.ErrorCode != "") ||
+		(!request.Success && (!queue.ValidateIdentifier(request.ErrorCode) || len(request.ErrorCode) > 64)) {
+		return protocol.ShardRecoveryResultResponse{}, invalidRequest("invalid shard recovery result")
+	}
+	value, err := s.store.FinishShardRecovery(
+		ctx, user.ID, agentID, projectID, shardID, request.Generation,
+		request.Success, request.ErrorCode, s.now(),
+	)
+	if err != nil {
+		return protocol.ShardRecoveryResultResponse{}, err
+	}
+	return protocol.ShardRecoveryResultResponse{
 		ProjectID: value.ProjectID, ShardID: value.ID,
 		Generation: value.Generation, Status: value.Status,
 	}, nil

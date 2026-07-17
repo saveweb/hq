@@ -148,7 +148,9 @@ func (s *Store) HeartbeatAgent(
 			SET owner_lease_expires_at=$2, updated_at=$3
 			WHERE owner_agent_id=$1 AND status = ANY($4)
 			RETURNING project_id, id, generation, status, owner_lease_expires_at,
-				source_uri, source_format, source_etag
+				source_uri, source_format, source_etag,
+				checkpoint_uri, checkpoint_generation, checkpoint_seq, checkpoint_format,
+				checkpoint_checksum, checkpoint_size, checkpoint_at
 		`, agentID, ownerLeaseExpiresAt, now, []string{
 			tracker.ShardStatusLoading, tracker.ShardStatusActive, tracker.ShardStatusDraining,
 			tracker.ShardStatusRecovering, tracker.ShardStatusOffline,
@@ -159,9 +161,27 @@ func (s *Store) HeartbeatAgent(
 		defer rows.Close()
 		for rows.Next() {
 			var value protocol.OwnerAssignment
+			var checkpointGeneration, checkpointSequence, checkpointSize, checkpointAt *int64
+			var checkpointURI, checkpointFormat, checkpointChecksum *string
 			if err := rows.Scan(&value.ProjectID, &value.ShardID, &value.Generation, &value.Status,
-				&value.OwnerLeaseExpiresAt, &value.SourceURI, &value.SourceFormat, &value.SourceETag); err != nil {
+				&value.OwnerLeaseExpiresAt, &value.SourceURI, &value.SourceFormat, &value.SourceETag,
+				&checkpointURI, &checkpointGeneration, &checkpointSequence, &checkpointFormat,
+				&checkpointChecksum, &checkpointSize, &checkpointAt); err != nil {
 				return err
+			}
+			if value.Status == tracker.ShardStatusRecovering && (checkpointURI != nil ||
+				checkpointGeneration != nil || checkpointSequence != nil || checkpointFormat != nil ||
+				checkpointChecksum != nil || checkpointSize != nil || checkpointAt != nil) {
+				if checkpointURI == nil || checkpointGeneration == nil || checkpointSequence == nil || checkpointFormat == nil ||
+					checkpointChecksum == nil || checkpointSize == nil || checkpointAt == nil {
+					return fmt.Errorf("incomplete published checkpoint state")
+				}
+				value.Checkpoint = &protocol.CheckpointRestore{
+					URI:        *checkpointURI,
+					Generation: *checkpointGeneration, Sequence: *checkpointSequence,
+					Format: *checkpointFormat, SHA256: *checkpointChecksum,
+					SizeBytes: *checkpointSize, CreatedAt: *checkpointAt,
+				}
 			}
 			result.OwnerAssignments = append(result.OwnerAssignments, value)
 		}

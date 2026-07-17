@@ -48,6 +48,41 @@ func (s *Store) Snapshot(ctx context.Context, destination string) error {
 	return nil
 }
 
+// VerifyCheckpoint validates the standalone SQLite file before a recovering
+// shard installs it. It does not migrate or mutate the file.
+func VerifyCheckpoint(ctx context.Context, path string, identity queue.Identity) error {
+	if identity.ProjectID == "" || identity.ShardID == "" || identity.Generation < 1 {
+		return fmt.Errorf("sqlitequeue: invalid checkpoint identity")
+	}
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
+	if err != nil {
+		return fmt.Errorf("sqlitequeue: open checkpoint verification: %w", err)
+	}
+	defer db.Close()
+	var result string
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+		return fmt.Errorf("sqlitequeue: verify checkpoint: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("sqlitequeue: checkpoint quick_check failed")
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
+		return fmt.Errorf("sqlitequeue: unsupported checkpoint schema version")
+	}
+	var projectID, shardID string
+	var generation int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT project_id, shard_id, generation FROM queue_meta WHERE singleton=1
+	`).Scan(&projectID, &shardID, &generation); err != nil {
+		return fmt.Errorf("sqlitequeue: read checkpoint identity: %w", err)
+	}
+	if projectID != identity.ProjectID || shardID != identity.ShardID || generation != identity.Generation {
+		return fmt.Errorf("sqlitequeue: checkpoint identity mismatch")
+	}
+	return nil
+}
+
 func verifySnapshot(ctx context.Context, path string) error {
 	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
 	if err != nil {

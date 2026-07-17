@@ -269,7 +269,7 @@ func TestFailedSourceLoadHasDistinctTerminalStatus(t *testing.T) {
 	sourceFormat := "jobs-jsonl-zstd-v1"
 	sourceETag := "failed-etag"
 	f.store.AddShard(tracker.Shard{
-		ProjectID: "project-1", ID: "shard-failed", Status: tracker.ShardStatusRecovering,
+		ProjectID: "project-1", ID: "shard-failed", Status: tracker.ShardStatusLoading,
 		OwnerAgentID: "agent-shard-1", Generation: 3, OwnerLeaseExpiresAt: f.now + 120,
 		SourceURI: &sourceURI, SourceFormat: &sourceFormat, SourceETag: &sourceETag,
 	})
@@ -299,6 +299,7 @@ func TestCheckpointMultipartIsGenerationCASPublished(t *testing.T) {
 	config := tracker.DefaultConfig()
 	config.CheckpointStore = objects
 	config.CheckpointPrefixURI = "s3://checkpoints/saveweb"
+	config.CheckpointURLSigner = &sourceSigner{}
 	service, err := tracker.NewService(f.store, f.checker, signer, func() int64 { return f.now }, config)
 	if err != nil {
 		t.Fatal(err)
@@ -330,6 +331,57 @@ func TestCheckpointMultipartIsGenerationCASPublished(t *testing.T) {
 	if err != nil || checkpoint.Sequence != 1 || checkpoint.SizeBytes != 123 ||
 		checkpoint.Format != "sqlite-zstd-v1" || objects.completed != 1 {
 		t.Fatalf("checkpoint = %+v, completed=%d, error=%v", checkpoint, objects.completed, err)
+	}
+}
+
+func TestCheckpointRecoveryAssignmentAndDistinctFailureStatus(t *testing.T) {
+	f := newFixture(t)
+	f.registerShard(t)
+	checkpoint := tracker.Checkpoint{
+		ProjectID: "project-1", ShardID: "shard-recovery", Generation: 4, Sequence: 7,
+		URI: "s3://checkpoints/project-1/shard-recovery/cp.sqlite.zst", Format: "sqlite-zstd-v1",
+		SizeBytes: 321, SHA256: strings.Repeat("b", 64), CreatedAt: f.now - 30,
+	}
+	f.store.AddCheckpoint(checkpoint)
+	f.store.AddShard(tracker.Shard{
+		ProjectID: "project-1", ID: "shard-recovery", Status: tracker.ShardStatusRecovering,
+		OwnerAgentID: "agent-shard-1", Generation: 5,
+	})
+	objects := &checkpointObjects{}
+	downloads := &sourceSigner{}
+	_, privateKey, err := access.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := access.NewSigner("https://tracker.example", "key-recovery", privateKey, func() int64 { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := tracker.DefaultConfig()
+	config.CheckpointStore = objects
+	config.CheckpointPrefixURI = "s3://checkpoints"
+	config.CheckpointURLSigner = downloads
+	service, err := tracker.NewService(f.store, f.checker, signer, func() int64 { return f.now }, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat, err := service.HeartbeatAgent(context.Background(), "token-owner", "agent-shard-1", protocol.AgentHeartbeatRequest{
+		Version: "0.1.0", Attrs: protocol.Attrs{},
+	})
+	if err != nil || len(heartbeat.OwnerAssignments) != 1 {
+		t.Fatalf("recovery heartbeat = %+v, %v", heartbeat, err)
+	}
+	assignment := heartbeat.OwnerAssignments[0]
+	if assignment.Checkpoint == nil || assignment.Checkpoint.Generation != 4 || assignment.Checkpoint.Sequence != 7 ||
+		assignment.Checkpoint.DownloadURL == "" || assignment.Checkpoint.URI != "" || downloads.uri != checkpoint.URI {
+		t.Fatalf("recovery assignment = %+v", assignment)
+	}
+	result, err := service.ReportShardRecovery(context.Background(), "token-owner", "agent-shard-1",
+		"project-1", "shard-recovery", protocol.ShardRecoveryResultRequest{
+			Generation: 5, Success: false, ErrorCode: "checkpoint_restore_failed",
+		})
+	if err != nil || result.Status != tracker.ShardStatusRecoveryFailed {
+		t.Fatalf("failed recovery result = %+v, %v", result, err)
 	}
 }
 

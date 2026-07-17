@@ -35,6 +35,10 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 			_ = json.NewEncoder(response).Encode(protocol.ShardLoadResultResponse{
 				ProjectID: "project-1", ShardID: "shard-1", Generation: 4, Status: "active",
 			})
+		case "/api/v1/shards/project-1/shard-1/recovery-result":
+			_ = json.NewEncoder(response).Encode(protocol.ShardRecoveryResultResponse{
+				ProjectID: "project-1", ShardID: "shard-1", Generation: 4, Status: "active",
+			})
 		case "/api/v1/shards/project-1/shard-1/checkpoints":
 			response.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(response).Encode(protocol.BeginCheckpointResponse{
@@ -86,6 +90,12 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 	})
 	if err != nil || loadResult.Status != "active" {
 		t.Fatalf("load result = %+v, %v", loadResult, err)
+	}
+	recoveryResult, err := client.ReportShardRecovery(ctx, "project-1", "shard-1", protocol.ShardRecoveryResultRequest{
+		Generation: 4, Success: true,
+	})
+	if err != nil || recoveryResult.Status != "active" {
+		t.Fatalf("recovery result = %+v, %v", recoveryResult, err)
 	}
 	checkpoint, err := client.BeginCheckpoint(ctx, "project-1", "shard-1", protocol.BeginCheckpointRequest{Generation: 4})
 	if err != nil || checkpoint.UploadID != "cp-1" {

@@ -4,9 +4,12 @@ package shard
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -21,15 +24,19 @@ import (
 type StoreOpener func(ctx context.Context, path string, identity queue.Identity, now func() int64) (queue.Store, error)
 type SourceLoader func(context.Context, protocol.OwnerAssignment, queue.Store) error
 type SourceReporter func(context.Context, protocol.OwnerAssignment, error) error
+type CheckpointRestorer func(context.Context, protocol.OwnerAssignment, string) error
+type RecoveryReporter func(context.Context, protocol.OwnerAssignment, error) error
 
 type ManagerConfig struct {
-	AgentID      string
-	Issuer       string
-	DataDir      string
-	Clock        func() int64
-	OpenStore    StoreOpener
-	LoadSource   SourceLoader
-	ReportSource SourceReporter
+	AgentID           string
+	Issuer            string
+	DataDir           string
+	Clock             func() int64
+	OpenStore         StoreOpener
+	LoadSource        SourceLoader
+	ReportSource      SourceReporter
+	RestoreCheckpoint CheckpointRestorer
+	ReportRecovery    RecoveryReporter
 }
 
 type routeKey struct {
@@ -43,27 +50,34 @@ type ownedShard struct {
 	loadKey    string
 	loadCancel context.CancelFunc
 
-	loadRunning bool
-	loadError   string
+	loadRunning     bool
+	loadError       string
+	recoveryKey     string
+	recoveryCancel  context.CancelFunc
+	recoveryRunning bool
+	recoveryError   string
 }
 
 type Manager struct {
-	mu            sync.RWMutex
-	agentID       string
-	issuer        string
-	dataDir       string
-	clock         func() int64
-	clockOffset   int64
-	openStore     StoreOpener
-	loadSource    SourceLoader
-	reportSource  SourceReporter
-	loaders       sync.WaitGroup
-	snapshots     sync.WaitGroup
-	verifier      *access.Verifier
-	owned         map[routeKey]*ownedShard
-	retiredStores []queue.Store
-	claimsPaused  bool
-	closed        bool
+	mu                sync.RWMutex
+	agentID           string
+	issuer            string
+	dataDir           string
+	clock             func() int64
+	clockOffset       int64
+	openStore         StoreOpener
+	loadSource        SourceLoader
+	reportSource      SourceReporter
+	restoreCheckpoint CheckpointRestorer
+	reportRecovery    RecoveryReporter
+	loaders           sync.WaitGroup
+	recoveries        sync.WaitGroup
+	snapshots         sync.WaitGroup
+	verifier          *access.Verifier
+	owned             map[routeKey]*ownedShard
+	retiredStores     []queue.Store
+	claimsPaused      bool
+	closed            bool
 }
 
 type Authorization struct {
@@ -94,6 +108,8 @@ type ShardStatus struct {
 	Stats               queue.Stats `json:"stats"`
 	LoadRunning         bool        `json:"load_running"`
 	LoadError           string      `json:"load_error,omitempty"`
+	RecoveryRunning     bool        `json:"recovery_running"`
+	RecoveryError       string      `json:"recovery_error,omitempty"`
 }
 
 type CheckpointTarget struct {
@@ -117,10 +133,14 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	if (config.LoadSource == nil) != (config.ReportSource == nil) {
 		return nil, fmt.Errorf("shard: source loader and reporter must be configured together")
 	}
+	if (config.RestoreCheckpoint == nil) != (config.ReportRecovery == nil) {
+		return nil, fmt.Errorf("shard: checkpoint restorer and recovery reporter must be configured together")
+	}
 	return &Manager{
 		agentID: config.AgentID, issuer: config.Issuer, dataDir: config.DataDir,
 		clock: config.Clock, openStore: config.OpenStore,
 		loadSource: config.LoadSource, reportSource: config.ReportSource,
+		restoreCheckpoint: config.RestoreCheckpoint, reportRecovery: config.ReportRecovery,
 		owned: make(map[routeKey]*ownedShard),
 	}, nil
 }
@@ -176,7 +196,14 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 		assignment protocol.OwnerAssignment
 		ctx        context.Context
 	}
+	type recoveryRequest struct {
+		owned        *ownedShard
+		assignment   protocol.OwnerAssignment
+		ctx          context.Context
+		needsRestore bool
+	}
 	loads := []loadRequest{}
+	recoveries := []recoveryRequest{}
 	opened := []queue.Store{}
 	rollbackOpened := func() {
 		for _, store := range opened {
@@ -194,25 +221,61 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 			return fmt.Errorf("shard: duplicate owner assignment")
 		}
 		current := m.owned[key]
-		if current == nil {
-			path := m.databasePath(assignment.ProjectID, assignment.ShardID)
+		path := m.databasePath(assignment.ProjectID, assignment.ShardID)
+		openQueue := func() (*ownedShard, error) {
 			store, openError := m.openStore(ctx, path, queue.Identity{
 				ProjectID: assignment.ProjectID, ShardID: assignment.ShardID, Generation: assignment.Generation,
 			}, m.Now)
 			if openError != nil {
-				rollbackOpened()
-				return fmt.Errorf("shard: open queue %s/%s: %w", assignment.ProjectID, assignment.ShardID, openError)
+				return nil, fmt.Errorf("shard: open queue %s/%s: %w", assignment.ProjectID, assignment.ShardID, openError)
 			}
 			opened = append(opened, store)
-			current = &ownedShard{store: store}
+			return &ownedShard{store: store}, nil
 		}
-		if err := current.store.SetFence(ctx, assignment.Generation, adjustedNow, assignment.OwnerLeaseExpiresAt); err != nil {
+		if current == nil {
+			if assignment.Status == trackerStatusRecovering {
+				if _, statError := os.Lstat(path); os.IsNotExist(statError) {
+					current = &ownedShard{}
+				} else if statError != nil {
+					rollbackOpened()
+					return fmt.Errorf("shard: inspect recovery destination %s/%s: %w", assignment.ProjectID, assignment.ShardID, statError)
+				} else {
+					checkpointIdentity := queue.Identity{
+						ProjectID: assignment.ProjectID, ShardID: assignment.ShardID,
+						Generation: assignment.Checkpoint.Generation,
+					}
+					verifyError := sqlitequeue.VerifyCheckpoint(ctx, path, checkpointIdentity)
+					if verifyError != nil && assignment.Generation != checkpointIdentity.Generation {
+						checkpointIdentity.Generation = assignment.Generation
+						verifyError = sqlitequeue.VerifyCheckpoint(ctx, path, checkpointIdentity)
+					}
+					if verifyError == nil {
+						current, err = openQueue()
+					} else {
+						// Do not trust or overwrite an unrelated local database. The
+						// recovery worker reports a distinct failure for operator action.
+						current = &ownedShard{}
+					}
+				}
+			} else {
+				current, err = openQueue()
+			}
+			if err != nil {
+				rollbackOpened()
+				return err
+			}
+		}
+		if current.store != nil {
+			if err := current.store.SetFence(ctx, assignment.Generation, adjustedNow, assignment.OwnerLeaseExpiresAt); err != nil {
+				rollbackOpened()
+				return fmt.Errorf("shard: install fence %s/%s: %w", assignment.ProjectID, assignment.ShardID, err)
+			}
+		} else if assignment.Status != trackerStatusRecovering {
 			rollbackOpened()
-			return fmt.Errorf("shard: install fence %s/%s: %w", assignment.ProjectID, assignment.ShardID, err)
+			return fmt.Errorf("shard: queue is unavailable outside checkpoint recovery")
 		}
 		current.assignment = assignment
-		if assignment.SourceURI != nil &&
-			(assignment.Status == trackerStatusLoading || assignment.Status == trackerStatusRecovering) {
+		if assignment.SourceURI != nil && assignment.Status == trackerStatusLoading {
 			if m.loadSource == nil {
 				rollbackOpened()
 				return &queue.Error{Code: protocol.ErrorUnsupportedOperation, Message: "source loading is not configured"}
@@ -231,6 +294,28 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 			current.loadCancel()
 			current.loadCancel, current.loadRunning = nil, false
 		}
+		if assignment.Status == trackerStatusRecovering {
+			if m.restoreCheckpoint == nil {
+				rollbackOpened()
+				return &queue.Error{Code: protocol.ErrorUnsupportedOperation, Message: "checkpoint recovery is not configured"}
+			}
+			recoveryKey := checkpointRecoveryKey(assignment)
+			if current.recoveryKey != recoveryKey {
+				if current.recoveryCancel != nil {
+					current.recoveryCancel()
+				}
+				recoveryContext, cancel := context.WithCancel(context.Background())
+				current.recoveryKey, current.recoveryCancel = recoveryKey, cancel
+				current.recoveryRunning, current.recoveryError = true, ""
+				recoveries = append(recoveries, recoveryRequest{
+					owned: current, assignment: assignment, ctx: recoveryContext,
+					needsRestore: current.store == nil,
+				})
+			}
+		} else if current.recoveryCancel != nil {
+			current.recoveryCancel()
+			current.recoveryCancel, current.recoveryRunning = nil, false
+		}
 		next[key] = current
 	}
 	for key, value := range m.owned {
@@ -238,7 +323,12 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 			if value.loadCancel != nil {
 				value.loadCancel()
 			}
-			m.retiredStores = append(m.retiredStores, value.store)
+			if value.recoveryCancel != nil {
+				value.recoveryCancel()
+			}
+			if value.store != nil {
+				m.retiredStores = append(m.retiredStores, value.store)
+			}
 		}
 	}
 	m.owned = next
@@ -246,6 +336,10 @@ func (m *Manager) ApplyHeartbeat(ctx context.Context, heartbeat protocol.AgentHe
 	for _, request := range loads {
 		m.loaders.Add(1)
 		go m.runSourceLoad(request.ctx, request.owned, request.assignment)
+	}
+	for _, request := range recoveries {
+		m.recoveries.Add(1)
+		go m.runCheckpointRecovery(request.ctx, request.owned, request.assignment, request.needsRestore)
 	}
 	return nil
 }
@@ -305,6 +399,103 @@ func sourceLoadKey(assignment protocol.OwnerAssignment) string {
 	return fmt.Sprintf("%s\x00%s\x00%d", *assignment.SourceURI, *assignment.SourceETag, assignment.Generation)
 }
 
+func (m *Manager) runCheckpointRecovery(
+	ctx context.Context,
+	owned *ownedShard,
+	assignment protocol.OwnerAssignment,
+	needsRestore bool,
+) {
+	defer m.recoveries.Done()
+	recoveryError := error(nil)
+	if needsRestore {
+		destination := m.databasePath(assignment.ProjectID, assignment.ShardID)
+		recoveryError = m.restoreCheckpoint(ctx, assignment, destination)
+		if recoveryError == nil && ctx.Err() == nil {
+			m.mu.RLock()
+			current := m.owned[routeKey{projectID: assignment.ProjectID, shardID: assignment.ShardID}]
+			latest := owned.assignment
+			valid := !m.closed && current == owned && owned.recoveryKey == checkpointRecoveryKey(assignment)
+			m.mu.RUnlock()
+			if !valid {
+				return
+			}
+			store, err := m.openStore(ctx, destination, queue.Identity{
+				ProjectID: latest.ProjectID, ShardID: latest.ShardID, Generation: latest.Generation,
+			}, m.Now)
+			if err != nil {
+				recoveryError = fmt.Errorf("shard: open restored queue: %w", err)
+			} else if err := store.SetFence(ctx, latest.Generation, m.Now(), latest.OwnerLeaseExpiresAt); err != nil {
+				_ = store.Close()
+				recoveryError = fmt.Errorf("shard: fence restored queue: %w", err)
+			} else {
+				m.mu.Lock()
+				current = m.owned[routeKey{projectID: assignment.ProjectID, shardID: assignment.ShardID}]
+				if m.closed || current != owned || owned.recoveryKey != checkpointRecoveryKey(assignment) {
+					m.mu.Unlock()
+					_ = store.Close()
+					return
+				}
+				owned.store = store
+				m.mu.Unlock()
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	reportError := m.reportRecoveryUntilAccepted(ctx, owned, assignment, recoveryError)
+	m.mu.Lock()
+	if owned.recoveryKey == checkpointRecoveryKey(assignment) {
+		owned.recoveryRunning = false
+		owned.recoveryCancel = nil
+		if recoveryError != nil {
+			owned.recoveryError = recoveryError.Error()
+		} else if reportError != nil {
+			owned.recoveryError = "report recovery result: " + reportError.Error()
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) reportRecoveryUntilAccepted(
+	ctx context.Context,
+	owned *ownedShard,
+	assignment protocol.OwnerAssignment,
+	recoveryError error,
+) error {
+	for {
+		reportContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := m.reportRecovery(reportContext, assignment, recoveryError)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		m.mu.Lock()
+		if owned.recoveryKey == checkpointRecoveryKey(assignment) {
+			owned.recoveryError = "report recovery result: " + err.Error()
+		}
+		m.mu.Unlock()
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func checkpointRecoveryKey(assignment protocol.OwnerAssignment) string {
+	checkpoint := assignment.Checkpoint
+	if checkpoint == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s",
+		assignment.ProjectID, assignment.ShardID, assignment.Generation,
+		checkpoint.Generation, checkpoint.Sequence, checkpoint.SHA256,
+	)
+}
+
 func (m *Manager) Authorize(token string) (Authorization, error) {
 	m.mu.RLock()
 	verifier := m.verifier
@@ -335,6 +526,9 @@ func (m *Manager) Authorize(token string) (Authorization, error) {
 	store := owned.store
 	claimsPaused := m.claimsPaused
 	m.mu.RUnlock()
+	if store == nil {
+		return Authorization{}, queueError(protocol.ErrorShardNotActive, "checkpoint recovery is still running", true)
+	}
 	if assignment.Generation != claims.Generation {
 		return Authorization{}, &queue.Error{
 			Code: protocol.ErrorStaleGeneration, Message: "shard generation changed",
@@ -358,7 +552,7 @@ func (m *Manager) Maintain(ctx context.Context, maxResets, limitPerShard int) (M
 	owned := make([]*ownedShard, 0, len(m.owned))
 	for _, value := range m.owned {
 		if (value.assignment.Status == trackerStatusActive || value.assignment.Status == trackerStatusDraining) &&
-			now < value.assignment.OwnerLeaseExpiresAt {
+			now < value.assignment.OwnerLeaseExpiresAt && value.store != nil {
 			owned = append(owned, value)
 		}
 	}
@@ -409,8 +603,10 @@ func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
 		assignment protocol.OwnerAssignment
 		store      queue.Store
 
-		loadRunning bool
-		loadError   string
+		loadRunning     bool
+		loadError       string
+		recoveryRunning bool
+		recoveryError   string
 	}
 	m.mu.RLock()
 	result := RuntimeStatus{
@@ -422,19 +618,25 @@ func (m *Manager) RuntimeStatus(ctx context.Context) (RuntimeStatus, error) {
 		values = append(values, captured{
 			assignment: owned.assignment, store: owned.store,
 			loadRunning: owned.loadRunning, loadError: owned.loadError,
+			recoveryRunning: owned.recoveryRunning, recoveryError: owned.recoveryError,
 		})
 	}
 	m.mu.RUnlock()
 	for _, value := range values {
-		stats, err := value.store.Stats(ctx)
-		if err != nil {
-			return RuntimeStatus{}, err
+		var stats queue.Stats
+		if value.store != nil {
+			var err error
+			stats, err = value.store.Stats(ctx)
+			if err != nil {
+				return RuntimeStatus{}, err
+			}
 		}
 		result.Shards = append(result.Shards, ShardStatus{
 			ProjectID: value.assignment.ProjectID, ShardID: value.assignment.ShardID,
 			Generation: value.assignment.Generation, Status: value.assignment.Status,
 			OwnerLeaseExpiresAt: value.assignment.OwnerLeaseExpiresAt, Stats: stats,
 			LoadRunning: value.loadRunning, LoadError: value.loadError,
+			RecoveryRunning: value.recoveryRunning, RecoveryError: value.recoveryError,
 		})
 	}
 	sort.Slice(result.Shards, func(i, j int) bool {
@@ -453,7 +655,7 @@ func (m *Manager) CheckpointTargets() []CheckpointTarget {
 	result := make([]CheckpointTarget, 0, len(m.owned))
 	for _, owned := range m.owned {
 		if (owned.assignment.Status != trackerStatusActive && owned.assignment.Status != trackerStatusDraining) ||
-			now >= owned.assignment.OwnerLeaseExpiresAt {
+			now >= owned.assignment.OwnerLeaseExpiresAt || owned.store == nil {
 			continue
 		}
 		if _, ok := owned.store.(queue.Snapshotter); !ok {
@@ -483,7 +685,7 @@ func (m *Manager) Snapshot(ctx context.Context, target CheckpointTarget, destina
 	now := m.clock() + m.clockOffset
 	if owned == nil || owned.assignment.Generation != target.Generation ||
 		(owned.assignment.Status != trackerStatusActive && owned.assignment.Status != trackerStatusDraining) ||
-		now >= owned.assignment.OwnerLeaseExpiresAt {
+		now >= owned.assignment.OwnerLeaseExpiresAt || owned.store == nil {
 		m.mu.Unlock()
 		return staleOwnerOrGeneration()
 	}
@@ -516,15 +718,22 @@ func (m *Manager) Close() error {
 		if value.loadCancel != nil {
 			value.loadCancel()
 		}
+		if value.recoveryCancel != nil {
+			value.recoveryCancel()
+		}
 	}
 	m.mu.Unlock()
 	m.loaders.Wait()
+	m.recoveries.Wait()
 	m.snapshots.Wait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seen := make(map[queue.Store]struct{})
 	var joined error
 	for _, value := range m.owned {
+		if value.store == nil {
+			continue
+		}
 		seen[value.store] = struct{}{}
 		joined = errors.Join(joined, value.store.Close())
 	}
@@ -555,7 +764,7 @@ func validateAssignment(value protocol.OwnerAssignment, now int64) error {
 			value.SourceETag == nil || *value.SourceETag == "" {
 			return fmt.Errorf("shard: invalid source assignment")
 		}
-		loading := value.Status == trackerStatusLoading || value.Status == trackerStatusRecovering
+		loading := value.Status == trackerStatusLoading
 		if loading && (value.SourceDownloadURL == nil || *value.SourceDownloadURL == "" ||
 			value.SourceURLExpiresAt == nil || *value.SourceURLExpiresAt <= now) {
 			return fmt.Errorf("shard: loading source assignment has no current download URL")
@@ -567,6 +776,17 @@ func validateAssignment(value protocol.OwnerAssignment, now int64) error {
 		value.SourceURLExpiresAt != nil {
 		return fmt.Errorf("shard: partial source assignment")
 	}
+	if value.Status == trackerStatusRecovering {
+		checkpoint := value.Checkpoint
+		if checkpoint == nil || checkpoint.Generation < 1 || checkpoint.Generation > value.Generation ||
+			checkpoint.Sequence < 1 || checkpoint.Format != "sqlite-zstd-v1" || checkpoint.SizeBytes < 1 ||
+			checkpoint.CreatedAt < 0 || checkpoint.DownloadURL == "" || checkpoint.URLExpiresAt <= now ||
+			!validCheckpointSHA256(checkpoint.SHA256) {
+			return fmt.Errorf("shard: invalid checkpoint recovery assignment")
+		}
+	} else if value.Checkpoint != nil {
+		return fmt.Errorf("shard: checkpoint is only valid for recovery")
+	}
 	switch value.Status {
 	case trackerStatusLoading, trackerStatusActive, trackerStatusDraining,
 		trackerStatusPaused, trackerStatusOffline, trackerStatusRecovering:
@@ -574,6 +794,14 @@ func validateAssignment(value protocol.OwnerAssignment, now int64) error {
 	default:
 		return fmt.Errorf("shard: invalid owner assignment status")
 	}
+}
+
+func validCheckpointSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 func queueError(code, message string, retryable bool) *queue.Error {

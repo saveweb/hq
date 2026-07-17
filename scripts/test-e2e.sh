@@ -21,7 +21,7 @@ cleanup() {
   fi
   docker rm -f "${postgres_container}" "${minio_container}" >/dev/null 2>&1 || true
   if [ "${status}" -ne 0 ]; then
-    for log in tracker shard takeover; do
+    for log in tracker shard takeover recovery-shard; do
       if [ -s "${run_dir}/${log}.log" ]; then
         printf '\n=== %s log ===\n' "${log}" >&2
         tail -n 200 "${run_dir}/${log}.log" >&2
@@ -71,6 +71,21 @@ stop_shard() {
     wait "${shard_pid}"
     shard_pid=""
   fi
+}
+
+wait_shard_status() {
+  project=$1
+  shard=$2
+  expected=$3
+  for _ in $(seq 1 200); do
+    actual=$(docker exec "${postgres_container}" psql -U postgres -d saveweb_hq_e2e -Atc \
+      "SELECT status FROM tracker_shards WHERE project_id='${project}' AND id='${shard}'" 2>/dev/null || true)
+    if [ "${actual}" = "${expected}" ]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
 }
 
 cd "${root}"
@@ -240,7 +255,78 @@ if [ "${checkpoint_objects}" -lt 2 ]; then
   exit 1
 fi
 
+printf 'Restoring a published checkpoint onto a blank replacement shard...\n'
+"${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-recovery-e2e
+"${run_dir}/queue-tool" --mode seed-recovery --data-dir "${run_dir}/shard-data" \
+  --project-id project-recovery-e2e --shard-id shard-recovery-e2e --generation 1
+"${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-recovery-e2e \
+  --shard-id shard-recovery-e2e --owner-agent-id "${shard_id}" --generation 1
+checkpoint_ready=0
+for _ in $(seq 1 100); do
+  checkpoint_ready=$(docker exec "${postgres_container}" psql -U postgres -d saveweb_hq_e2e -Atc \
+    "SELECT count(*) FROM tracker_shards WHERE project_id='project-recovery-e2e' AND id='shard-recovery-e2e' AND checkpoint_uri IS NOT NULL")
+  if [ "${checkpoint_ready}" -eq 1 ]; then
+    break
+  fi
+  sleep 0.2
+done
+if [ "${checkpoint_ready}" -ne 1 ]; then
+  printf 'recovery checkpoint was not published\n' >&2
+  exit 1
+fi
 stop_shard
+
+recovery_shard_id=$("${run_dir}/shard" init --out "${run_dir}/recovery-shard.identity")
+recovery_shard_port=$(choose_port)
+recovery_admin_port=$(choose_port)
+recovery_shard_url="https://127.0.0.1:${recovery_shard_port}"
+recovery_tls_pin=$("${run_dir}/shard" tls-init --key-out "${run_dir}/recovery-shard.key" \
+  --cert-out "${run_dir}/recovery-shard.pem" --server-name 127.0.0.1)
+
+start_recovery_shard() {
+  "${run_dir}/shard" serve --listen "127.0.0.1:${recovery_shard_port}" \
+    --admin-listen "127.0.0.1:${recovery_admin_port}" \
+    --tracker-url "${tracker_url}" --tracker-issuer "${tracker_url}" --allow-http-tracker \
+    --allow-http-object-download --checkpoint-interval-seconds 2 \
+    --machine-token-file "${run_dir}/owner.token" --identity-file "${run_dir}/recovery-shard.identity" \
+    --data-dir "${run_dir}/recovery-shard-data" --endpoint "${recovery_shard_url}" --endpoint-version 1 \
+    --tls-spki-sha256 "${recovery_tls_pin}" --tls-cert-file "${run_dir}/recovery-shard.pem" \
+    --tls-key-file "${run_dir}/recovery-shard.key" >"${run_dir}/recovery-shard.log" 2>&1 &
+  shard_pid=$!
+  wait_url "${recovery_shard_url}/healthz"
+  wait_url "http://127.0.0.1:${recovery_admin_port}/"
+  sleep 0.5
+  kill -0 "${shard_pid}"
+  recovery_admin_token=$(tr -d '\r\n' <"${run_dir}/recovery-shard-data/runtime/local-admin.token")
+}
+
+# Register and health-check the new public endpoint before assigning ownership.
+start_recovery_shard
+stop_shard
+"${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-recovery-e2e \
+  --shard-id shard-recovery-e2e --owner-agent-id "${recovery_shard_id}" --generation 2 --status recovering
+start_recovery_shard
+wait_shard_status project-recovery-e2e shard-recovery-e2e active
+local_active=0
+for _ in $(seq 1 100); do
+  if curl --fail --silent --show-error \
+    -H "Authorization: Bearer ${recovery_admin_token}" \
+    "http://127.0.0.1:${recovery_admin_port}/api/v1/status" | grep -q '"status":"active"'; then
+    local_active=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "${local_active}" -ne 1 ]; then
+  printf 'replacement shard did not apply active assignment\n' >&2
+  exit 1
+fi
+"${run_dir}/go-worker" --phase checkpoint-recovery --project-id project-recovery-e2e \
+  --tracker-url "${tracker_url}" --machine-token-file "${run_dir}/worker.token"
+stop_shard
+"${run_dir}/queue-tool" --mode check-recovery --data-dir "${run_dir}/recovery-shard-data" \
+  --project-id project-recovery-e2e --shard-id shard-recovery-e2e --generation 2
+
 "${run_dir}/queue-tool" --mode check --data-dir "${run_dir}/shard-data" \
   --project-id project-e2e --shard-id shard-e2e --generation 2
 "${run_dir}/queue-tool" --mode check-source --data-dir "${run_dir}/shard-data" \

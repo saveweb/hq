@@ -225,13 +225,15 @@ func runPutShard(args []string) error {
 	anySource := *sourceURI != "" || *sourceFormat != "" || *sourceETag != ""
 	if anySource {
 		if *sourceURI == "" || *sourceFormat != "jobs-jsonl-zstd-v1" || *sourceETag == "" ||
-			(*status != tracker.ShardStatusLoading && *status != tracker.ShardStatusRecovering) {
-			return fmt.Errorf("put-shard: source URI, jobs-jsonl-zstd-v1 format, ETag, and loading/recovering status are required together")
+			*status != tracker.ShardStatusLoading {
+			return fmt.Errorf("put-shard: source URI, jobs-jsonl-zstd-v1 format, ETag, and loading status are required together")
 		}
 		if _, err := objectstore.ParseURI(*sourceURI); err != nil {
 			return err
 		}
 		sourceURIPointer, sourceFormatPointer, sourceETagPointer = sourceURI, sourceFormat, sourceETag
+	} else if *status == tracker.ShardStatusLoading {
+		return fmt.Errorf("put-shard: loading status requires an immutable source")
 	}
 	return store.PutShard(ctx, tracker.Shard{
 		ProjectID: *projectID, ID: *shardID, Status: *status,
@@ -266,6 +268,7 @@ func runServe(args []string, logger *slog.Logger) error {
 	sourceURLTTLSeconds := flags.Int64("source-url-ttl-seconds", 900, "exact-object source download URL lifetime")
 	checkpointPrefixURI := flags.String("checkpoint-prefix-uri", os.Getenv("HQ_CHECKPOINT_PREFIX_URI"), "trusted s3:// bucket/prefix for checkpoints")
 	checkpointPartURLTTL := flags.Int64("checkpoint-part-url-ttl-seconds", 3600, "per-part upload URL lifetime")
+	checkpointURLTTL := flags.Int64("checkpoint-download-url-ttl-seconds", 3600, "checkpoint recovery URL lifetime")
 	checkpointPartSize := flags.Int64("checkpoint-part-size-bytes", 8<<20, "recommended multipart checkpoint part size")
 	checkpointMaxBytes := flags.Int64("checkpoint-max-bytes", 64<<30, "maximum compressed checkpoint size")
 	if err := flags.Parse(args); err != nil {
@@ -313,7 +316,9 @@ func runServe(args []string, logger *slog.Logger) error {
 	config.CheckpointPrefixURI = strings.TrimSuffix(*checkpointPrefixURI, "/")
 	if config.CheckpointPrefixURI != "" {
 		config.CheckpointStore = objectClient
+		config.CheckpointURLSigner = objectClient
 	}
+	config.CheckpointURLTTLSeconds = *checkpointURLTTL
 	config.CheckpointPartURLTTL = *checkpointPartURLTTL
 	config.CheckpointPartSizeBytes = *checkpointPartSize
 	config.CheckpointMaxBytes = *checkpointMaxBytes

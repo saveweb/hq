@@ -21,7 +21,7 @@ func main() {
 }
 
 func run() error {
-	mode := flag.String("mode", "", "seed, check, or check-source")
+	mode := flag.String("mode", "", "seed, seed-recovery, check, check-source, or check-recovery")
 	dataDir := flag.String("data-dir", "", "shard data directory")
 	projectID := flag.String("project-id", "", "project identifier")
 	shardID := flag.String("shard-id", "", "shard identifier")
@@ -43,13 +43,47 @@ func run() error {
 	switch *mode {
 	case "seed":
 		return seed(ctx, store, *generation)
+	case "seed-recovery":
+		return seedRecovery(ctx, store, *generation)
 	case "check":
 		return check(ctx, store)
 	case "check-source":
 		return checkSource(ctx, store)
+	case "check-recovery":
+		return checkRecovery(ctx, store)
 	default:
 		return fmt.Errorf("queue-tool: --mode must be seed, check, or check-source")
 	}
+}
+
+func seedRecovery(ctx context.Context, store *sqlitequeue.Store, generation int64) error {
+	now := time.Now().Unix()
+	if err := store.SetFence(ctx, generation, now, now+30); err != nil {
+		return err
+	}
+	result, err := store.Enqueue(ctx, generation, now, []queue.JobSpec{{
+		ID: "checkpoint-recovery", URL: "https://example.test/checkpoint-recovery",
+		Type: "seed", Attrs: map[string]any{"e2e": "checkpoint-recovery"},
+	}})
+	if err != nil {
+		return err
+	}
+	if result.Inserted != 1 || result.Duplicate != 0 {
+		return fmt.Errorf("queue-tool: unexpected recovery seed result: %+v", result)
+	}
+	return nil
+}
+
+func checkRecovery(ctx context.Context, store *sqlitequeue.Store) error {
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	if stats.Todo != 0 || stats.WIP != 0 || stats.Done != 1 || stats.Failed != 0 || stats.ResetExhausted != 0 {
+		return fmt.Errorf("queue-tool: unexpected recovery final stats: %+v", stats)
+	}
+	fmt.Printf("recovered queue stats: done=%d\n", stats.Done)
+	return nil
 }
 
 func checkSource(ctx context.Context, store *sqlitequeue.Store) error {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/agentidentity"
+	"git.saveweb.org/saveweb/hq/internal/checkpointrestore"
 	"git.saveweb.org/saveweb/hq/internal/checkpointupload"
 	"git.saveweb.org/saveweb/hq/internal/localadmin"
 	"git.saveweb.org/saveweb/hq/internal/queue"
@@ -160,6 +161,12 @@ func runServe(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	restoreConfig := checkpointrestore.DefaultConfig()
+	restoreConfig.AllowHTTP = config.allowHTTPSource
+	checkpointRestorer, err := checkpointrestore.New(restoreConfig)
+	if err != nil {
+		return err
+	}
 	var trackerControl *trackerclient.Client
 	manager, err := shard.NewManager(shard.ManagerConfig{
 		AgentID: identity.AgentID, Issuer: config.trackerIssuer, DataDir: config.dataDir,
@@ -176,6 +183,18 @@ func runServe(args []string, logger *slog.Logger) error {
 				request.ErrorCode = "source_load_failed"
 			}
 			_, err := trackerControl.ReportShardLoad(ctx, assignment.ProjectID, assignment.ShardID, request)
+			return err
+		},
+		RestoreCheckpoint: checkpointRestorer.Restore,
+		ReportRecovery: func(ctx context.Context, assignment protocol.OwnerAssignment, recoveryError error) error {
+			request := protocol.ShardRecoveryResultRequest{
+				Generation: assignment.Generation,
+				Success:    recoveryError == nil,
+			}
+			if recoveryError != nil {
+				request.ErrorCode = "checkpoint_restore_failed"
+			}
+			_, err := trackerControl.ReportShardRecovery(ctx, assignment.ProjectID, assignment.ShardID, request)
 			return err
 		},
 	})

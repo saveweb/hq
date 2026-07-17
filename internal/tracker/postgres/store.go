@@ -166,8 +166,37 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 	if (shard.SourceURI == nil) != (shard.SourceFormat == nil) ||
 		(shard.SourceURI == nil) != (shard.SourceETag == nil) ||
 		(shard.SourceFormat != nil && *shard.SourceFormat != "jobs-jsonl-zstd-v1") ||
-		(shard.SourceURI != nil && (*shard.SourceURI == "" || *shard.SourceETag == "" || len(*shard.SourceETag) > 512)) {
+		(shard.SourceURI != nil && (*shard.SourceURI == "" || *shard.SourceETag == "" || len(*shard.SourceETag) > 512)) ||
+		(shard.SourceURI != nil && shard.Status != tracker.ShardStatusLoading) ||
+		(shard.Status == tracker.ShardStatusLoading && shard.SourceURI == nil) {
 		return fmt.Errorf("tracker postgres: invalid shard source metadata")
+	}
+	if shard.Status == tracker.ShardStatusRecovering {
+		result, err := s.pool.Exec(ctx, `
+			UPDATE tracker_shards SET
+				status='recovering', owner_agent_id=$3, generation=$4,
+				owner_lease_expires_at=$5,
+				source_uri=NULL, source_format=NULL, source_etag=NULL,
+				load_error_code=NULL, recovery_error_code=NULL,
+				checkpoint_upload_id=NULL, checkpoint_s3_upload_id=NULL,
+				checkpoint_upload_uri=NULL, checkpoint_upload_seq=NULL,
+				checkpoint_upload_generation=NULL, checkpoint_upload_checksum=NULL,
+				checkpoint_upload_size=NULL, checkpoint_upload_started_at=NULL,
+				updated_at=$6
+			WHERE project_id=$1 AND id=$2 AND $4 > generation
+				AND checkpoint_uri IS NOT NULL AND checkpoint_format='sqlite-zstd-v1'
+		`, shard.ProjectID, shard.ID, shard.OwnerAgentID, shard.Generation,
+			shard.OwnerLeaseExpiresAt, now)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return &tracker.Error{
+				Code:    protocol.ErrorStaleGeneration,
+				Message: "checkpoint recovery requires an existing published checkpoint and newer generation",
+			}
+		}
+		return nil
 	}
 	result, err := s.pool.Exec(ctx, `
 		INSERT INTO tracker_shards(
@@ -178,7 +207,7 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 			status = EXCLUDED.status, owner_agent_id = EXCLUDED.owner_agent_id,
 			generation = EXCLUDED.generation, owner_lease_expires_at = EXCLUDED.owner_lease_expires_at,
 			source_uri = EXCLUDED.source_uri, source_format = EXCLUDED.source_format,
-			source_etag = EXCLUDED.source_etag, load_error_code = NULL,
+			source_etag = EXCLUDED.source_etag, load_error_code = NULL, recovery_error_code = NULL,
 			checkpoint_upload_id = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_id END,
 			checkpoint_s3_upload_id = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_s3_upload_id END,
 			checkpoint_upload_uri = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_uri END,

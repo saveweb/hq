@@ -44,6 +44,7 @@ func New(service *tracker.Service, logger *slog.Logger) *echo.Echo {
 	server.PUT("/api/v1/agents/:agent_id", handler.upsertAgent)
 	server.POST("/api/v1/agents/:agent_id/heartbeat", handler.heartbeatAgent)
 	server.POST("/api/v1/shards/:project_id/:shard_id/load-result", handler.shardLoadResult)
+	server.POST("/api/v1/shards/:project_id/:shard_id/recovery-result", handler.shardRecoveryResult)
 	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints", handler.beginCheckpoint)
 	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints/:upload_id/parts", handler.checkpointPart)
 	server.POST("/api/v1/shards/:project_id/:shard_id/checkpoints/:upload_id/complete", handler.completeCheckpoint)
@@ -153,6 +154,25 @@ func (h *Handler) shardLoadResult(ctx *echo.Context) error {
 		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
 	}
 	result, err := h.service.ReportShardLoad(
+		ctx.Request().Context(), token, agentID,
+		ctx.Param("project_id"), ctx.Param("shard_id"), body,
+	)
+	if err != nil {
+		return h.writeDomainError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) shardRecoveryResult(ctx *echo.Context) error {
+	token, agentID, ok := machineCredentials(ctx)
+	if !ok {
+		return nil
+	}
+	var body protocol.ShardRecoveryResultRequest
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), trackerBodyLimit, &body); err != nil {
+		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
+	}
+	result, err := h.service.ReportShardRecovery(
 		ctx.Request().Context(), token, agentID,
 		ctx.Param("project_id"), ctx.Param("shard_id"), body,
 	)

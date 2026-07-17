@@ -132,7 +132,7 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 		t.Fatalf("same-generation source mutation = %v", err)
 	}
 	if err := store.PutShard(ctx, tracker.Shard{
-		ProjectID: "project-1", ID: "shard-source", Status: tracker.ShardStatusRecovering,
+		ProjectID: "project-1", ID: "shard-source", Status: tracker.ShardStatusLoading,
 		OwnerAgentID: "shard-1", Generation: 3,
 		SourceURI: &sourceURI, SourceFormat: &sourceFormat, SourceETag: &sourceETag,
 	}, integrationNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
@@ -196,10 +196,31 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.PutShard(ctx, tracker.Shard{
-		ProjectID: "project-1", ID: "shard-a", Status: tracker.ShardStatusActive,
+		ProjectID: "project-1", ID: "shard-a", Status: tracker.ShardStatusRecovering,
 		OwnerAgentID: "shard-1", Generation: 4,
 	}, integrationNow+2); err != nil {
 		t.Fatal(err)
+	}
+	recoveryHeartbeat, err := store.HeartbeatAgent(ctx, "owner", "shard-1", "0.1.0", map[string]any{},
+		tracker.EndpointHealthy, true, false, integrationNow+2, integrationNow+122)
+	var recoveryAssignment *protocol.OwnerAssignment
+	for index := range recoveryHeartbeat.OwnerAssignments {
+		if recoveryHeartbeat.OwnerAssignments[index].ShardID == "shard-a" {
+			recoveryAssignment = &recoveryHeartbeat.OwnerAssignments[index]
+		}
+	}
+	if err != nil || recoveryAssignment == nil || recoveryAssignment.Checkpoint == nil ||
+		recoveryAssignment.Checkpoint.Sequence != 1 {
+		t.Fatalf("checkpoint recovery heartbeat = %+v, %v", recoveryHeartbeat, err)
+	}
+	recovered, err := store.FinishShardRecovery(ctx, "owner", "shard-1", "project-1", "shard-a",
+		4, true, "", integrationNow+3)
+	if err != nil || recovered.Status != tracker.ShardStatusActive {
+		t.Fatalf("finish checkpoint recovery = %+v, %v", recovered, err)
+	}
+	if _, err := store.FinishShardRecovery(ctx, "owner", "shard-1", "project-1", "shard-a",
+		4, true, "", integrationNow+3); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("replayed checkpoint recovery = %v", err)
 	}
 	if _, err := store.PublishCheckpoint(ctx, "owner", "shard-1", "project-1", "shard-a",
 		upload.ID, 3, integrationNow+2); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
