@@ -305,6 +305,16 @@ func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 		store.putReceiver.SinkURI != "s3://receiver/project-2/stage-output" {
 		t.Fatalf("receiver update = %d %+v", receiverUpdate.Code, store.putReceiver)
 	}
+	badLogout := perform(
+		server, http.MethodPost, "/logout", url.Values{"csrf": {"invalid"}}.Encode(), sessionCookie, "",
+	)
+	if badLogout.Code != http.StatusForbidden || len(store.sessions) != 1 {
+		t.Fatalf("no-origin invalid-CSRF logout = %d sessions=%+v", badLogout.Code, store.sessions)
+	}
+	logout := perform(server, http.MethodPost, "/logout", form, sessionCookie, "")
+	if logout.Code != http.StatusSeeOther || len(store.sessions) != 0 {
+		t.Fatalf("no-origin logout = %d sessions=%+v", logout.Code, store.sessions)
+	}
 }
 
 func TestGitHubOAuthNonmemberAndLookupFailure(t *testing.T) {
@@ -342,6 +352,37 @@ func TestGitHubOAuthNonmemberAndLookupFailure(t *testing.T) {
 			}
 			if test.lookupErr != nil && len(store.sessions) != 0 {
 				t.Fatalf("lookup failure created sessions: %+v", store.sessions)
+			}
+		})
+	}
+}
+
+func TestPostRequestOriginPolicy(t *testing.T) {
+	handler := &Handler{publicOrigin: "https://tracker.test"}
+	for _, test := range []struct {
+		name    string
+		origin  string
+		referer string
+		allowed bool
+	}{
+		{name: "same origin", origin: "https://tracker.test", allowed: true},
+		{name: "cross origin", origin: "https://evil.test", allowed: false},
+		{name: "origin takes precedence", origin: "https://evil.test", referer: "https://tracker.test/portal", allowed: false},
+		{name: "same origin referer", referer: "https://tracker.test/portal", allowed: true},
+		{name: "cross origin referer", referer: "https://evil.test/", allowed: false},
+		{name: "userinfo referer", referer: "https://evil.test@tracker.test/portal", allowed: false},
+		{name: "source headers omitted", allowed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "https://tracker.test/logout", nil)
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if test.referer != "" {
+				request.Header.Set("Referer", test.referer)
+			}
+			if got := handler.requestOriginAllowed(request); got != test.allowed {
+				t.Fatalf("allowed = %v, want %v", got, test.allowed)
 			}
 		})
 	}

@@ -459,7 +459,7 @@ func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) 
 		_ = h.pageError(ctx, http.StatusRequestEntityTooLarge, "Form is too large")
 		return tracker.User{}, "", false
 	}
-	if ctx.Request().Header.Get("Origin") != h.publicOrigin {
+	if !h.requestOriginAllowed(ctx.Request()) {
 		_ = h.pageError(ctx, http.StatusForbidden, "Request origin is invalid")
 		return tracker.User{}, "", false
 	}
@@ -475,6 +475,18 @@ func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) 
 		return tracker.User{}, "", false
 	}
 	return user, sessionToken, true
+}
+
+func (h *Handler) requestOriginAllowed(request *http.Request) bool {
+	if origin := request.Header.Get("Origin"); origin != "" {
+		return origin == h.publicOrigin
+	}
+	referer := request.Referer()
+	if referer == "" {
+		return true
+	}
+	parsed, err := url.Parse(referer)
+	return err == nil && parsed.User == nil && parsed.Scheme+"://"+parsed.Host == h.publicOrigin
 }
 
 func (h *Handler) authorizeAdminPost(ctx *echo.Context) (tracker.User, bool) {
