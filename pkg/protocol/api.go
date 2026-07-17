@@ -19,6 +19,7 @@ const (
 )
 
 const (
+	ErrorInternal                = "internal_error"
 	ErrorInvalidRequest          = "invalid_request"
 	ErrorInvalidJob              = "invalid_job"
 	ErrorInvalidMachineToken     = "invalid_machine_token"

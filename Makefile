@@ -1,4 +1,4 @@
-.PHONY: check fmt test test-go test-python
+.PHONY: check fmt test test-go test-python test-postgres
 
 check: test
 	go vet ./...
@@ -15,3 +15,6 @@ test-go:
 
 test-python:
 	uv run --project sdk/python pytest
+
+test-postgres:
+	./scripts/test-postgres.sh

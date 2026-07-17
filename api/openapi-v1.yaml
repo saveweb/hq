@@ -23,9 +23,28 @@ tags:
   - name: health
 
 paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Report process liveness without inspecting dependencies
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {type: string, const: ok}
+
   /api/v1/agents/{agent_id}:
     parameters:
       - $ref: '#/components/parameters/AgentID'
+      - $ref: '#/components/parameters/AgentIDHeader'
     put:
       tags: [agents]
       operationId: upsertAgent
@@ -53,6 +72,7 @@ paths:
   /api/v1/agents/{agent_id}/heartbeat:
     parameters:
       - $ref: '#/components/parameters/AgentID'
+      - $ref: '#/components/parameters/AgentIDHeader'
     post:
       tags: [agents]
       operationId: heartbeatAgent
@@ -78,6 +98,8 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
 
   /api/v1/worker/sessions:
+    parameters:
+      - $ref: '#/components/parameters/AgentIDHeader'
     post:
       tags: [sessions]
       operationId: createSession
@@ -105,6 +127,7 @@ paths:
   /api/v1/worker/sessions/{session_id}/heartbeat:
     parameters:
       - $ref: '#/components/parameters/SessionID'
+      - $ref: '#/components/parameters/AgentIDHeader'
     post:
       tags: [sessions]
       operationId: heartbeatSession
@@ -124,6 +147,8 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
 
   /api/v1/worker/assignments:
+    parameters:
+      - $ref: '#/components/parameters/AgentIDHeader'
     post:
       tags: [sessions]
       operationId: getAssignment
@@ -304,6 +329,12 @@ components:
       name: agent_id
       in: path
       required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    AgentIDHeader:
+      name: X-Saveweb-Agent-ID
+      in: header
+      required: true
+      description: Stable local agent identity bound to the machine token owner.
       schema: {$ref: '#/components/schemas/Identifier'}
     SessionID:
       name: session_id
@@ -746,6 +777,7 @@ components:
     ErrorCode:
       type: string
       enum:
+        - internal_error
         - invalid_request
         - invalid_job
         - invalid_machine_token
