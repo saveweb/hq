@@ -70,7 +70,8 @@ services:
       HQ_DATABASE_URL: postgres://hq@postgres:5432/hq?sslmode=disable
       HQ_PUBLIC_URL: https://hq.saveweb.org
       HQ_GITHUB_CLIENT_ID: ${HQ_GITHUB_CLIENT_ID:-}
-      HQ_OAUTH_AUTO_GRANT_WORKER: ${HQ_OAUTH_AUTO_GRANT_WORKER:-0}
+      HQ_OAUTH_ADMIN_ORG: ${HQ_OAUTH_ADMIN_ORG:-saveweb}
+      HQ_OAUTH_ADMIN_TEAM: ${HQ_OAUTH_ADMIN_TEAM:-core}
       HQ_S3_ENDPOINT: ${HQ_S3_ENDPOINT:-}
       HQ_S3_REGION: ${HQ_S3_REGION:-auto}
       HQ_S3_PATH_STYLE: ${HQ_S3_PATH_STYLE:-0}

@@ -24,12 +24,16 @@ const portalUserColumns = `
 func (s *Store) UpsertGitHubUser(
 	ctx context.Context,
 	identity tracker.GitHubIdentity,
-	autoWorker bool,
+	isAdmin bool,
 	now int64,
 ) (tracker.User, error) {
 	if identity.UserID < 1 || identity.Login == "" || len(identity.Login) > 255 ||
 		(identity.AvatarURL != nil && len(*identity.AvatarURL) > 2048) {
 		return tracker.User{}, fmt.Errorf("tracker postgres: invalid GitHub identity")
+	}
+	roles := []string{tracker.RoleWorker}
+	if isAdmin {
+		roles = []string{tracker.RoleAdmin, tracker.RoleShardOwner, tracker.RoleWorker}
 	}
 	var result tracker.User
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -41,20 +45,16 @@ func (s *Store) UpsertGitHubUser(
 		if err == nil {
 			result, err = scanPortalUser(tx.QueryRow(ctx, `
 				UPDATE tracker_users SET github_login=$2, github_avatar_url=$3,
+					status=CASE WHEN status='suspended' THEN status ELSE 'active' END,
+					roles=CASE WHEN status='suspended' THEN roles ELSE $5 END,
 					last_login_at=$4, updated_at=$4
 				WHERE github_user_id=$1
 				RETURNING `+portalUserColumns,
-				identity.UserID, identity.Login, identity.AvatarURL, now))
+				identity.UserID, identity.Login, identity.AvatarURL, now, roles))
 			return err
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
-		}
-		status := tracker.UserStatusPending
-		roles := []string{}
-		if autoWorker {
-			status = tracker.UserStatusActive
-			roles = []string{tracker.RoleWorker}
 		}
 		userID := "gh_" + strconv.FormatInt(identity.UserID, 10)
 		result, err = scanPortalUser(tx.QueryRow(ctx, `
@@ -63,7 +63,7 @@ func (s *Store) UpsertGitHubUser(
 				last_login_at, created_at, updated_at
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$7)
 			RETURNING `+portalUserColumns,
-			userID, identity.UserID, identity.Login, identity.AvatarURL, status, roles, now))
+			userID, identity.UserID, identity.Login, identity.AvatarURL, tracker.UserStatusActive, roles, now))
 		return err
 	})
 	if err != nil {

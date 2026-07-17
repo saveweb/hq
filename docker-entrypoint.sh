@@ -30,10 +30,16 @@ if [ -n "${HQ_GITHUB_CLIENT_ID:-}" ]; then
     echo "GitHub OAuth requires github-client.secret and tracker-web.secret" >&2
     exit 1
   fi
+  if [ -z "${HQ_OAUTH_ADMIN_ORG:-}" ] || [ -z "${HQ_OAUTH_ADMIN_TEAM:-}" ]; then
+    echo "GitHub OAuth requires HQ_OAUTH_ADMIN_ORG and HQ_OAUTH_ADMIN_TEAM" >&2
+    exit 1
+  fi
   set -- "$@" \
     --github-client-id "${HQ_GITHUB_CLIENT_ID}" \
     --github-client-secret-file "${github_secret}" \
-    --web-session-secret-file "${web_secret}"
+    --web-session-secret-file "${web_secret}" \
+    --oauth-admin-org "${HQ_OAUTH_ADMIN_ORG}" \
+    --oauth-admin-team "${HQ_OAUTH_ADMIN_TEAM}"
 elif [ -e "${github_secret}" ]; then
   echo "github-client.secret exists but HQ_GITHUB_CLIENT_ID is empty" >&2
   exit 1
@@ -58,10 +64,6 @@ if [ -n "${HQ_S3_ENDPOINT:-}" ]; then
 elif [ -e "${r2_access_key}" ] || [ -e "${r2_secret_key}" ]; then
   echo "R2 credential files exist but HQ_S3_ENDPOINT is empty" >&2
   exit 1
-fi
-
-if [ "${HQ_OAUTH_AUTO_GRANT_WORKER:-0}" = "1" ]; then
-  set -- "$@" --oauth-auto-grant-worker
 fi
 
 /usr/local/bin/tracker migrate --database-url "${HQ_DATABASE_URL}"

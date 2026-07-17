@@ -254,7 +254,7 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	avatar := "https://avatars.test/admin"
 	portalAdmin, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
 		UserID: 99, Login: "admin-login", AvatarURL: &avatar,
-	}, false, integrationNow+1)
+	}, true, integrationNow+1)
 	if err != nil || portalAdmin.ID != "admin" || !portalAdmin.HasRole(tracker.RoleAdmin) {
 		t.Fatalf("portal admin = %+v, %v", portalAdmin, err)
 	}
@@ -310,11 +310,24 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	newUser, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
 		UserID: 123, Login: "new-contributor",
 	}, false, integrationNow+1)
-	if err != nil || newUser.Status != tracker.UserStatusPending || len(newUser.Roles) != 0 {
+	if err != nil || newUser.Status != tracker.UserStatusActive || !newUser.HasRole(tracker.RoleWorker) ||
+		newUser.HasRole(tracker.RoleAdmin) {
 		t.Fatalf("new OAuth user = %+v, %v", newUser, err)
 	}
+	teamAdmin, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
+		UserID: 123, Login: "new-contributor",
+	}, true, integrationNow+2)
+	if err != nil || !teamAdmin.HasRole(tracker.RoleAdmin) || !teamAdmin.HasRole(tracker.RoleShardOwner) {
+		t.Fatalf("team admin = %+v, %v", teamAdmin, err)
+	}
+	newUser, err = store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
+		UserID: 123, Login: "new-contributor",
+	}, false, integrationNow+3)
+	if err != nil || newUser.HasRole(tracker.RoleAdmin) || !newUser.HasRole(tracker.RoleWorker) {
+		t.Fatalf("demoted team user = %+v, %v", newUser, err)
+	}
 	if err := store.UpdateUserAccess(ctx, "admin", newUser.ID, tracker.UserStatusActive,
-		map[string]bool{tracker.RoleWorker: true}, "approved", integrationNow+2); err != nil {
+		map[string]bool{tracker.RoleWorker: true}, "approved", integrationNow+4); err != nil {
 		t.Fatal(err)
 	}
 	users, err := store.ListUsers(ctx)
@@ -328,6 +341,17 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	machineUser, err := store.AuthenticateMachineToken(ctx, newMachineToken)
 	if err != nil || machineUser.ID != newUser.ID || !machineUser.HasRole(tracker.RoleWorker) {
 		t.Fatalf("machine user = %+v, %v", machineUser, err)
+	}
+	if err := store.UpdateUserAccess(ctx, "admin", newUser.ID, tracker.UserStatusSuspended,
+		map[string]bool{tracker.RoleWorker: true}, "suspended for policy test", integrationNow+5); err != nil {
+		t.Fatal(err)
+	}
+	suspendedUser, err := store.UpsertGitHubUser(ctx, tracker.GitHubIdentity{
+		UserID: 123, Login: "new-contributor",
+	}, true, integrationNow+6)
+	if err != nil || suspendedUser.Status != tracker.UserStatusSuspended ||
+		suspendedUser.HasRole(tracker.RoleAdmin) {
+		t.Fatalf("suspended OAuth user = %+v, %v", suspendedUser, err)
 	}
 
 	if err := store.AdminPutProject(ctx, "worker", tracker.Project{

@@ -21,9 +21,12 @@ import (
 const webTestNow = int64(1_780_000_000)
 
 type fakeOAuth struct {
-	state     string
-	challenge string
-	verifier  string
+	state      string
+	challenge  string
+	verifier   string
+	teamMember bool
+	teamQuery  string
+	teamErr    error
 }
 
 func (f *fakeOAuth) AuthorizationURL(state, challenge string) (string, error) {
@@ -47,11 +50,22 @@ func (f *fakeOAuth) User(_ context.Context, token string) (tracker.GitHubIdentit
 	return tracker.GitHubIdentity{UserID: 42, Login: "alice", AvatarURL: &avatar}, nil
 }
 
+func (f *fakeOAuth) TeamMembership(
+	_ context.Context, token, organization, team, username string,
+) (bool, error) {
+	if token != "github-access-token" {
+		return false, context.Canceled
+	}
+	f.teamQuery = organization + "/" + team + "/" + username
+	return f.teamMember, f.teamErr
+}
+
 type fakeStore struct {
 	user         tracker.User
 	sessions     map[string]string
 	machineToken string
 	updatedUser  string
+	loginAdmin   bool
 	putProject   tracker.Project
 	putShard     tracker.Shard
 	putReceiver  tracker.Receiver
@@ -75,7 +89,8 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (s *fakeStore) UpsertGitHubUser(_ context.Context, _ tracker.GitHubIdentity, _ bool, _ int64) (tracker.User, error) {
+func (s *fakeStore) UpsertGitHubUser(_ context.Context, _ tracker.GitHubIdentity, isAdmin bool, _ int64) (tracker.User, error) {
+	s.loginAdmin = isAdmin
 	return s.user, nil
 }
 
@@ -176,9 +191,10 @@ func (s *fakeStore) AdminPutReceiver(_ context.Context, _ string, receiver track
 }
 
 func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
-	store, oauth := newFakeStore(), &fakeOAuth{}
+	store, oauth := newFakeStore(), &fakeOAuth{teamMember: true}
 	handler, err := New(store, oauth, Config{
 		PublicURL: "http://tracker.test", Secret: []byte("0123456789abcdef0123456789abcdef"),
+		AdminOrganization: "saveweb", AdminTeam: "core",
 		Clock: func() int64 { return webTestNow },
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -199,6 +215,9 @@ func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 	)
 	if callback.Code != http.StatusSeeOther || len(oauth.verifier) != 43 {
 		t.Fatalf("callback = %d %q", callback.Code, callback.Body.String())
+	}
+	if oauth.teamQuery != "saveweb/core/alice" || !store.loginAdmin {
+		t.Fatalf("team policy query = %q admin=%v", oauth.teamQuery, store.loginAdmin)
 	}
 	sessionCookie := responseCookie(t, callback, sessionCookieName)
 	portal := perform(server, http.MethodGet, "/portal", "", sessionCookie, "")
@@ -285,6 +304,46 @@ func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 	if receiverUpdate.Code != http.StatusSeeOther || store.putReceiver.ID != "stage-output" ||
 		store.putReceiver.SinkURI != "s3://receiver/project-2/stage-output" {
 		t.Fatalf("receiver update = %d %+v", receiverUpdate.Code, store.putReceiver)
+	}
+}
+
+func TestGitHubOAuthNonmemberAndLookupFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		membership bool
+		lookupErr  error
+		wantStatus int
+	}{
+		{name: "ordinary user", wantStatus: http.StatusSeeOther},
+		{name: "lookup failure", lookupErr: context.DeadlineExceeded, wantStatus: http.StatusBadGateway},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, oauth := newFakeStore(), &fakeOAuth{teamMember: test.membership, teamErr: test.lookupErr}
+			handler, err := New(store, oauth, Config{
+				PublicURL: "http://tracker.test", Secret: []byte("0123456789abcdef0123456789abcdef"),
+				AdminOrganization: "test-org", AdminTeam: "test-team",
+				Clock: func() int64 { return webTestNow },
+			}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := echo.New()
+			handler.Register(server)
+			start := perform(server, http.MethodGet, "/auth/github/start", "", nil, "")
+			cookie := responseCookie(t, start, oauthCookieName)
+			callback := perform(
+				server, http.MethodGet,
+				"/auth/github/callback?code=test-code&state="+url.QueryEscape(oauth.state),
+				"", cookie, "",
+			)
+			if callback.Code != test.wantStatus || store.loginAdmin ||
+				oauth.teamQuery != "test-org/test-team/alice" {
+				t.Fatalf("callback = %d admin=%v query=%q", callback.Code, store.loginAdmin, oauth.teamQuery)
+			}
+			if test.lookupErr != nil && len(store.sessions) != 0 {
+				t.Fatalf("lookup failure created sessions: %+v", store.sessions)
+			}
+		})
 	}
 }
 

@@ -48,7 +48,7 @@ func TestWebKeygenCreatesPrivateExclusiveSecret(t *testing.T) {
 }
 
 func TestConfigureWebWithoutOAuthReturnsNilInterface(t *testing.T) {
-	secret, oauth, err := configureWeb("https://tracker.example", "", "", "")
+	secret, oauth, err := configureWeb("https://tracker.example", "", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +58,15 @@ func TestConfigureWebWithoutOAuthReturnsNilInterface(t *testing.T) {
 	var webOAuth trackerweb.OAuth = oauth
 	if webOAuth != nil {
 		t.Fatalf("disabled OAuth has non-nil interface with dynamic type %T", webOAuth)
+	}
+}
+
+func TestConfigureWebRequiresExplicitAdminTeamPolicy(t *testing.T) {
+	_, _, err := configureWeb(
+		"https://tracker.example", "client", "client.secret", "web.secret", "", "",
+	)
+	if err == nil || !strings.Contains(err.Error(), "admin organization and team") {
+		t.Fatalf("missing admin team policy = %v", err)
 	}
 }
 

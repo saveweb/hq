@@ -25,10 +25,11 @@ API：
   `pending/active/suspended` 与三个显式 role。暂停用户同时 revoke 其 agent，
   access/token 变更写 audit log。
 
-OAuth 只证明 GitHub 身份，不授予权限。默认首次登录为 `pending` 且无 role；
-部署者显式启用 `--oauth-auto-grant-worker` 时，首次登录才自动成为 active
-worker。首个管理员通过 `bootstrap-user --github-user-id` 绑定受信的 GitHub
-数值 ID。
+OAuth 请求 `read:org`，每次登录都查询显式配置的 GitHub organization/team。
+active team member 同步为 active `admin + shard_owner + worker`，其他用户同步为
+active `worker`；已经 suspended 的用户不会被登录自动解封。organization 与
+team 通过 `--oauth-admin-org` / `--oauth-admin-team`（或对应环境变量）配置，
+不写死在核心逻辑中。`bootstrap-user --github-user-id` 仅保留作紧急管理入口。
 
 ## 1. Agent 注册
 

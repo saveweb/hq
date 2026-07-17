@@ -138,11 +138,12 @@ go run ./cmd/tracker serve \
 
 The GitHub OAuth callback is
 `https://tracker.example/auth/github/callback`. Tracker uses OAuth `state` and
-PKCE S256, requests no repository or email scope, and discards the GitHub
-access token after fetching `/user`. New users are pending by default; use
-`--oauth-auto-grant-worker` only when the deployment intentionally allows open
-worker registration. The contributor portal is at `/`, and active admins can
-review users at `/admin/users`.
+PKCE S256, requests only the `read:org` scope, and discards the GitHub access
+token after fetching `/user` and the configured team membership. Configure
+`--oauth-admin-org` and `--oauth-admin-team` together. Active members of that
+team become active admins with shard-owner and worker roles; everyone else
+becomes an active worker. A suspended user remains suspended. The contributor
+portal is at `/`, and active admins can review users at `/admin/users`.
 
 `bootstrap-user` exists only for creating the first administrator before the
 web administration flow is configured. It reads the reusable machine token
@@ -150,9 +151,9 @@ from a private `0600` file and never writes the token to logs. The trusted
 tracker database retains the current value so the contributor can reuse it on
 multiple machines, as defined in the v1 design.
 
-To link the first administrator to GitHub, pass its immutable numeric GitHub
-ID during bootstrap. The login updates only display metadata and retains the
-trusted roles:
+To link an emergency bootstrap administrator to GitHub, pass its immutable
+numeric GitHub ID during bootstrap. The configured GitHub team policy is
+reapplied at the next login:
 
 ```bash
 go run ./cmd/tracker bootstrap-user \

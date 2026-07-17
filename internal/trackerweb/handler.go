@@ -56,27 +56,30 @@ type OAuth interface {
 	AuthorizationURL(state, codeChallenge string) (string, error)
 	Exchange(ctx context.Context, code, codeVerifier string) (string, error)
 	User(ctx context.Context, accessToken string) (tracker.GitHubIdentity, error)
+	TeamMembership(ctx context.Context, accessToken, organization, team, username string) (bool, error)
 }
 
 type Config struct {
-	PublicURL       string
-	Secret          []byte
-	SecureCookies   bool
-	AutoGrantWorker bool
-	SessionTTL      time.Duration
-	Clock           func() int64
+	PublicURL         string
+	Secret            []byte
+	SecureCookies     bool
+	AdminOrganization string
+	AdminTeam         string
+	SessionTTL        time.Duration
+	Clock             func() int64
 }
 
 type Handler struct {
-	store           Store
-	oauth           OAuth
-	logger          *slog.Logger
-	secret          []byte
-	publicOrigin    string
-	secureCookies   bool
-	autoGrantWorker bool
-	sessionTTL      time.Duration
-	clock           func() int64
+	store             Store
+	oauth             OAuth
+	logger            *slog.Logger
+	secret            []byte
+	publicOrigin      string
+	secureCookies     bool
+	adminOrganization string
+	adminTeam         string
+	sessionTTL        time.Duration
+	clock             func() int64
 }
 
 func New(store Store, oauth OAuth, config Config, logger *slog.Logger) (*Handler, error) {
@@ -97,10 +100,17 @@ func New(store Store, oauth OAuth, config Config, logger *slog.Logger) (*Handler
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if oauth != nil && (config.AdminOrganization == "" || config.AdminTeam == "" ||
+		strings.TrimSpace(config.AdminOrganization) != config.AdminOrganization ||
+		strings.TrimSpace(config.AdminTeam) != config.AdminTeam ||
+		len(config.AdminOrganization) > 255 || len(config.AdminTeam) > 255) {
+		return nil, fmt.Errorf("tracker web: OAuth admin organization and team are required")
+	}
 	return &Handler{
 		store: store, oauth: oauth, logger: logger, secret: append([]byte(nil), config.Secret...),
 		publicOrigin: parsed.Scheme + "://" + parsed.Host, secureCookies: config.SecureCookies,
-		autoGrantWorker: config.AutoGrantWorker, sessionTTL: config.SessionTTL, clock: config.Clock,
+		adminOrganization: config.AdminOrganization, adminTeam: config.AdminTeam,
+		sessionTTL: config.SessionTTL, clock: config.Clock,
 	}, nil
 }
 
@@ -183,13 +193,21 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 		return h.pageError(ctx, http.StatusBadGateway, "GitHub login failed")
 	}
 	identity, err := h.oauth.User(requestContext, accessToken)
-	accessToken = ""
 	if err != nil {
+		accessToken = ""
 		h.logger.Warn("GitHub identity lookup failed", "error", err)
 		return h.pageError(ctx, http.StatusBadGateway, "GitHub identity lookup failed")
 	}
+	isAdmin, err := h.oauth.TeamMembership(
+		requestContext, accessToken, h.adminOrganization, h.adminTeam, identity.Login,
+	)
+	accessToken = ""
+	if err != nil {
+		h.logger.Warn("GitHub team membership lookup failed", "error", err)
+		return h.pageError(ctx, http.StatusBadGateway, "GitHub team membership lookup failed")
+	}
 	now := h.clock()
-	user, err := h.store.UpsertGitHubUser(requestContext, identity, h.autoGrantWorker, now)
+	user, err := h.store.UpsertGitHubUser(requestContext, identity, isAdmin, now)
 	if err != nil {
 		return h.internal(ctx, err)
 	}

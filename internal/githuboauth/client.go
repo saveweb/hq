@@ -18,6 +18,8 @@ import (
 
 const maxResponseBytes = int64(64 << 10)
 
+const githubAPIVersion = "2026-03-10"
+
 type Config struct {
 	ClientID       string
 	ClientSecret   string
@@ -26,6 +28,7 @@ type Config struct {
 	AccessTokenURL string
 	APIBaseURL     string
 	HTTPClient     *http.Client
+	Scopes         []string
 }
 
 type Client struct {
@@ -36,6 +39,7 @@ type Client struct {
 	accessTokenURL string
 	apiBaseURL     string
 	http           *http.Client
+	scopes         []string
 }
 
 func New(config Config) (*Client, error) {
@@ -67,11 +71,23 @@ func New(config Config) (*Client, error) {
 			},
 		}
 	}
+	scopes := make([]string, 0, len(config.Scopes))
+	seenScopes := make(map[string]bool, len(config.Scopes))
+	for _, scope := range config.Scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" || strings.ContainsAny(scope, " \t\r\n") {
+			return nil, fmt.Errorf("github oauth: invalid scope")
+		}
+		if !seenScopes[scope] {
+			scopes = append(scopes, scope)
+			seenScopes[scope] = true
+		}
+	}
 	return &Client{
 		clientID: config.ClientID, clientSecret: config.ClientSecret,
 		redirectURL: config.RedirectURL, authorizeURL: config.AuthorizeURL,
 		accessTokenURL: config.AccessTokenURL, apiBaseURL: strings.TrimSuffix(config.APIBaseURL, "/"),
-		http: config.HTTPClient,
+		http: config.HTTPClient, scopes: scopes,
 	}, nil
 }
 
@@ -89,6 +105,9 @@ func (c *Client) AuthorizationURL(state, codeChallenge string) (string, error) {
 	query.Set("state", state)
 	query.Set("code_challenge", codeChallenge)
 	query.Set("code_challenge_method", "S256")
+	if len(c.scopes) > 0 {
+		query.Set("scope", strings.Join(c.scopes, " "))
+	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
@@ -139,6 +158,7 @@ func (c *Client) User(ctx context.Context, accessToken string) (tracker.GitHubId
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 	request.Header.Set("User-Agent", "SavewebHQ-tracker")
 	var response struct {
 		ID        int64  `json:"id"`
@@ -158,6 +178,50 @@ func (c *Client) User(ctx context.Context, accessToken string) (tracker.GitHubId
 	return tracker.GitHubIdentity{UserID: response.ID, Login: response.Login, AvatarURL: avatar}, nil
 }
 
+func (c *Client) TeamMembership(
+	ctx context.Context,
+	accessToken, organization, team, username string,
+) (bool, error) {
+	for _, value := range []string{organization, team, username} {
+		if value == "" || len(value) > 255 || strings.TrimSpace(value) != value {
+			return false, fmt.Errorf("github oauth: invalid team membership input")
+		}
+	}
+	if accessToken == "" || len(accessToken) > 4096 {
+		return false, fmt.Errorf("github oauth: invalid access token")
+	}
+	endpoint := c.apiBaseURL + "/orgs/" + url.PathEscape(organization) +
+		"/teams/" + url.PathEscape(team) + "/memberships/" + url.PathEscape(username)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("User-Agent", "SavewebHQ-tracker")
+	request.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return false, fmt.Errorf("github oauth: request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
+		return false, nil
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
+		return false, fmt.Errorf("github oauth: upstream HTTP %d", response.StatusCode)
+	}
+	var membership struct {
+		State string `json:"state"`
+	}
+	if err := decodeJSON(response.Body, &membership); err != nil {
+		return false, err
+	}
+	return membership.State == "active", nil
+}
+
 func (c *Client) doJSON(request *http.Request, target any) error {
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -168,7 +232,11 @@ func (c *Client) doJSON(request *http.Request, target any) error {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
 		return fmt.Errorf("github oauth: upstream HTTP %d", response.StatusCode)
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes+1))
+	return decodeJSON(response.Body, target)
+}
+
+func decodeJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(reader, maxResponseBytes+1))
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("github oauth: decode response: %w", err)
 	}

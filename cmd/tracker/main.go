@@ -323,7 +323,8 @@ func runServe(args []string, logger *slog.Logger) error {
 	githubClientID := flags.String("github-client-id", os.Getenv("HQ_GITHUB_CLIENT_ID"), "GitHub OAuth app client ID")
 	githubClientSecretFile := flags.String("github-client-secret-file", os.Getenv("HQ_GITHUB_CLIENT_SECRET_FILE"), "0600 GitHub OAuth client secret file")
 	webSessionSecretFile := flags.String("web-session-secret-file", os.Getenv("HQ_WEB_SESSION_SECRET_FILE"), "0600 tracker web session secret file")
-	oauthAutoGrantWorker := flags.Bool("oauth-auto-grant-worker", false, "activate new GitHub users with worker role")
+	oauthAdminOrganization := flags.String("oauth-admin-org", os.Getenv("HQ_OAUTH_ADMIN_ORG"), "GitHub organization containing the administrator team")
+	oauthAdminTeam := flags.String("oauth-admin-team", os.Getenv("HQ_OAUTH_ADMIN_TEAM"), "GitHub team slug whose active members become administrators")
 	s3Endpoint := flags.String("s3-endpoint", os.Getenv("HQ_S3_ENDPOINT"), "trusted S3-compatible endpoint")
 	s3Region := flags.String("s3-region", envOr("HQ_S3_REGION", "auto"), "S3-compatible signing region")
 	s3AccessKeyFile := flags.String("s3-access-key-id-file", os.Getenv("HQ_S3_ACCESS_KEY_ID_FILE"), "0600 S3 access key ID file")
@@ -410,14 +411,15 @@ func runServe(args []string, logger *slog.Logger) error {
 	handler := trackerhttp.New(service, logger)
 	webSecret, oauthClient, err := configureWeb(
 		*publicURL, *githubClientID, *githubClientSecretFile, *webSessionSecretFile,
+		*oauthAdminOrganization, *oauthAdminTeam,
 	)
 	if err != nil {
 		return err
 	}
 	web, err := trackerweb.New(store, oauthClient, trackerweb.Config{
 		PublicURL: *publicURL, Secret: webSecret,
-		SecureCookies:   strings.HasPrefix(*publicURL, "https://"),
-		AutoGrantWorker: *oauthAutoGrantWorker,
+		SecureCookies:     strings.HasPrefix(*publicURL, "https://"),
+		AdminOrganization: *oauthAdminOrganization, AdminTeam: *oauthAdminTeam,
 	}, logger)
 	if err != nil {
 		return err
@@ -488,7 +490,7 @@ func validatePublicURL(value string, allowInsecure bool) error {
 }
 
 func configureWeb(
-	publicURL, clientID, clientSecretFile, webSecretFile string,
+	publicURL, clientID, clientSecretFile, webSecretFile, adminOrganization, adminTeam string,
 ) ([]byte, trackerweb.OAuth, error) {
 	configured := clientID != "" || clientSecretFile != "" || webSecretFile != ""
 	if !configured {
@@ -500,6 +502,9 @@ func configureWeb(
 	}
 	if clientID == "" || clientSecretFile == "" || webSecretFile == "" {
 		return nil, nil, fmt.Errorf("serve: GitHub client ID, client secret file, and web session secret file must be configured together")
+	}
+	if adminOrganization == "" || adminTeam == "" {
+		return nil, nil, fmt.Errorf("serve: OAuth admin organization and team must be configured together with GitHub OAuth")
 	}
 	clientSecret, err := readSecretFile(clientSecretFile)
 	if err != nil {
@@ -516,6 +521,7 @@ func configureWeb(
 	oauthClient, err := githuboauth.New(githuboauth.Config{
 		ClientID: clientID, ClientSecret: clientSecret,
 		RedirectURL: strings.TrimSuffix(publicURL, "/") + "/auth/github/callback",
+		Scopes:      []string{"read:org"},
 	})
 	if err != nil {
 		return nil, nil, err
