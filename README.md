@@ -104,3 +104,26 @@ terminated by Caddy or cloudflared instead uses `--tls-terminated-by-proxy` and
 normally omits the pin. Plain HTTP requires
 `--allow-insecure-public-endpoint`. Tracker HTTP likewise requires the separate
 `--allow-http-tracker` local-test opt-in.
+
+## Go worker SDK
+
+The Go SDK opens and heartbeats a worker session, obtains a direct shard route,
+and returns a route-bound batch:
+
+```go
+session, err := worker.OpenSession(ctx, worker.Config{
+    TrackerURL:   "https://tracker.example",
+    MachineToken: machineToken,
+    AgentID:      workerAgentID,
+}, "project-1", protocol.Attrs{})
+if err != nil { /* handle */ }
+defer session.Close()
+
+batch, err := session.Claim(ctx, 64, 300, []string{protocol.JobTypeSeed})
+```
+
+Call `batch.Complete`, `batch.Fail`, or `batch.ExtendLease` for the returned
+attempts. Those methods can refresh an expired access token only while the
+tracker still reports the same shard owner and generation. If takeover has
+occurred they return `worker.ErrRouteRetired`; the caller must discard the
+local outcome and must not replay it to the new generation.
