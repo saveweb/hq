@@ -36,6 +36,10 @@ make test
 make check
 ```
 
+The local SQLite and full Echo/JSON queue-path capacity baseline is reproducible
+with `make bench-capacity`; see [capacity.md](./capacity.md) for measured results,
+the 100,000 completed-jobs/s shard model, and its production caveats.
+
 The PostgreSQL store contract test is explicit because it starts a temporary
 Docker container:
 

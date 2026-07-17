@@ -46,6 +46,11 @@
 - Job Receiver、checkpoint 控制流量与 tracker/HQ 1 Gbps 的竞争；WARC body 直达
   独立 Receiver，不占 tracker 带宽。
 
+[本机容量基线](./capacity.md) 已覆盖真实 SQLite transaction、Echo/JSON/access-token
+数据路径，并给出默认 batch 64 下 15 台满载或 29 台按 50% 规划的初步模型。它也证明
+同一台机器增加逻辑 shard 不会线性扩展。多台公网 owner、TLS/WAN、p95/p99、真实
+payload 和 checkpoint 并发仍是生产验收项。
+
 ### 2.2 Checkpoint 周期与本地磁盘预算
 
 `VACUUM INTO` 会额外生成一份接近完整 SQLite 大小的文件，之后还有压缩临时文件。需要用真实 shard 定下：

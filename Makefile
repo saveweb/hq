@@ -1,4 +1,7 @@
-.PHONY: check fmt test test-go test-python test-postgres test-e2e
+BENCH_TIME ?= 200x
+BENCH_COUNT ?= 3
+
+.PHONY: bench-capacity check fmt test test-go test-python test-postgres test-e2e
 
 check: test
 	go vet ./...
@@ -21,3 +24,7 @@ test-postgres:
 
 test-e2e:
 	./scripts/test-e2e.sh
+
+bench-capacity:
+	go test ./internal/sqlitequeue -run '^$$' -bench '^BenchmarkSQLite' -benchtime=$(BENCH_TIME) -count=$(BENCH_COUNT)
+	go test ./internal/shardhttp -run '^$$' -bench '^BenchmarkShardHTTP' -benchtime=$(BENCH_TIME) -count=$(BENCH_COUNT)
