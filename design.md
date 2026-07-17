@@ -934,7 +934,16 @@ Shard 的 `127.0.0.1` 页面显示：本机 agent 身份与 tracker 连接、公
 
 ### 12.4 Worker Local Admin
 
-Worker 的 `127.0.0.1` 页面显示：本机 agent 身份与 tracker 连接、当前 vnode session、正在执行的 job、吞吐、错误、租约剩余时间和日志。允许设置 machine token、暂停新 claim、完成当前任务后退出、测试出站网络和导出诊断信息；worker 不需要公网 endpoint，也不提供手工伪造 complete/fail、修改 job、冒用其他 session 或回显 machine token 的入口。
+Go Worker SDK 可以内嵌一个只绑定显式 `127.0.0.1` 的 Echo 页面，显示本机 agent、
+Project、session/lease、当前缓存 route 和最近 heartbeat 错误。它允许暂停/恢复后续
+claim；暂停不影响 heartbeat，也不阻止已有 Batch 的 complete、fail 或续租。页面
+使用启动时随机生成或由 `SAVEWEB_LOCAL_ADMIN_TOKEN` 提供的本机 token，不显示
+machine token 或 shard access token。Python SDK 暴露同语义的 `runtime_status()` 和
+`set_claims_paused()`，由宿主已有的本机控制面接入，不在 SDK 内再维护一套 Python
+HTTP server。SDK 不知道应用层真正开始/结束处理 job 的时刻，因此第一版不伪造
+“正在执行 job”或吞吐统计；需要这些指标时由 Worker 应用显式上报。Worker 不需要
+公网 endpoint，也不提供手工伪造 complete/fail、修改 job 或冒用其他 session 的
+入口。
 
 ## 13. 待确认的设计决策
 

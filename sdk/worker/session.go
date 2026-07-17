@@ -28,6 +28,8 @@ type Session struct {
 	ctx                     context.Context
 	cancel                  context.CancelFunc
 	loops                   sync.WaitGroup
+	claimsPaused            bool
+	localAdmin              *LocalAdmin
 	closed                  bool
 }
 
@@ -113,13 +115,30 @@ func (s *Session) Close() error {
 	s.closed = true
 	assignment := s.assignment
 	s.assignment = nil
+	admin := s.localAdmin
+	s.localAdmin = nil
 	s.cancel()
 	s.mu.Unlock()
+	if admin != nil {
+		_ = admin.Close()
+	}
 	s.loops.Wait()
 	if assignment != nil {
 		assignment.Close()
 	}
 	return nil
+}
+
+func (s *Session) SetClaimsPaused(value bool) {
+	s.mu.Lock()
+	s.claimsPaused = value
+	s.mu.Unlock()
+}
+
+func (s *Session) ClaimsPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claimsPaused
 }
 
 func (s *Session) LastBackgroundError() error {

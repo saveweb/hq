@@ -40,3 +40,7 @@ class RouteRetiredError(SavewebHQError):
 
 class SessionClosedError(SavewebHQError):
     """The worker session has been closed."""
+
+
+class ClaimsPausedError(SavewebHQError):
+    """New claims are paused by local administration."""

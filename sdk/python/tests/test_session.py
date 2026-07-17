@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from saveweb_hq import Config, RouteRetiredError, open_session
+from saveweb_hq import ClaimsPausedError, Config, RouteRetiredError, open_session
 
 
 class State:
@@ -231,9 +231,24 @@ def test_python_sdk_flow_and_generation_retirement() -> None:
             assert receiver["jobs_count"] == 1
             assert receiver["receiver_id"] == "receiver-1"
 
+            assert session.runtime_status()["route"] is None
+            session.set_claims_paused(True)
+            assert session.claims_paused
+            with pytest.raises(ClaimsPausedError):
+                session.claim(max_jobs=1, lease_seconds=60)
+            session.set_claims_paused(False)
+
             batch = session.claim(max_jobs=1, lease_seconds=60, accept_types=["seed"])
             assert batch.route.generation == 1
             assert batch.jobs[0]["id"] == "job-1"
+            status = session.runtime_status()
+            assert status["route"] == {
+                "project_id": "project-1",
+                "shard_id": "shard-a",
+                "generation": 1,
+                "owner_agent_id": "shard-agent",
+                "access_token_expires_at": status["route"]["access_token_expires_at"],
+            }
             result = batch.complete(
                 [
                     {

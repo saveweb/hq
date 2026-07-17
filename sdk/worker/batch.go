@@ -20,6 +20,15 @@ func (s *Session) Claim(
 	leaseSeconds int64,
 	acceptTypes []string,
 ) (*Batch, error) {
+	s.mu.Lock()
+	paused, closed := s.claimsPaused, s.closed
+	s.mu.Unlock()
+	if closed {
+		return nil, ErrSessionClosed
+	}
+	if paused {
+		return nil, ErrClaimsPaused
+	}
 	client, err := s.route(ctx, acceptTypes, nil, false)
 	if err != nil {
 		return nil, err

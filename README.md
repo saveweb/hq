@@ -268,6 +268,15 @@ session, err := worker.OpenSession(ctx, worker.Config{
 if err != nil { /* handle */ }
 defer session.Close()
 
+admin, err := session.StartLocalAdmin(worker.LocalAdminConfig{
+    Listen: "127.0.0.1:9082",
+    Token:  os.Getenv("SAVEWEB_LOCAL_ADMIN_TOKEN"),
+})
+if err != nil { /* handle */ }
+defer admin.Close()
+// If TokenWasGenerated is true, deliver admin.Token() to the local operator
+// through an application-controlled private channel.
+
 batch, err := session.Claim(ctx, 64, 300, []string{protocol.JobTypeSeed})
 ```
 
@@ -276,3 +285,12 @@ attempts. Those methods can refresh an expired access token only while the
 tracker still reports the same shard owner and generation. If takeover has
 occurred they return `worker.ErrRouteRetired`; the caller must discard the
 local outcome and must not replay it to the new generation.
+
+The optional worker management page uses Echo and can bind only explicit
+`127.0.0.1` (default `:9082`). It reuses the shard page's 30-minute local
+session, CSRF, bearer status API, and no-store policy. Pausing returns
+`worker.ErrClaimsPaused` from subsequent `Claim` calls but does not interrupt
+heartbeats or existing batch complete/fail/lease-extension calls. When neither
+the config nor `SAVEWEB_LOCAL_ADMIN_TOKEN` supplies a token, the SDK generates
+a fresh 256-bit value and returns it through `LocalAdmin.Token`; it is never
+included in runtime status.

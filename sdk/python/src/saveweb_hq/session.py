@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .errors import (
     APIError,
+    ClaimsPausedError,
     NoAssignmentError,
     RouteRetiredError,
     SessionClosedError,
@@ -123,6 +124,7 @@ class Session:
         self._assignment: _RouteClient | None = None
         self._assignment_session_lease = 0
         self._last_background_error: Exception | None = None
+        self._claims_paused = False
         self._closed = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -137,6 +139,41 @@ class Session:
     def last_background_error(self) -> Exception | None:
         with self._lock:
             return self._last_background_error
+
+    @property
+    def claims_paused(self) -> bool:
+        with self._lock:
+            return self._claims_paused
+
+    def set_claims_paused(self, value: bool) -> None:
+        with self._lock:
+            self._claims_paused = bool(value)
+
+    def runtime_status(self) -> dict[str, Any]:
+        with self._lock:
+            route = self._assignment
+            route_status: dict[str, Any] | None = None
+            if route is not None:
+                route_status = {
+                    "project_id": route.identity.project_id,
+                    "shard_id": route.identity.shard_id,
+                    "generation": route.identity.generation,
+                    "owner_agent_id": route.identity.owner_agent_id,
+                    "access_token_expires_at": route.access_token_expires_at,
+                }
+            return {
+                "agent_id": self.config.agent_id,
+                "project_id": self.project_id,
+                "session_id": self.id,
+                "session_lease_expires_at": self._lease_expires_at,
+                "server_time": int(time.time()),
+                "claims_paused": self._claims_paused,
+                "closed": self._closed,
+                "last_background_error": (
+                    "" if self._last_background_error is None else str(self._last_background_error)
+                ),
+                "route": route_status,
+            }
 
     def __enter__(self) -> Session:
         return self
@@ -164,6 +201,11 @@ class Session:
         lease_seconds: int = 300,
         accept_types: list[str] | None = None,
     ) -> Batch:
+        with self._lock:
+            if self._closed:
+                raise SessionClosedError("worker session is closed")
+            if self._claims_paused:
+                raise ClaimsPausedError("new claims are paused by local administration")
         accepted = [] if accept_types is None else list(accept_types)
         route = self._route(accepted, expected=None, force=False)
         request = {

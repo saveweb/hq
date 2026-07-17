@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,4 +219,99 @@ func TestGoSDKNeverReplaysOutcomeAcrossGeneration(t *testing.T) {
 	if !errors.Is(err, worker.ErrRouteRetired) {
 		t.Fatalf("completion after takeover = %v", err)
 	}
+}
+
+func TestGoSDKLocalAdminPausesOnlyNewClaims(t *testing.T) {
+	f := newFixture(t)
+	session := f.openSession(t)
+	t.Setenv("SAVEWEB_LOCAL_ADMIN_TOKEN", "")
+	if _, err := session.StartLocalAdmin(worker.LocalAdminConfig{
+		Listen: "0.0.0.0:0", Token: strings.Repeat("x", 43),
+	}); err == nil {
+		t.Fatal("worker local admin accepted a non-loopback listener")
+	}
+	admin, err := session.StartLocalAdmin(worker.LocalAdminConfig{Listen: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	if !admin.TokenWasGenerated() || len(admin.Token()) != 43 || !strings.HasPrefix(admin.Address(), "127.0.0.1:") {
+		t.Fatalf("local admin metadata: address=%q token length=%d generated=%v",
+			admin.Address(), len(admin.Token()), admin.TokenWasGenerated())
+	}
+	if _, err := session.StartLocalAdmin(worker.LocalAdminConfig{
+		Listen: "127.0.0.1:0", Token: strings.Repeat("x", 43),
+	}); err == nil {
+		t.Fatal("worker session started two local admin servers")
+	}
+
+	readStatus := func() worker.RuntimeStatus {
+		request, requestError := http.NewRequest(
+			http.MethodGet, "http://"+admin.Address()+"/api/v1/status", nil,
+		)
+		if requestError != nil {
+			t.Fatal(requestError)
+		}
+		request.Header.Set("Authorization", "Bearer "+admin.Token())
+		response, requestError := http.DefaultClient.Do(request)
+		if requestError != nil {
+			t.Fatal(requestError)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("local status HTTP %d", response.StatusCode)
+		}
+		var status worker.RuntimeStatus
+		if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+	status := readStatus()
+	if status.AgentID != "worker-agent" || status.ProjectID != "project-1" || status.ClaimsPaused || status.Closed {
+		t.Fatalf("initial local status = %+v", status)
+	}
+	webClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	loginForm := url.Values{"token": {admin.Token()}}.Encode()
+	loginRequest, err := http.NewRequest(
+		http.MethodPost, "http://"+admin.Address()+"/login", strings.NewReader(loginForm),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRequest.Header.Set("Origin", "http://"+admin.Address())
+	loginResponse, err := webClient.Do(loginRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginResponse.Body.Close()
+	if loginResponse.StatusCode != http.StatusSeeOther || len(loginResponse.Cookies()) != 1 {
+		t.Fatalf("local admin login = %d cookies=%d", loginResponse.StatusCode, len(loginResponse.Cookies()))
+	}
+	pageRequest, err := http.NewRequest(http.MethodGet, "http://"+admin.Address()+"/admin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageRequest.AddCookie(loginResponse.Cookies()[0])
+	pageResponse, err := webClient.Do(pageRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, err := io.ReadAll(pageResponse.Body)
+	pageResponse.Body.Close()
+	if err != nil || pageResponse.StatusCode != http.StatusOK ||
+		!strings.Contains(string(pageBody), "Worker local administration") {
+		t.Fatalf("local admin page = %d %q, %v", pageResponse.StatusCode, pageBody, err)
+	}
+	session.SetClaimsPaused(true)
+	if _, err := session.Claim(context.Background(), 1, 60, nil); !errors.Is(err, worker.ErrClaimsPaused) {
+		t.Fatalf("paused claim = %v", err)
+	}
+	if status = readStatus(); !status.ClaimsPaused {
+		t.Fatalf("paused local status = %+v", status)
+	}
+	session.SetClaimsPaused(false)
 }

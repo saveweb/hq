@@ -3,6 +3,7 @@
 from .job import default_job_id
 from .errors import (
     APIError,
+    ClaimsPausedError,
     NoAssignmentError,
     RouteRetiredError,
     SavewebHQError,
@@ -14,6 +15,7 @@ from .session import Batch, Config, Route, Session, open_session
 __all__ = [
     "APIError",
     "Batch",
+    "ClaimsPausedError",
     "Config",
     "NoAssignmentError",
     "Route",

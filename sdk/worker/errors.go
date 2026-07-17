@@ -12,6 +12,7 @@ var (
 	ErrNoAssignment  = errors.New("worker: no active shard assignment")
 	ErrRouteRetired  = errors.New("worker: claimed shard route was retired; discard the local outcome")
 	ErrSessionClosed = errors.New("worker: session is closed")
+	ErrClaimsPaused  = errors.New("worker: new claims are paused by local administration")
 )
 
 type APIError struct {

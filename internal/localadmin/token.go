@@ -30,15 +30,22 @@ func ResolveToken(explicit, filePath string) (TokenResult, error) {
 	if filePath == "" {
 		return TokenResult{}, fmt.Errorf("local admin: runtime token file is required")
 	}
-	var random [32]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return TokenResult{}, fmt.Errorf("local admin: random token: %w", err)
+	token, err := GenerateToken()
+	if err != nil {
+		return TokenResult{}, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(random[:])
 	if err := writePrivateAtomic(filePath, token+"\n"); err != nil {
 		return TokenResult{}, err
 	}
 	return TokenResult{Token: token, FilePath: filePath}, nil
+}
+
+func GenerateToken() (string, error) {
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("local admin: random token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(random[:]), nil
 }
 
 func validateToken(value string) error {

@@ -33,24 +33,55 @@ type Provider interface {
 	SetClaimsPaused(bool)
 }
 
+type StatusFunc func(context.Context) (any, error)
+
 type Server struct {
-	provider Provider
-	token    string
-	origin   string
-	clock    func() int64
-	mu       sync.Mutex
-	sessions map[[32]byte]int64
+	status          StatusFunc
+	setClaimsPaused func(bool)
+	adminTemplate   string
+	kind            string
+	token           string
+	origin          string
+	clock           func() int64
+	mu              sync.Mutex
+	sessions        map[[32]byte]int64
 }
 
 func NewServer(provider Provider, token, origin string, clock func() int64) (*echo.Echo, error) {
-	if provider == nil || validateToken(token) != nil || !strings.HasPrefix(origin, "http://127.0.0.1:") {
+	if provider == nil {
+		return nil, fmt.Errorf("local admin: invalid shard provider")
+	}
+	return newServer(
+		func(ctx context.Context) (any, error) { return provider.RuntimeStatus(ctx) },
+		provider.SetClaimsPaused, localShardAdminTemplate, "Shard", token, origin, clock,
+	)
+}
+
+func NewWorkerServer(
+	status StatusFunc,
+	setClaimsPaused func(bool),
+	token, origin string,
+	clock func() int64,
+) (*echo.Echo, error) {
+	return newServer(status, setClaimsPaused, localWorkerAdminTemplate, "Worker", token, origin, clock)
+}
+
+func newServer(
+	status StatusFunc,
+	setClaimsPaused func(bool),
+	adminTemplate, kind, token, origin string,
+	clock func() int64,
+) (*echo.Echo, error) {
+	if status == nil || setClaimsPaused == nil || adminTemplate == "" || kind == "" ||
+		validateToken(token) != nil || !strings.HasPrefix(origin, "http://127.0.0.1:") {
 		return nil, fmt.Errorf("local admin: invalid server configuration")
 	}
 	if clock == nil {
 		clock = func() int64 { return time.Now().Unix() }
 	}
 	handler := &Server{
-		provider: provider, token: token, origin: origin, clock: clock,
+		status: status, setClaimsPaused: setClaimsPaused, adminTemplate: adminTemplate,
+		kind: kind, token: token, origin: origin, clock: clock,
 		sessions: make(map[[32]byte]int64),
 	}
 	server := echo.New()
@@ -83,7 +114,7 @@ func (s *Server) index(ctx *echo.Context) error {
 	if _, ok := s.session(ctx); ok {
 		return ctx.Redirect(http.StatusSeeOther, "/admin")
 	}
-	return renderLocal(ctx, http.StatusOK, localLoginTemplate, nil)
+	return renderLocal(ctx, http.StatusOK, localLoginTemplate, map[string]any{"Kind": s.kind})
 }
 
 func (s *Server) login(ctx *echo.Context) error {
@@ -120,11 +151,11 @@ func (s *Server) admin(ctx *echo.Context) error {
 	if !ok {
 		return ctx.Redirect(http.StatusSeeOther, "/")
 	}
-	status, err := s.provider.RuntimeStatus(ctx.Request().Context())
+	status, err := s.status(ctx.Request().Context())
 	if err != nil {
 		return err
 	}
-	return renderLocal(ctx, http.StatusOK, localAdminTemplate, map[string]any{
+	return renderLocal(ctx, http.StatusOK, s.adminTemplate, map[string]any{
 		"Status": status, "CSRF": s.csrf(session),
 	})
 }
@@ -133,7 +164,7 @@ func (s *Server) pauseClaims(ctx *echo.Context) error {
 	if _, ok := s.authorizePost(ctx); !ok {
 		return nil
 	}
-	s.provider.SetClaimsPaused(true)
+	s.setClaimsPaused(true)
 	return ctx.Redirect(http.StatusSeeOther, "/admin")
 }
 
@@ -141,7 +172,7 @@ func (s *Server) resumeClaims(ctx *echo.Context) error {
 	if _, ok := s.authorizePost(ctx); !ok {
 		return nil
 	}
-	s.provider.SetClaimsPaused(false)
+	s.setClaimsPaused(false)
 	return ctx.Redirect(http.StatusSeeOther, "/admin")
 }
 
@@ -172,7 +203,7 @@ func (s *Server) apiStatus(ctx *echo.Context) error {
 	if !authorized {
 		return ctx.JSON(http.StatusUnauthorized, map[string]string{"error": "local admin authentication required"})
 	}
-	status, err := s.provider.RuntimeStatus(ctx.Request().Context())
+	status, err := s.status(ctx.Request().Context())
 	if err != nil {
 		return err
 	}
@@ -266,12 +297,12 @@ func renderLocal(ctx *echo.Context, status int, source string, data any) error {
 	return page.Execute(ctx.Response(), data)
 }
 
-const localLoginTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ shard</title></head>
-<body><main><h1>Shard local administration</h1><form method="post" action="/login">
+const localLoginTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ {{.Kind}}</title></head>
+<body><main><h1>{{.Kind}} local administration</h1><form method="post" action="/login">
 <label>Local admin token <input type="password" name="token" autocomplete="current-password" required></label>
 <button type="submit">Sign in</button></form></main></body></html>`
 
-const localAdminTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ shard status</title></head>
+const localShardAdminTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ shard status</title></head>
 <body><main><h1>Shard local administration</h1><p>Agent: <code>{{.Status.AgentID}}</code> · UNIX time: {{.Status.ServerTime}}</p>
 <p>New claims paused: {{.Status.ClaimsPaused}}</p>
 {{if .Status.ClaimsPaused}}<form method="post" action="/admin/claims/resume"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Resume claims</button></form>
@@ -282,5 +313,19 @@ const localAdminTemplate = `<!doctype html><html lang="en"><head><meta charset="
 <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form>
 </main></body></html>`
 
-const localErrorTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ shard error</title></head>
+const localWorkerAdminTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ worker status</title></head>
+<body><main><h1>Worker local administration</h1>
+<p>Agent: <code>{{.Status.AgentID}}</code> · Project: <code>{{.Status.ProjectID}}</code> · UNIX time: {{.Status.ServerTime}}</p>
+<p>Session: <code>{{.Status.SessionID}}</code> · session lease: {{.Status.SessionLeaseExpiresAt}} · closed: {{.Status.Closed}}</p>
+<p>New claims paused: {{.Status.ClaimsPaused}}</p>
+{{if .Status.ClaimsPaused}}<form method="post" action="/admin/claims/resume"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Resume claims</button></form>
+{{else}}<form method="post" action="/admin/claims/pause"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Pause new claims</button></form>{{end}}
+<h2>Current route</h2>
+{{if .Status.Route}}<p><code>{{.Status.Route.ProjectID}}/{{.Status.Route.ShardID}}</code> · generation {{.Status.Route.Generation}} · owner <code>{{.Status.Route.OwnerAgentID}}</code> · token expires {{.Status.Route.AccessTokenExpiresAt}}</p>
+{{else}}<p>No cached shard assignment.</p>{{end}}
+<h2>Background status</h2><p>{{if .Status.LastBackgroundError}}<code>{{.Status.LastBackgroundError}}</code>{{else}}No background error recorded.{{end}}</p>
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form>
+</main></body></html>`
+
+const localErrorTemplate = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SavewebHQ local error</title></head>
 <body><main><h1>Request failed</h1><p>{{.}}</p><p><a href="/">Return</a></p></main></body></html>`
