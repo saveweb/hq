@@ -175,7 +175,7 @@ func (s *Store) PutShard(ctx context.Context, shard tracker.Shard, now int64) er
 
 func putShard(ctx context.Context, db commandDB, shard tracker.Shard, now int64) error {
 	if !queue.ValidateIdentifier(shard.ProjectID) || !queue.ValidateIdentifier(shard.ID) ||
-		!queue.ValidateIdentifier(shard.OwnerAgentID) || shard.Generation < 1 || !validShardStatus(shard.Status) {
+		!queue.ValidateIdentifier(shard.OwnerAgentID) || shard.Generation < 1 || !validPutShardStatus(shard.Status) {
 		return fmt.Errorf("tracker postgres: invalid shard")
 	}
 	if (shard.SourceURI == nil) != (shard.SourceFormat == nil) ||
@@ -218,6 +218,7 @@ func putShard(ctx context.Context, db commandDB, shard tracker.Shard, now int64)
 				updated_at=$6
 			WHERE project_id=$1 AND id=$2 AND $4 > generation
 				AND checkpoint_uri IS NOT NULL AND checkpoint_format='sqlite-zstd-v1'
+				AND owner_lease_expires_at <= $6
 		`, shard.ProjectID, shard.ID, shard.OwnerAgentID, shard.Generation,
 			shard.OwnerLeaseExpiresAt, now)
 		if err != nil {
@@ -226,7 +227,7 @@ func putShard(ctx context.Context, db commandDB, shard tracker.Shard, now int64)
 		if result.RowsAffected() != 1 {
 			return &tracker.Error{
 				Code:    protocol.ErrorStaleGeneration,
-				Message: "checkpoint recovery requires an existing published checkpoint and newer generation",
+				Message: "checkpoint recovery requires an existing checkpoint, newer generation, and expired owner lease",
 			}
 		}
 		return nil
@@ -250,7 +251,12 @@ func putShard(ctx context.Context, db commandDB, shard tracker.Shard, now int64)
 			checkpoint_upload_size = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_size END,
 			checkpoint_upload_started_at = CASE WHEN EXCLUDED.generation > tracker_shards.generation THEN NULL ELSE tracker_shards.checkpoint_upload_started_at END,
 			updated_at = EXCLUDED.updated_at
-		WHERE EXCLUDED.generation > tracker_shards.generation OR (
+		WHERE (EXCLUDED.generation > tracker_shards.generation
+			AND EXCLUDED.source_uri IS NOT DISTINCT FROM tracker_shards.source_uri
+			AND EXCLUDED.source_format IS NOT DISTINCT FROM tracker_shards.source_format
+			AND EXCLUDED.source_etag IS NOT DISTINCT FROM tracker_shards.source_etag
+			AND EXCLUDED.owner_agent_id = tracker_shards.owner_agent_id
+		) OR (
 			EXCLUDED.generation = tracker_shards.generation
 			AND EXCLUDED.owner_agent_id = tracker_shards.owner_agent_id
 			AND EXCLUDED.source_uri IS NOT DISTINCT FROM tracker_shards.source_uri
@@ -271,11 +277,9 @@ func putShard(ctx context.Context, db commandDB, shard tracker.Shard, now int64)
 	return nil
 }
 
-func validShardStatus(status string) bool {
+func validPutShardStatus(status string) bool {
 	switch status {
-	case tracker.ShardStatusLoading, tracker.ShardStatusActive, tracker.ShardStatusDraining,
-		tracker.ShardStatusPaused, tracker.ShardStatusOffline, tracker.ShardStatusRecovering,
-		tracker.ShardStatusLoadFailed, tracker.ShardStatusRecoveryFailed:
+	case tracker.ShardStatusLoading, tracker.ShardStatusActive, tracker.ShardStatusRecovering:
 		return true
 	default:
 		return false

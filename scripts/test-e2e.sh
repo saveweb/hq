@@ -158,7 +158,7 @@ source_etag=$(md5sum "${run_dir}/source.jobs.jsonl.zst" | awk '{print $1}')
 "${run_dir}/tracker" keygen --out "${run_dir}/signing.key" --key-id e2e-key
 "${run_dir}/tracker" migrate --database-url "${database_url}"
 "${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id owner-e2e \
-  --roles shard_owner --machine-token-file "${run_dir}/owner.token"
+  --roles admin,shard_owner --machine-token-file "${run_dir}/owner.token"
 "${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id worker-e2e \
   --roles worker --machine-token-file "${run_dir}/worker.token"
 "${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-e2e
@@ -205,7 +205,7 @@ printf 'Registering HTTPS shard endpoint...\n'
 start_shard
 stop_shard
 "${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-e2e \
-  --shard-id shard-e2e --owner-agent-id "${shard_id}" --generation 1
+  --shard-id shard-e2e --owner-agent-id "${shard_id}" --generation 1 --status active
 "${run_dir}/queue-tool" --mode seed --data-dir "${run_dir}/shard-data" \
   --project-id project-e2e --shard-id shard-e2e --generation 1
 start_shard
@@ -264,7 +264,7 @@ printf 'Fencing an in-flight generation and recovering its job...\n'
 takeover_pid=$!
 wait_file "${run_dir}/takeover.ready"
 "${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-e2e \
-  --shard-id shard-e2e --owner-agent-id "${shard_id}" --generation 2
+  --shard-id shard-e2e --owner-agent-id "${shard_id}" --generation 2 --status active
 sleep 3
 printf 'continue\n' >"${run_dir}/takeover.continue"
 wait "${takeover_pid}"
@@ -301,7 +301,7 @@ printf 'Restoring a published checkpoint onto a blank replacement shard...\n'
 "${run_dir}/queue-tool" --mode seed-recovery --data-dir "${run_dir}/shard-data" \
   --project-id project-recovery-e2e --shard-id shard-recovery-e2e --generation 1
 "${run_dir}/tracker" put-shard --database-url "${database_url}" --project-id project-recovery-e2e \
-  --shard-id shard-recovery-e2e --owner-agent-id "${shard_id}" --generation 1
+  --shard-id shard-recovery-e2e --owner-agent-id "${shard_id}" --generation 1 --status active
 checkpoint_ready=0
 for _ in $(seq 1 100); do
   checkpoint_ready=$(docker exec "${postgres_container}" psql -U postgres -d saveweb_hq_e2e -Atc \
@@ -315,6 +315,13 @@ if [ "${checkpoint_ready}" -ne 1 ]; then
   printf 'recovery checkpoint was not published\n' >&2
   exit 1
 fi
+"${run_dir}/tracker" transition-shard --database-url "${database_url}" --actor-user-id owner-e2e \
+  --project-id project-recovery-e2e --shard-id shard-recovery-e2e --expected-generation 1 \
+  --target-status draining --reason 'E2E planned replacement'
+sleep 2
+"${run_dir}/tracker" transition-shard --database-url "${database_url}" --actor-user-id owner-e2e \
+  --project-id project-recovery-e2e --shard-id shard-recovery-e2e --expected-generation 1 \
+  --target-status paused --reason 'E2E checkpoint ready'
 stop_shard
 
 recovery_shard_id=$("${run_dir}/shard" init --out "${run_dir}/recovery-shard.identity")

@@ -64,13 +64,17 @@ payload 和 checkpoint 并发仍是生产验收项。
 
 ### 2.3 Reset 策略
 
-需要给出 `max_resets` 默认值，并区分：
+第一版已经固定 shard daemon 的 `--max-resets` 默认值为 `3`。以下两种情况会原子
+增加 `reset_count`：
 
 - worker lease 超时；
-- 可重试抓取错误；
-- owner 宕机恢复。
+- Worker 显式上报 `retryable=true` 的抓取错误。
 
-Owner 宕机恢复不增加 reset count；超限后使用已经定义的 `reset_exhausted`。
+不可重试错误直接进入 `failed`。Owner 宕机/计划迁移的 checkpoint recovery 不增加
+reset count；超限后进入独立的 `reset_exhausted`。Queue 不猜测业务错误是否可重试，
+也不内置业务退避；Worker 应用在上报 fail 前负责分类，后续 claim 自然重新分配。
+若生产数据证明不同 Project 需要不同阈值，再把该值提升到 Project 配置，不在第一版
+先维护两套配置来源。
 
 ### 2.4 WARC Receipt 接入
 

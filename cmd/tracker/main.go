@@ -55,6 +55,8 @@ func run(args []string, logger *slog.Logger) error {
 		return runPutProject(args[1:])
 	case "put-shard":
 		return runPutShard(args[1:])
+	case "transition-shard":
+		return runTransitionShard(args[1:])
 	case "put-receiver":
 		return runPutReceiver(args[1:])
 	case "serve":
@@ -65,7 +67,7 @@ func run(args []string, logger *slog.Logger) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: tracker {keygen|web-keygen|migrate|bootstrap-user|put-project|put-shard|put-receiver|serve} [flags]")
+	return fmt.Errorf("usage: tracker {keygen|web-keygen|migrate|bootstrap-user|put-project|put-shard|transition-shard|put-receiver|serve} [flags]")
 }
 
 func runKeygen(args []string) error {
@@ -205,7 +207,7 @@ func runPutShard(args []string) error {
 	projectID := flags.String("project-id", "", "explicit project identifier")
 	shardID := flags.String("shard-id", "", "explicit shard identifier")
 	ownerAgentID := flags.String("owner-agent-id", "", "registered shard agent identifier")
-	status := flags.String("status", tracker.ShardStatusActive, "shard lifecycle status")
+	status := flags.String("status", "", "explicit active, loading, or recovering status")
 	generation := flags.Int64("generation", 1, "positive owner generation")
 	sourceURI := flags.String("source-uri", "", "immutable s3:// source object")
 	sourceFormat := flags.String("source-format", "", "source format (jobs-jsonl-zstd-v1)")
@@ -214,8 +216,8 @@ func runPutShard(args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 || *databaseURL == "" || *projectID == "" || *shardID == "" ||
-		*ownerAgentID == "" || *generation < 1 {
-		return fmt.Errorf("put-shard: database URL, project, shard, owner agent, and positive generation are required")
+		*ownerAgentID == "" || *generation < 1 || *status == "" {
+		return fmt.Errorf("put-shard: database URL, project, shard, owner agent, positive generation, and explicit status are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -243,6 +245,35 @@ func runPutShard(args []string) error {
 		OwnerAgentID: *ownerAgentID, Generation: *generation,
 		SourceURI: sourceURIPointer, SourceFormat: sourceFormatPointer, SourceETag: sourceETagPointer,
 	}, time.Now().Unix())
+}
+
+func runTransitionShard(args []string) error {
+	flags := flag.NewFlagSet("transition-shard", flag.ContinueOnError)
+	databaseURL := flags.String("database-url", os.Getenv("HQ_DATABASE_URL"), "PostgreSQL connection URL")
+	actorUserID := flags.String("actor-user-id", "", "active administrator user ID")
+	projectID := flags.String("project-id", "", "explicit project identifier")
+	shardID := flags.String("shard-id", "", "explicit shard identifier")
+	expectedGeneration := flags.Int64("expected-generation", 0, "current positive shard generation")
+	targetStatus := flags.String("target-status", "", "active, draining, or paused")
+	reason := flags.String("reason", "", "non-empty audit reason")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *databaseURL == "" || *actorUserID == "" || *projectID == "" ||
+		*shardID == "" || *expectedGeneration < 1 || *targetStatus == "" || strings.TrimSpace(*reason) == "" {
+		return fmt.Errorf("transition-shard: database URL, actor, project, shard, positive generation, target status, and reason are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := postgres.Open(ctx, *databaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.AdminTransitionShard(
+		ctx, *actorUserID, *projectID, *shardID, *expectedGeneration,
+		*targetStatus, *reason, time.Now().Unix(),
+	)
 }
 
 func runPutReceiver(args []string) error {

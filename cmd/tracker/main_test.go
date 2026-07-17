@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"git.saveweb.org/saveweb/hq/internal/signingkey"
@@ -82,5 +83,24 @@ func TestSecretFileRequiresPrivatePermissions(t *testing.T) {
 	}
 	if _, err := readSecretFile(path); err == nil {
 		t.Fatal("group-readable token accepted")
+	}
+}
+
+func TestShardCommandsRequireExplicitLifecycleInputs(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := run([]string{
+		"put-shard", "--database-url", "postgres://invalid", "--project-id", "project-1",
+		"--shard-id", "shard-1", "--owner-agent-id", "shard-agent-1", "--generation", "1",
+	}, logger)
+	if err == nil || !strings.Contains(err.Error(), "explicit status") {
+		t.Fatalf("put-shard without status = %v", err)
+	}
+	err = run([]string{
+		"transition-shard", "--database-url", "postgres://invalid", "--actor-user-id", "admin",
+		"--project-id", "project-1", "--shard-id", "shard-1", "--expected-generation", "1",
+		"--target-status", "draining",
+	}, logger)
+	if err == nil || !strings.Contains(err.Error(), "reason") {
+		t.Fatalf("transition-shard without reason = %v", err)
 	}
 }

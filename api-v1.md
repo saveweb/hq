@@ -550,7 +550,7 @@ GitHub login
 当前实现还覆盖 immutable R2 source、receiver-only R2 ingress、generation-CAS
 checkpoint multipart 发布，以及空数据目录的新 owner 恢复；跨进程 E2E 使用
 PostgreSQL、HTTPS shard 和 S3-compatible MinIO 验证这些路径。外部 WARC Receiver
-receipt 接入和完整运营管理页仍属于后续阶段；WARC body、MegaWARC 与最终 sink
-上传不属于本仓库。容量结论仍必须用真实
-平均 JobSpec 对多个 shard endpoint 压测，
-分别记录 tracker 控制面 QPS、单 shard SQLite 吞吐和系统 aggregate completed jobs/s。
+receipt 接入仍属于后续阶段；WARC body、MegaWARC 与最终 sink 上传不属于本仓库。
+Tracker 已提供用户、Project、source/recovery、Job Receiver 和最小
+`active ↔ draining → paused` 管理页。开发机容量基线见 `capacity.md`；多台公网 owner
+的 aggregate 100k、TLS/WAN latency 和 checkpoint 并发仍必须在生产候选环境验收。

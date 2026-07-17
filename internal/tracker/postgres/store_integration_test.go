@@ -138,6 +138,13 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	}, integrationNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
 		t.Fatalf("generation rollback = %v", err)
 	}
+	if err := store.PutShard(ctx, tracker.Shard{
+		ProjectID: "project-1", ID: "shard-source", Status: tracker.ShardStatusLoading,
+		OwnerAgentID: "shard-1", Generation: 5,
+		SourceURI: &sourceURI, SourceFormat: &sourceFormat, SourceETag: &changedETag,
+	}, integrationNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("new-generation source mutation = %v", err)
+	}
 
 	_, err = service.UpsertAgent(ctx, "worker-token", "worker-1", protocol.AgentUpsertRequest{
 		Kind: protocol.AgentKindWorker, Name: "Worker", Version: "0.1.0", Attrs: protocol.Attrs{},
@@ -208,11 +215,18 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	if err := store.PutShard(ctx, tracker.Shard{
 		ProjectID: "project-1", ID: "shard-a", Status: tracker.ShardStatusRecovering,
 		OwnerAgentID: "shard-1", Generation: 4,
-	}, integrationNow+2); err != nil {
+	}, integrationNow+2); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("recovery before owner lease expiry = %v", err)
+	}
+	takeoverNow := integrationNow + 121
+	if err := store.PutShard(ctx, tracker.Shard{
+		ProjectID: "project-1", ID: "shard-a", Status: tracker.ShardStatusRecovering,
+		OwnerAgentID: "shard-1", Generation: 4,
+	}, takeoverNow); err != nil {
 		t.Fatal(err)
 	}
 	recoveryHeartbeat, err := store.HeartbeatAgent(ctx, "owner", "shard-1", "0.1.0", map[string]any{},
-		tracker.EndpointHealthy, true, false, integrationNow+2, integrationNow+122)
+		tracker.EndpointHealthy, true, false, takeoverNow, takeoverNow+120)
 	var recoveryAssignment *protocol.OwnerAssignment
 	for index := range recoveryHeartbeat.OwnerAssignments {
 		if recoveryHeartbeat.OwnerAssignments[index].ShardID == "shard-a" {
@@ -224,16 +238,16 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 		t.Fatalf("checkpoint recovery heartbeat = %+v, %v", recoveryHeartbeat, err)
 	}
 	recovered, err := store.FinishShardRecovery(ctx, "owner", "shard-1", "project-1", "shard-a",
-		4, true, "", integrationNow+3)
+		4, true, "", takeoverNow+1)
 	if err != nil || recovered.Status != tracker.ShardStatusActive {
 		t.Fatalf("finish checkpoint recovery = %+v, %v", recovered, err)
 	}
 	if _, err := store.FinishShardRecovery(ctx, "owner", "shard-1", "project-1", "shard-a",
-		4, true, "", integrationNow+3); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		4, true, "", takeoverNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
 		t.Fatalf("replayed checkpoint recovery = %v", err)
 	}
 	if _, err := store.PublishCheckpoint(ctx, "owner", "shard-1", "project-1", "shard-a",
-		upload.ID, 3, integrationNow+2); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		upload.ID, 3, takeoverNow+1); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
 		t.Fatalf("stale checkpoint publication = %v", err)
 	}
 
@@ -243,6 +257,47 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	}, false, integrationNow+1)
 	if err != nil || portalAdmin.ID != "admin" || !portalAdmin.HasRole(tracker.RoleAdmin) {
 		t.Fatalf("portal admin = %+v, %v", portalAdmin, err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-a", 3,
+		tracker.ShardStatusDraining, "stale operator page", takeoverNow+4); !tracker.IsCode(err, protocol.ErrorStaleGeneration) {
+		t.Fatalf("stale shard transition = %v", err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-a", 4,
+		tracker.ShardStatusPaused, "must drain first", takeoverNow+4); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+		t.Fatalf("active to paused transition = %v", err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-a", 4,
+		tracker.ShardStatusDraining, "stop new claims", takeoverNow+4); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-a", 4,
+		tracker.ShardStatusActive, "resume before pause", takeoverNow+5); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-a", 4,
+		tracker.ShardStatusDraining, "final drain", takeoverNow+6); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-a", 4,
+		tracker.ShardStatusPaused, "checkpoint is published", takeoverNow+7); err != nil {
+		t.Fatal(err)
+	}
+	adminShards, err := store.ListAdminShards(ctx)
+	pausedShard, found := findAdminShard(adminShards, "project-1", "shard-a")
+	if err != nil || !found || pausedShard.Status != tracker.ShardStatusPaused || pausedShard.OwnerLeaseExpiresAt != 0 {
+		t.Fatalf("paused shard = %+v, found=%v, err=%v", pausedShard, found, err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-source", 4,
+		tracker.ShardStatusDraining, "test checkpoint guard", takeoverNow+8); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-source", 4,
+		tracker.ShardStatusPaused, "no checkpoint exists", takeoverNow+9); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+		t.Fatalf("pause without checkpoint = %v", err)
+	}
+	if err := store.AdminTransitionShard(ctx, "admin", "project-1", "shard-source", 4,
+		tracker.ShardStatusActive, "resume after rejected pause", takeoverNow+10); err != nil {
+		t.Fatal(err)
 	}
 	sessionHash := sha256.Sum256([]byte("integration-web-session"))
 	if err := store.CreateWebSession(ctx, "admin", sessionHash[:], integrationNow, integrationNow+60); err != nil {
@@ -312,7 +367,7 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	if err != nil || !hasProject(projects, "project-admin") {
 		t.Fatalf("admin projects = %+v, %v", projects, err)
 	}
-	adminShards, err := store.ListAdminShards(ctx)
+	adminShards, err = store.ListAdminShards(ctx)
 	if err != nil || !hasAdminShard(adminShards, "project-admin", "shard-admin") {
 		t.Fatalf("admin shards = %+v, %v", adminShards, err)
 	}
@@ -325,7 +380,8 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 		t.Fatalf("shard agents = %+v, %v", shardAgents, err)
 	}
 	audit, err := store.ListAuditEvents(ctx, 100)
-	if err != nil || !hasAuditAction(audit, "receiver.put", "project-admin/stage-output") {
+	if err != nil || !hasAuditAction(audit, "receiver.put", "project-admin/stage-output") ||
+		!hasAuditAction(audit, "shard.transition", "project-1/shard-a") {
 		t.Fatalf("audit events = %+v, %v", audit, err)
 	}
 }
@@ -340,12 +396,17 @@ func hasProject(projects []tracker.Project, id string) bool {
 }
 
 func hasAdminShard(shards []tracker.AdminShard, projectID, shardID string) bool {
+	_, ok := findAdminShard(shards, projectID, shardID)
+	return ok
+}
+
+func findAdminShard(shards []tracker.AdminShard, projectID, shardID string) (tracker.AdminShard, bool) {
 	for _, shard := range shards {
 		if shard.ProjectID == projectID && shard.ID == shardID {
-			return true
+			return shard, true
 		}
 	}
-	return false
+	return tracker.AdminShard{}, false
 }
 
 func hasReceiver(receivers []tracker.Receiver, projectID, receiverID string) bool {

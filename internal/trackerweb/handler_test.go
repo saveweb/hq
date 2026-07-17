@@ -55,6 +55,12 @@ type fakeStore struct {
 	putProject   tracker.Project
 	putShard     tracker.Shard
 	putReceiver  tracker.Receiver
+	transition   struct {
+		projectID  string
+		shardID    string
+		generation int64
+		status     string
+	}
 }
 
 func newFakeStore() *fakeStore {
@@ -154,6 +160,16 @@ func (s *fakeStore) AdminPutShard(_ context.Context, _ string, shard tracker.Sha
 	return nil
 }
 
+func (s *fakeStore) AdminTransitionShard(
+	_ context.Context, _, projectID, shardID string, generation int64, status, _ string, _ int64,
+) error {
+	s.transition.projectID = projectID
+	s.transition.shardID = shardID
+	s.transition.generation = generation
+	s.transition.status = status
+	return nil
+}
+
 func (s *fakeStore) AdminPutReceiver(_ context.Context, _ string, receiver tracker.Receiver, _ string, _ int64) error {
 	s.putReceiver = receiver
 	return nil
@@ -249,6 +265,16 @@ func TestGitHubOAuthPortalCSRFAndAdminFlow(t *testing.T) {
 	unsafeShard := perform(server, http.MethodPost, "/admin/shards", unsafeShardForm, sessionCookie, "http://tracker.test")
 	if unsafeShard.Code != http.StatusBadRequest || store.putShard.Generation != 1 {
 		t.Fatalf("unsafe shard update = %d %+v", unsafeShard.Code, store.putShard)
+	}
+	transitionForm := url.Values{
+		"csrf": {csrfMatch[1]}, "project_id": {"project-1"}, "shard_id": {"shard-1"},
+		"expected_generation": {"3"}, "target_status": {"draining"}, "reason": {"planned pause"},
+	}.Encode()
+	transition := perform(server, http.MethodPost, "/admin/shards/transition", transitionForm, sessionCookie, "http://tracker.test")
+	if transition.Code != http.StatusSeeOther || store.transition.projectID != "project-1" ||
+		store.transition.shardID != "shard-1" || store.transition.generation != 3 ||
+		store.transition.status != tracker.ShardStatusDraining {
+		t.Fatalf("shard transition = %d %+v", transition.Code, store.transition)
 	}
 	receiverForm := url.Values{
 		"csrf": {csrfMatch[1]}, "project_id": {"project-2"}, "receiver_id": {"stage-output"},

@@ -48,6 +48,7 @@ type Store interface {
 	ListAuditEvents(context.Context, int) ([]tracker.AuditEvent, error)
 	AdminPutProject(context.Context, string, tracker.Project, string, int64) error
 	AdminPutShard(context.Context, string, tracker.Shard, string, int64) error
+	AdminTransitionShard(context.Context, string, string, string, int64, string, string, int64) error
 	AdminPutReceiver(context.Context, string, tracker.Receiver, string, int64) error
 }
 
@@ -115,6 +116,7 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/admin/projects", h.adminProjects)
 	server.POST("/admin/projects", h.putProject)
 	server.POST("/admin/shards", h.putShard)
+	server.POST("/admin/shards/transition", h.transitionShard)
 	server.POST("/admin/receivers", h.putReceiver)
 }
 
@@ -375,6 +377,28 @@ func (h *Handler) putShard(ctx *echo.Context) error {
 		h.logger.Warn("shard admin command rejected", "actor", actor.ID, "project", shard.ProjectID,
 			"shard", shard.ID, "generation", shard.Generation, "error", err)
 		return h.pageError(ctx, http.StatusBadRequest, "Shard attach or recovery was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects")
+}
+
+func (h *Handler) transitionShard(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	actor, ok := h.authorizeAdminPost(ctx)
+	if !ok {
+		return nil
+	}
+	generation, err := strconv.ParseInt(ctx.FormValue("expected_generation"), 10, 64)
+	if err != nil || generation < 1 {
+		return h.pageError(ctx, http.StatusBadRequest, "Expected shard generation must be a positive integer")
+	}
+	projectID, shardID, targetStatus := ctx.FormValue("project_id"), ctx.FormValue("shard_id"), ctx.FormValue("target_status")
+	if err := h.store.AdminTransitionShard(
+		ctx.Request().Context(), actor.ID, projectID, shardID, generation,
+		targetStatus, ctx.FormValue("reason"), h.clock(),
+	); err != nil {
+		h.logger.Warn("shard transition rejected", "actor", actor.ID, "project", projectID,
+			"shard", shardID, "generation", generation, "target_status", targetStatus, "error", err)
+		return h.pageError(ctx, http.StatusBadRequest, "Shard lifecycle transition was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects")
 }

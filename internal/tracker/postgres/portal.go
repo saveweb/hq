@@ -12,7 +12,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
+	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
 const portalUserColumns = `
@@ -390,6 +392,63 @@ func (s *Store) AdminPutShard(
 	target := shard.ProjectID + "/" + shard.ID
 	return s.adminCommand(ctx, actorID, "shard.put", target, reason, now, func(tx pgx.Tx) error {
 		return putShard(ctx, tx, shard, now)
+	})
+}
+
+func (s *Store) AdminTransitionShard(
+	ctx context.Context,
+	actorID, projectID, shardID string,
+	expectedGeneration int64,
+	targetStatus, reason string,
+	now int64,
+) error {
+	if !queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(shardID) ||
+		expectedGeneration < 1 ||
+		(targetStatus != tracker.ShardStatusActive && targetStatus != tracker.ShardStatusDraining &&
+			targetStatus != tracker.ShardStatusPaused) {
+		return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid shard transition"}
+	}
+	target := projectID + "/" + shardID
+	return s.adminCommand(ctx, actorID, "shard.transition", target, reason, now, func(tx pgx.Tx) error {
+		var currentStatus, projectStatus string
+		var currentGeneration int64
+		var checkpointURI *string
+		err := tx.QueryRow(ctx, `
+			SELECT sh.status, sh.generation, sh.checkpoint_uri, p.status
+			FROM tracker_shards sh
+			JOIN tracker_projects p ON p.id=sh.project_id
+			WHERE sh.project_id=$1 AND sh.id=$2
+			FOR UPDATE OF sh
+		`, projectID, shardID).Scan(&currentStatus, &currentGeneration, &checkpointURI, &projectStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return &tracker.Error{Code: protocol.ErrorNotFound, Message: "shard not found"}
+		}
+		if err != nil {
+			return err
+		}
+		if currentGeneration != expectedGeneration {
+			return &tracker.Error{
+				Code: protocol.ErrorStaleGeneration, Message: "shard generation changed",
+				Details: map[string]any{"current_generation": currentGeneration},
+			}
+		}
+		valid := currentStatus == targetStatus ||
+			currentStatus == tracker.ShardStatusActive && targetStatus == tracker.ShardStatusDraining ||
+			currentStatus == tracker.ShardStatusDraining && targetStatus == tracker.ShardStatusActive ||
+			currentStatus == tracker.ShardStatusDraining && targetStatus == tracker.ShardStatusPaused
+		if !valid || targetStatus == tracker.ShardStatusActive && projectStatus != tracker.ProjectStatusActive {
+			return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "shard transition is not allowed"}
+		}
+		if targetStatus == tracker.ShardStatusPaused && checkpointURI == nil {
+			return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "pausing requires a published checkpoint"}
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE tracker_shards SET status=$3,
+				owner_lease_expires_at=CASE WHEN $3='paused' THEN 0 ELSE owner_lease_expires_at END,
+				updated_at=$4
+			WHERE project_id=$1 AND id=$2
+		`, projectID, shardID, targetStatus, now)
+		return err
 	})
 }
 

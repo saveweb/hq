@@ -65,7 +65,9 @@ uv run --project sdk/python pytest
 ```
 
 See [api-v1.md](./api-v1.md) for protocol semantics and
-[design.md](./design.md) for the full design.
+[design.md](./design.md) for the full design. The current pilot deployment,
+planned pause/recovery, R2 lifecycle, and shutdown procedures are in
+[operations.md](./operations.md).
 
 ## Tracker commands
 
@@ -130,14 +132,33 @@ Active administrators can inspect and manage Projects, source-loading or
 checkpoint-recovering shards, Job Receivers, owner/generation/lease state,
 checkpoint pointers, and recent audit events at `/admin/projects`. Every web
 mutation requires a reason and is audited in the same PostgreSQL transaction.
+An active shard can be moved through the deliberately small lifecycle
+`active ↔ draining → paused`; pausing requires a published checkpoint and
+clears the owner lease. Resume from `paused` uses the existing recovery form
+with a higher generation and an owner.
 The equivalent explicit commands remain available for bootstrap and
 automation:
 
 ```bash
 go run ./cmd/tracker put-project --database-url "$HQ_DATABASE_URL" --project-id project-1
-go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
-  --project-id project-1 --shard-id shard-1 --owner-agent-id sh_xxx
+
+go run ./cmd/tracker transition-shard --database-url "$HQ_DATABASE_URL" \
+  --actor-user-id admin-user --project-id project-1 --shard-id shard-1 \
+  --expected-generation 1 --target-status draining --reason 'planned pause'
 ```
+
+Only an active administrator can run `transition-shard`; it uses generation
+as a compare-and-swap guard and writes the same audit log as the web page.
+`draining` stops new claims after the owner's next heartbeat while allowing
+existing attempts and checkpoint publication. After WIP reaches zero and a
+checkpoint is published, transition to `paused`; a replacement owner cannot
+enter `recovering` until the prior owner lease has expired or been cleared by
+this planned-pause path.
+
+`put-shard` always requires an explicit `--status`. Normal production attach
+uses the source-backed `loading` example below; source-less `active` exists only
+for a pre-existing local SQLite queue and should not be used to create an empty
+production shard accidentally.
 
 A receiver is a deliberately smaller primitive for multi-stage work. It has
 no owner, SQLite database, generation, claim API, or automatic pipeline. The

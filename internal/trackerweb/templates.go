@@ -57,15 +57,24 @@ const adminProjectsTemplate = `<!doctype html>
 </tbody></table>
 
 <h2>Queue shards</h2>
-<table><thead><tr><th>Project / shard</th><th>Status</th><th>Owner</th><th>Generation</th><th>Owner lease</th><th>Source</th><th>Checkpoint</th><th>Error</th></tr></thead><tbody>
+<table><thead><tr><th>Project / shard</th><th>Status</th><th>Owner</th><th>Generation</th><th>Owner lease</th><th>Source</th><th>Checkpoint</th><th>Error</th><th>Lifecycle</th></tr></thead><tbody>
 {{range .Shards}}<tr>
 <td><code>{{.ProjectID}}/{{.ID}}</code></td><td>{{.Status}}</td><td><code>{{.OwnerAgentID}}</code></td>
 <td>{{.Generation}}</td><td>{{.OwnerLeaseExpiresAt}}</td>
 <td>{{if .SourceURI}}<code>{{.SourceURI}}</code><br>ETag: <code>{{.SourceETag}}</code>{{else}}none{{end}}</td>
 <td>{{if .CheckpointURI}}seq {{.CheckpointSequence}} / generation {{.CheckpointGeneration}}<br><code>{{.CheckpointURI}}</code>{{else}}none{{end}}{{if .CheckpointUploadID}}<br>upload: <code>{{.CheckpointUploadID}}</code>{{end}}</td>
 <td>{{if .LoadErrorCode}}load: <code>{{.LoadErrorCode}}</code>{{end}}{{if .RecoveryErrorCode}} recovery: <code>{{.RecoveryErrorCode}}</code>{{end}}</td>
-</tr>{{else}}<tr><td colspan="8">No queue shards registered.</td></tr>{{end}}
+<td>{{if eq .Status "active"}}<form method="post" action="/admin/shards/transition">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project_id" value="{{.ProjectID}}"><input type="hidden" name="shard_id" value="{{.ID}}"><input type="hidden" name="expected_generation" value="{{.Generation}}"><input type="hidden" name="target_status" value="draining">
+<label>Reason <input name="reason" maxlength="1000" required></label><button type="submit">Drain</button></form>
+{{else if eq .Status "draining"}}<form method="post" action="/admin/shards/transition">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project_id" value="{{.ProjectID}}"><input type="hidden" name="shard_id" value="{{.ID}}"><input type="hidden" name="expected_generation" value="{{.Generation}}">
+<label>Reason <input name="reason" maxlength="1000" required></label><button name="target_status" value="active" type="submit">Resume claims</button>{{if .CheckpointURI}}<button name="target_status" value="paused" type="submit">Pause</button>{{else}} Published checkpoint required before pause.{{end}}</form>
+{{else if eq .Status "paused"}}Recover below with a higher generation.{{else}}No direct transition.{{end}}</td>
+</tr>{{else}}<tr><td colspan="9">No queue shards registered.</td></tr>{{end}}
 </tbody></table>
+
+<p>Drain stops new claims after the owner's next heartbeat while allowing existing attempts and checkpoints. Pause requires a published checkpoint, clears the owner lease, and can only follow draining.</p>
 
 <h2>Job Receivers</h2>
 <table><thead><tr><th>Project / receiver</th><th>Status</th><th>Format</th><th>Sink</th></tr></thead><tbody>
