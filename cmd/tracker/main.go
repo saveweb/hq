@@ -489,7 +489,7 @@ func validatePublicURL(value string, allowInsecure bool) error {
 
 func configureWeb(
 	publicURL, clientID, clientSecretFile, webSecretFile string,
-) ([]byte, *githuboauth.Client, error) {
+) ([]byte, trackerweb.OAuth, error) {
 	configured := clientID != "" || clientSecretFile != "" || webSecretFile != ""
 	if !configured {
 		secret := make([]byte, 32)

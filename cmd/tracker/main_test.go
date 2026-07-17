@@ -11,6 +11,7 @@ import (
 
 	"git.saveweb.org/saveweb/hq/internal/signingkey"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
+	"git.saveweb.org/saveweb/hq/internal/trackerweb"
 )
 
 func TestKeygenCommandCreatesLoadableExclusiveKey(t *testing.T) {
@@ -43,6 +44,20 @@ func TestWebKeygenCreatesPrivateExclusiveSecret(t *testing.T) {
 	}
 	if err := run([]string{"web-keygen", "--out", path}, logger); err == nil {
 		t.Fatal("web-keygen overwrote an existing secret")
+	}
+}
+
+func TestConfigureWebWithoutOAuthReturnsNilInterface(t *testing.T) {
+	secret, oauth, err := configureWeb("https://tracker.example", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secret) != 32 {
+		t.Fatalf("web secret length = %d", len(secret))
+	}
+	var webOAuth trackerweb.OAuth = oauth
+	if webOAuth != nil {
+		t.Fatalf("disabled OAuth has non-nil interface with dynamic type %T", webOAuth)
 	}
 }
 
