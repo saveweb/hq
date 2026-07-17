@@ -2,7 +2,7 @@
 
 > 状态：v1 冻结并由当前实现覆盖
 >
-> 本文只定义 tracker、shard queue RPC 和 worker SDK 共同依赖的最小协议。管理页面、Project 管理、checkpoint 上传和 artifact 上传使用独立 API。
+> 本文只定义 tracker、shard queue RPC 和 worker SDK 共同依赖的最小协议。管理页面、Project 管理和 checkpoint 上传使用独立 API；WARC body 由外部 WARC Receiver 接收，不属于 SavewebHQ API。
 
 ## 1. 性能目标与传输方式
 
@@ -26,13 +26,14 @@ Worker 直接访问 shard，claim/complete/fail 不经过 tracker。因此 track
 - shard assignment 和 endpoint 查询；
 - 短期 shard access token 签发；
 - Project/shard 控制面与管理页面；
-- receiver object body、artifact gateway 和 checkpoint 控制流量中的 HQ 部分。
+- Job Receiver object body 和 checkpoint 控制流量中的 HQ 部分。
 
 Assignment 和 access token 可以缓存到过期前，不需要每个 batch 都访问 tracker。100,000 completed jobs/s 是否成立，主要由 shard 总数、每个 SQLite shard 的批量事务吞吐、志愿者上下行和平均 JobSpec 大小决定。
 
-WARC、页面正文、截图和 checkpoint 不得放进 queue RPC JSON。Receiver 使用独立、
-有限长的 Tracker ingress API；若这些内容经过与 tracker 同机的 HQ gateway，它们会
-单独竞争 1 Gbps 带宽，必须独立做容量规划，不能算入 queue QPS 结论。
+WARC、页面正文、截图和 checkpoint 不得放进 queue RPC JSON。小型 discovered jobs
+使用独立、有限长的 Tracker Job Receiver ingress API；其流量会单独竞争 tracker
+带宽。WARC body 则由 Worker 直接上传到 Saveweb 维护的外部 WARC Receiver，不经过
+tracker 或 shard，也不能算入 queue QPS 结论。
 
 ### 1.3 网络拓扑
 
@@ -350,7 +351,7 @@ POST /api/v1/queue/complete
       "outcome": {
         "kind": "success",
         "code": 200,
-        "uri": "artifact://...",
+        "uri": null,
         "meta": {}
       },
       "discovered_jobs": []
@@ -365,7 +366,12 @@ POST /api/v1/queue/complete
 - `http_error`：HTTP 4xx/5xx 等已经得到确定响应的业务结果；
 - `skipped`：按 Project 规则明确跳过，但仍视为已处理。
 
-`code`、`uri` 可以为空，`meta` 最大 8 KiB。WARC 或页面内容本身不能内嵌，只能填写 artifact URI。网络超时、DNS 失败等需要重试的执行错误使用 fail API。
+`code`、`uri` 可以为空，`meta` 最大 8 KiB。WARC 或页面内容本身不能内嵌。
+产生 WARC 的 Worker 必须先把文件直接交给受信 WARC Receiver；Receiver 在验证并
+持久接收后签发 receipt，Worker 再把 WARC 文件名和有界 receipt 放入 outcome 并
+调用本 endpoint。Receiver 不直接调用 queue，后续 MegaWARC 和最终 sink 状态也不
+改变 job。Receipt 的签名编码作为独立扩展协议定义，不改变 complete 的 attempt、
+lease、generation 和幂等语义。网络超时、DNS 失败等需要重试的执行错误使用 fail API。
 
 整个 batch 使用一个外层 SQLite transaction；每个 item 先预校验或使用 savepoint 隔离，该 item 的 outcome、父 job `done` 和 `discovered_jobs` 必须保持原子。合法 item 可以与被拒绝 item 同批处理，response 按请求顺序逐项返回；若外层 commit 失败，则整个 batch 返回 batch-level error，不能报告任何 item 已应用：
 
@@ -543,7 +549,8 @@ GitHub login
 
 当前实现还覆盖 immutable R2 source、receiver-only R2 ingress、generation-CAS
 checkpoint multipart 发布，以及空数据目录的新 owner 恢复；跨进程 E2E 使用
-PostgreSQL、HTTPS shard 和 S3-compatible MinIO 验证这些路径。Artifact body 上传、
-Artifact body 上传和完整运营管理页仍属于后续阶段。容量结论仍必须用真实
+PostgreSQL、HTTPS shard 和 S3-compatible MinIO 验证这些路径。外部 WARC Receiver
+receipt 接入和完整运营管理页仍属于后续阶段；WARC body、MegaWARC 与最终 sink
+上传不属于本仓库。容量结论仍必须用真实
 平均 JobSpec 对多个 shard endpoint 压测，
 分别记录 tracker 控制面 QPS、单 shard SQLite 吞吐和系统 aggregate completed jobs/s。

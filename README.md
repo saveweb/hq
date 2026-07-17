@@ -166,6 +166,15 @@ by that invocation. Existing output paths are never overwritten. Upload the
 results to R2 and register each one as another explicit source shard. There is
 still no automatic stage transition or pipeline state.
 
+This job receiver is separate from the WARC Receiver. Workers upload large
+WARC bodies directly to a Saveweb-operated WARC Receiver; those bytes never
+pass through tracker or shard. Once the Receiver has durably accepted and
+validated a WARC, it returns a signed receipt. The Worker carries that receipt
+in its ordinary queue completion, so only the holder of the current attempt
+changes job state. Later MegaWARC packing and final-sink publication are
+tracked independently and never reopen or block the completed job. The WARC
+Receiver implementation lives outside this repository.
+
 To activate a manually pre-split `jobs.txt`, pack it locally, upload the
 result to a private R2 bucket, and register its immutable URI and ETag. The
 packer generates stable job IDs and refuses to overwrite its output:
