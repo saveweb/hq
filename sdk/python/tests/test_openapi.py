@@ -28,6 +28,7 @@ def test_openapi_contract_has_all_v1_operations() -> None:
         "/api/v1/worker/sessions": "post",
         "/api/v1/worker/sessions/{session_id}/heartbeat": "post",
         "/api/v1/worker/assignments": "post",
+        "/api/v1/worker/receivers/{receiver_id}/batches": "post",
         "/api/v1/shard/endpoint-challenge": "post",
         "/api/v1/queue/claim": "post",
         "/api/v1/queue/complete": "post",

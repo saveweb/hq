@@ -4,6 +4,7 @@
 package objectstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -118,6 +119,33 @@ func (c *Client) Head(ctx context.Context, uri string) (int64, string, error) {
 		return 0, "", fmt.Errorf("objectstore: incomplete object metadata")
 	}
 	return *result.ContentLength, NormalizeETag(*result.ETag), nil
+}
+
+func (c *Client) Put(
+	ctx context.Context,
+	uri string,
+	body *bytes.Reader,
+	sizeBytes int64,
+	contentType string,
+) (string, error) {
+	object, err := ParseURI(uri)
+	if err != nil {
+		return "", err
+	}
+	if body == nil || sizeBytes < 1 || body.Size() != sizeBytes || contentType == "" || len(contentType) > 256 {
+		return "", fmt.Errorf("objectstore: invalid put request")
+	}
+	result, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(object.Bucket), Key: aws.String(object.Key), Body: body,
+		ContentLength: aws.Int64(sizeBytes), ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", fmt.Errorf("objectstore: put %s: %w", URI(object), err)
+	}
+	if result.ETag == nil || *result.ETag == "" {
+		return "", fmt.Errorf("objectstore: put response omitted ETag")
+	}
+	return NormalizeETag(*result.ETag), nil
 }
 
 func (c *Client) PresignGet(

@@ -20,6 +20,7 @@ import (
 	"git.saveweb.org/saveweb/hq/internal/endpointcheck"
 	"git.saveweb.org/saveweb/hq/internal/githuboauth"
 	"git.saveweb.org/saveweb/hq/internal/objectstore"
+	"git.saveweb.org/saveweb/hq/internal/receiveringest"
 	"git.saveweb.org/saveweb/hq/internal/signingkey"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
@@ -54,6 +55,8 @@ func run(args []string, logger *slog.Logger) error {
 		return runPutProject(args[1:])
 	case "put-shard":
 		return runPutShard(args[1:])
+	case "put-receiver":
+		return runPutReceiver(args[1:])
 	case "serve":
 		return runServe(args[1:], logger)
 	default:
@@ -62,7 +65,7 @@ func run(args []string, logger *slog.Logger) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: tracker {keygen|web-keygen|migrate|bootstrap-user|put-project|put-shard|serve} [flags]")
+	return fmt.Errorf("usage: tracker {keygen|web-keygen|migrate|bootstrap-user|put-project|put-shard|put-receiver|serve} [flags]")
 }
 
 func runKeygen(args []string) error {
@@ -242,6 +245,37 @@ func runPutShard(args []string) error {
 	}, time.Now().Unix())
 }
 
+func runPutReceiver(args []string) error {
+	flags := flag.NewFlagSet("put-receiver", flag.ContinueOnError)
+	databaseURL := flags.String("database-url", os.Getenv("HQ_DATABASE_URL"), "PostgreSQL connection URL")
+	projectID := flags.String("project-id", "", "explicit project identifier")
+	receiverID := flags.String("receiver-id", "", "explicit receiver identifier")
+	status := flags.String("status", tracker.ReceiverStatusActive, "active or removed")
+	sinkURI := flags.String("sink-uri", "", "immutable receiver object s3:// prefix")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *databaseURL == "" || *projectID == "" || *receiverID == "" ||
+		*sinkURI == "" || strings.HasSuffix(*sinkURI, "/") ||
+		(*status != tracker.ReceiverStatusActive && *status != tracker.ReceiverStatusRemoved) {
+		return fmt.Errorf("put-receiver: database URL, project, receiver, active/removed status, and sink URI are required")
+	}
+	if _, err := objectstore.ParseURI(*sinkURI + "/probe"); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := postgres.Open(ctx, *databaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.PutReceiver(ctx, tracker.Receiver{
+		ProjectID: *projectID, ID: *receiverID, Status: *status,
+		SinkURI: *sinkURI, Format: "jobs-jsonl-zstd-v1",
+	}, time.Now().Unix())
+}
+
 func runServe(args []string, logger *slog.Logger) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := flags.String("listen", envOr("HQ_LISTEN", ":8080"), "HTTP listen address")
@@ -271,6 +305,8 @@ func runServe(args []string, logger *slog.Logger) error {
 	checkpointURLTTL := flags.Int64("checkpoint-download-url-ttl-seconds", 3600, "checkpoint recovery URL lifetime")
 	checkpointPartSize := flags.Int64("checkpoint-part-size-bytes", 8<<20, "recommended multipart checkpoint part size")
 	checkpointMaxBytes := flags.Int64("checkpoint-max-bytes", 64<<30, "maximum compressed checkpoint size")
+	receiverMaxJobs := flags.Int("receiver-max-jobs", 1000, "maximum jobs in one receiver batch")
+	receiverMaxObjectBytes := flags.Int64("receiver-max-object-bytes", 16<<20, "maximum compressed receiver object size")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -322,6 +358,16 @@ func runServe(args []string, logger *slog.Logger) error {
 	config.CheckpointPartURLTTL = *checkpointPartURLTTL
 	config.CheckpointPartSizeBytes = *checkpointPartSize
 	config.CheckpointMaxBytes = *checkpointMaxBytes
+	config.ReceiverMaxJobs = *receiverMaxJobs
+	if objectClient != nil {
+		receiverWriter, err := receiveringest.New(receiveringest.Config{
+			Store: objectClient, MaxObjectBytes: *receiverMaxObjectBytes,
+		})
+		if err != nil {
+			return err
+		}
+		config.ReceiverSink = receiverWriter
+	}
 	checker := endpointcheck.NewWithOptions(endpointcheck.Options{AllowPrivate: *allowPrivateShardEndpoints})
 	if *allowPrivateShardEndpoints {
 		logger.Warn("private shard endpoints are enabled; do not use this setting in production")

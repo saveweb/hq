@@ -20,6 +20,7 @@ tags:
   - name: agents
   - name: shards
   - name: sessions
+  - name: receivers
   - name: queue
   - name: health
 
@@ -174,6 +175,38 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+
+  /api/v1/worker/receivers/{receiver_id}/batches:
+    parameters:
+      - $ref: '#/components/parameters/ReceiverID'
+      - $ref: '#/components/parameters/AgentIDHeader'
+    post:
+      tags: [receivers]
+      operationId: submitReceiverBatch
+      summary: Store one immutable discovered-job batch for a later explicit project stage
+      description: |
+        This is a trusted Tracker ingress, not a claimable shard. The worker never
+        receives object-storage credentials. Ambiguous transport retries may create
+        duplicate objects; the later explicit stage deduplicates stable job IDs.
+      security:
+        - MachineToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReceiverBatchRequest'}
+      responses:
+        '201':
+          description: One immutable jobs-jsonl-zstd-v1 object was stored
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReceiverBatchResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
 
   /api/v1/shards/{project_id}/{shard_id}/load-result:
     parameters:
@@ -511,6 +544,11 @@ components:
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
+    ReceiverID:
+      name: receiver_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
     ProjectID:
       name: project_id
       in: path
@@ -569,7 +607,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorEnvelope'}
     Unavailable:
-      description: Shard unavailable or owner lease expired
+      description: Shard, receiver storage, or owner lease is unavailable
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -925,6 +963,32 @@ components:
             - {$ref: '#/components/schemas/Assignment'}
             - {type: 'null'}
         retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
+
+    ReceiverBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [session_id, jobs]
+      properties:
+        session_id: {$ref: '#/components/schemas/Identifier'}
+        jobs:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: '#/components/schemas/JobSpecV1'}
+
+    ReceiverBatchResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, receiver_id, object_uri, format, jobs_count, size_bytes, sha256, created_at]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        receiver_id: {$ref: '#/components/schemas/Identifier'}
+        object_uri: {type: string, minLength: 1, maxLength: 4096}
+        format: {type: string, const: jobs-jsonl-zstd-v1}
+        jobs_count: {type: integer, format: int64, minimum: 1, maximum: 1000}
+        size_bytes: {type: integer, format: int64, minimum: 1}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        created_at: {$ref: '#/components/schemas/UnixTime'}
 
     EndpointChallenge:
       type: object

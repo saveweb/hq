@@ -144,7 +144,13 @@ class JSONTransport:
     ) -> dict[str, Any]:
         body = b"" if payload is None else _dumps(payload)
         if len(body) > self._max_request_bytes:
-            raise APIError(0, {"code": "invalid_request", "message": "request exceeds 1 MiB"})
+            raise APIError(
+                0,
+                {
+                    "code": "invalid_request",
+                    "message": f"request exceeds {self._max_request_bytes} byte limit",
+                },
+            )
         request_headers = {
             "Accept": "application/json",
             "Cache-Control": "no-store, no-cache, max-age=0",
@@ -246,7 +252,7 @@ class TrackerClient:
             base_url,
             timeout=timeout,
             allow_http=allow_http,
-            max_request_bytes=1 << 20,
+            max_request_bytes=8 << 20,
             max_response_bytes=8 << 20,
         )
 
@@ -284,5 +290,17 @@ class TrackerClient:
             "POST",
             "/api/v1/worker/assignments",
             {"session_id": session_id, "accept_types": accept_types},
+            self._headers,
+        )
+
+    def submit_receiver_batch(
+        self,
+        receiver_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._transport.request_json(
+            "POST",
+            f"/api/v1/worker/receivers/{quote(receiver_id, safe='')}/batches",
+            payload,
             self._headers,
         )

@@ -35,6 +35,7 @@ const (
 	ErrorBackpressure            = "backpressure"
 	ErrorCacheMisconfigured      = "cache_misconfigured"
 	ErrorShardUnavailable        = "shard_unavailable"
+	ErrorReceiverUnavailable     = "receiver_unavailable"
 	ErrorOwnerLeaseExpired       = "owner_lease_expired"
 	ErrorLeaseExpired            = "lease_expired"
 	ErrorStaleAttempt            = "stale_attempt"

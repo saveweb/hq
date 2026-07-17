@@ -11,7 +11,7 @@
 3. 普通志愿者只作为 job worker，不能直接访问 SQLite，也不持有 S3/R2 credential；
 4. Queue 输入只来自不可变 S3 source，以及和父任务在同一个 SQLite transaction 中写入的同 shard derived jobs；
 5. 第一版不开放向运行中 queue 任意直接 enqueue；新增独立任务通过“上传新 source → attach 新 shard”进入系统；
-6. Receiver batch 由 HQ gateway 流式写入 R2，普通 worker 不直接上传；
+6. Receiver batch 由 HQ gateway 有界压缩并写入 R2，普通 worker 不直接上传；
 7. 故障恢复只保证 crash fault 下的 at-least-once，允许 checkpoint 回滚造成重复执行；
 8. Saveweb 管理员、shard owner 志愿者和 worker 志愿者统一通过 tracker 的 GitHub OAuth 登录，role 由 tracker 单独授权；
 9. 每个用户在 tracker 后台拥有一个长期、可重置的 machine token，其全部 shard/worker 机器共用该 token 上线；
@@ -71,11 +71,10 @@ Queue complete 只保存 `outcome_uri`，不允许把 WARC 或页面正文内嵌
 
 ### 2.5 Receiver 对象与 Stage 2 工具
 
-Receiver record encoding 已与 source 统一为 `jobs-jsonl-zstd-v1`，还需根据真实 discovered jobs 规模确定：
-
-- 单个 receiver object 的目标大小与 flush 时机；
-- 单请求最大记录数和最大展开尺寸；
-- Stage 2 merge、按 ID 去重和 split 工具的命令行接口。
+Receiver record encoding 已与 source 统一为 `jobs-jsonl-zstd-v1`。第一版固定为
+“一次成功请求对应一个不可变对象”，默认最多 1000 条 job、8 MiB HTTP request、
+16 MiB 压缩对象；没有后台 flush、manifest 或自动 seal。仍需实现 Stage 2 merge、
+按 ID 去重和 split 工具，并根据真实 discovered jobs 流量调校这些上限。
 
 ### 2.6 国内用户的登录备用方案
 

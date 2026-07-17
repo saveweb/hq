@@ -151,6 +151,16 @@ func TestPostgresStoreControlPlaneContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PutReceiver(ctx, tracker.Receiver{
+		ProjectID: "project-1", ID: "receiver-1", Status: tracker.ReceiverStatusActive,
+		SinkURI: "s3://receiver-output/stage-1", Format: "jobs-jsonl-zstd-v1",
+	}, integrationNow); err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := store.GetReceiverTarget(ctx, "worker", "worker-1", session.SessionID, "receiver-1", integrationNow+1)
+	if err != nil || receiver.SinkURI != "s3://receiver-output/stage-1" {
+		t.Fatalf("receiver target = %+v, %v", receiver, err)
+	}
 	assignment, err := service.GetAssignment(ctx, "worker-token", "worker-1", protocol.GetAssignmentRequest{
 		SessionID: session.SessionID,
 	})

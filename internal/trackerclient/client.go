@@ -166,6 +166,17 @@ func (c *Client) GetAssignment(ctx context.Context, request protocol.GetAssignme
 	return result, err
 }
 
+func (c *Client) SubmitReceiverBatch(
+	ctx context.Context,
+	receiverID string,
+	request protocol.ReceiverBatchRequest,
+) (protocol.ReceiverBatchResponse, error) {
+	var result protocol.ReceiverBatchResponse
+	err := c.doJSON(ctx, http.MethodPost,
+		"/api/v1/worker/receivers/"+url.PathEscape(receiverID)+"/batches", request, &result)
+	return result, err
+}
+
 func (c *Client) doJSON(ctx context.Context, method, endpoint string, input, output any) error {
 	var body io.Reader
 	if input != nil {

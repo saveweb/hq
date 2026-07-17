@@ -37,6 +37,31 @@ type checkpointObjects struct {
 	aborted   int
 }
 
+type receiverSink struct {
+	target tracker.Receiver
+	jobs   []protocol.JobSpecV1
+	calls  int
+	err    error
+}
+
+func (s *receiverSink) Write(
+	_ context.Context,
+	target tracker.Receiver,
+	jobs []protocol.JobSpecV1,
+	now int64,
+) (tracker.ReceiverObject, error) {
+	s.target, s.jobs, s.calls = target, append([]protocol.JobSpecV1(nil), jobs...), s.calls+1
+	if s.err != nil {
+		return tracker.ReceiverObject{}, s.err
+	}
+	return tracker.ReceiverObject{
+		ProjectID: target.ProjectID, ReceiverID: target.ID,
+		ObjectURI: "s3://receiver-output/stage-1/object.jobs.jsonl.zst",
+		Format:    target.Format, JobsCount: int64(len(jobs)), SizeBytes: 100,
+		SHA256: strings.Repeat("c", 64), CreatedAt: now,
+	}, nil
+}
+
 func (o *checkpointObjects) CreateMultipart(context.Context, string) (string, error) {
 	o.created++
 	return "s3-upload-1", nil
@@ -382,6 +407,71 @@ func TestCheckpointRecoveryAssignmentAndDistinctFailureStatus(t *testing.T) {
 		})
 	if err != nil || result.Status != tracker.ShardStatusRecoveryFailed {
 		t.Fatalf("failed recovery result = %+v, %v", result, err)
+	}
+}
+
+func TestReceiverBatchUsesSessionProjectAndTrustedSink(t *testing.T) {
+	f := newFixture(t)
+	f.registerWorker(t)
+	f.store.AddReceiver(tracker.Receiver{
+		ProjectID: "project-1", ID: "receiver-1", Status: tracker.ReceiverStatusActive,
+		SinkURI: "s3://receiver-output/stage-1", Format: "jobs-jsonl-zstd-v1",
+	})
+	sink := &receiverSink{}
+	_, privateKey, err := access.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := access.NewSigner("https://tracker.example", "key-receiver", privateKey, func() int64 { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := tracker.DefaultConfig()
+	config.ReceiverSink = sink
+	service, err := tracker.NewService(f.store, f.checker, signer, func() int64 { return f.now }, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.CreateSession(context.Background(), "token-worker", "agent-worker-1", protocol.CreateSessionRequest{
+		ProjectID: "project-1", Attrs: protocol.Attrs{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.SubmitReceiverBatch(context.Background(), "token-worker", "agent-worker-1", "receiver-1",
+		protocol.ReceiverBatchRequest{SessionID: session.SessionID, Jobs: []protocol.JobSpecV1{{
+			ID: "receiver-job", URL: "https://example.test/discovered", Via: nil, Attrs: map[string]any{},
+		}}})
+	if err != nil || result.JobsCount != 1 || sink.calls != 1 || sink.target.ID != "receiver-1" ||
+		sink.jobs[0].Type != protocol.JobTypeSeed {
+		t.Fatalf("receiver result=%+v sink=%+v error=%v", result, sink, err)
+	}
+	// Existing sessions may durably flush their discovered jobs while a project
+	// drains; creating a new session is still rejected by the project state.
+	f.store.AddProject(tracker.Project{ID: "project-1", Status: tracker.ProjectStatusDraining})
+	_, err = service.SubmitReceiverBatch(context.Background(), "token-worker", "agent-worker-1", "receiver-1",
+		protocol.ReceiverBatchRequest{SessionID: session.SessionID, Jobs: []protocol.JobSpecV1{{
+			ID: "draining-job", URL: "https://example.test/draining", Attrs: map[string]any{},
+		}}})
+	if err != nil || sink.calls != 2 {
+		t.Fatalf("draining receiver error=%v calls=%d", err, sink.calls)
+	}
+	_, err = service.SubmitReceiverBatch(context.Background(), "token-worker", "agent-worker-1", "receiver-1",
+		protocol.ReceiverBatchRequest{SessionID: session.SessionID, Jobs: []protocol.JobSpecV1{{
+			ID: "bad id", URL: "https://example.test", Attrs: map[string]any{},
+		}}})
+	if !tracker.IsCode(err, protocol.ErrorInvalidJob) || sink.calls != 2 {
+		t.Fatalf("invalid receiver job error=%v calls=%d", err, sink.calls)
+	}
+	sink.err = errors.New("object store unavailable")
+	_, err = service.SubmitReceiverBatch(context.Background(), "token-worker", "agent-worker-1", "receiver-1",
+		protocol.ReceiverBatchRequest{SessionID: session.SessionID, Jobs: []protocol.JobSpecV1{{
+			ID: "retry-later", URL: "https://example.test/retry", Attrs: map[string]any{},
+		}}})
+	var receiverError *tracker.Error
+	if !errors.As(err, &receiverError) || receiverError.Code != protocol.ErrorReceiverUnavailable ||
+		!receiverError.Retryable || !errors.Is(err, sink.err) {
+		t.Fatalf("receiver storage error=%v", err)
 	}
 }
 

@@ -184,6 +184,43 @@ class Session:
             raise TransportError("claim response jobs must be a list")
         return Batch(self, route.identity, jobs)
 
+    def submit_receiver(
+        self,
+        receiver_id: str,
+        jobs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not receiver_id:
+            raise ValueError("receiver_id is required")
+        cloned_jobs = _loads(_dumps(jobs))
+        if not isinstance(cloned_jobs, list) or not all(
+            isinstance(job, dict) for job in cloned_jobs
+        ):
+            raise ValueError("jobs must be a list of objects")
+        with self._lock:
+            if self._closed:
+                raise SessionClosedError("worker session is closed")
+            session_id = self.id
+        response = self._tracker.submit_receiver_batch(
+            receiver_id,
+            {"session_id": session_id, "jobs": cloned_jobs},
+        )
+        try:
+            matches = (
+                response["project_id"] == self.project_id
+                and response["receiver_id"] == receiver_id
+                and response["format"] == "jobs-jsonl-zstd-v1"
+                and int(response["jobs_count"]) == len(cloned_jobs)
+                and int(response["size_bytes"]) > 0
+                and int(response["created_at"]) >= 0
+                and len(str(response["sha256"])) == 64
+                and bool(response["object_uri"])
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise TransportError(f"invalid receiver response: {error}") from error
+        if not matches:
+            raise TransportError("tracker returned mismatched receiver metadata")
+        return copy.deepcopy(response)
+
     def _route(
         self,
         accept_types: list[str],

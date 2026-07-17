@@ -48,7 +48,7 @@ class TrackerHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        request_body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == "/api/v1/worker/sessions":
             send_json(
                 self,
@@ -57,6 +57,32 @@ class TrackerHandler(BaseHTTPRequestHandler):
                     "session_id": "session-1",
                     "lease_expires_at": int(time.time()) + 120,
                     "heartbeat_after_seconds": 30,
+                },
+            )
+            return
+        if self.path == "/api/v1/worker/receivers/receiver-1/batches":
+            request = json.loads(request_body)
+            assert request == {
+                "session_id": "session-1",
+                "jobs": [
+                    {
+                        "id": "discovered-1",
+                        "url": "https://example.test/discovered",
+                    }
+                ],
+            }
+            send_json(
+                self,
+                201,
+                {
+                    "project_id": "project-1",
+                    "receiver_id": "receiver-1",
+                    "object_uri": "s3://receiver-output/stage-1/object.jobs.jsonl.zst",
+                    "format": "jobs-jsonl-zstd-v1",
+                    "jobs_count": 1,
+                    "size_bytes": 99,
+                    "sha256": "a" * 64,
+                    "created_at": int(time.time()),
                 },
             )
             return
@@ -198,6 +224,13 @@ def test_python_sdk_flow_and_generation_retirement() -> None:
             "project-1",
             {"sdk": "python-test"},
         ) as session:
+            receiver = session.submit_receiver(
+                "receiver-1",
+                [{"id": "discovered-1", "url": "https://example.test/discovered"}],
+            )
+            assert receiver["jobs_count"] == 1
+            assert receiver["receiver_id"] == "receiver-1"
+
             batch = session.claim(max_jobs=1, lease_seconds=60, accept_types=["seed"])
             assert batch.route.generation == 1
             assert batch.jobs[0]["id"] == "job-1"

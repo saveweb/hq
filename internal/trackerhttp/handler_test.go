@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"git.saveweb.org/saveweb/hq/internal/access"
@@ -22,6 +24,24 @@ const testNow = int64(1_780_000_000)
 
 type healthyChecker struct{}
 
+type receiverSink struct{ err error }
+
+func (s *receiverSink) Write(
+	_ context.Context,
+	target tracker.Receiver,
+	jobs []protocol.JobSpecV1,
+	now int64,
+) (tracker.ReceiverObject, error) {
+	if s.err != nil {
+		return tracker.ReceiverObject{}, s.err
+	}
+	return tracker.ReceiverObject{
+		ProjectID: target.ProjectID, ReceiverID: target.ID,
+		ObjectURI: "s3://receiver-output/object.jobs.jsonl.zst", Format: target.Format,
+		JobsCount: int64(len(jobs)), SizeBytes: 100, SHA256: strings.Repeat("a", 64), CreatedAt: now,
+	}, nil
+}
+
 func ptr[T any](value T) *T { return &value }
 
 func (healthyChecker) Check(context.Context, string, string, *string) (string, error) {
@@ -31,6 +51,7 @@ func (healthyChecker) Check(context.Context, string, string, *string) (string, e
 type fixture struct {
 	server    *httptest.Server
 	store     *memory.Store
+	receiver  *receiverSink
 	publicKey ed25519.PublicKey
 }
 
@@ -54,12 +75,18 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := tracker.NewService(store, healthyChecker{}, signer, func() int64 { return testNow }, tracker.DefaultConfig())
+	config := tracker.DefaultConfig()
+	receiver := &receiverSink{}
+	config.ReceiverSink = receiver
+	service, err := tracker.NewService(store, healthyChecker{}, signer, func() int64 { return testNow }, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &fixture{server: httptest.NewServer(trackerhttp.New(service, logger)), store: store, publicKey: publicKey}
+	return &fixture{
+		server: httptest.NewServer(trackerhttp.New(service, logger)), store: store,
+		receiver: receiver, publicKey: publicKey,
+	}
 }
 
 func (f *fixture) close() { f.server.Close() }
@@ -155,6 +182,30 @@ func TestFullControlPlaneHTTPFlow(t *testing.T) {
 	})
 	requireStatus(t, response, http.StatusCreated)
 	session := decode[protocol.SessionResponse](t, response)
+	f.store.AddReceiver(tracker.Receiver{
+		ProjectID: "project-1", ID: "receiver-1", Status: tracker.ReceiverStatusActive,
+		SinkURI: "s3://receiver-output/stage-1", Format: "jobs-jsonl-zstd-v1",
+	})
+	response = f.request(t, http.MethodPost, "/api/v1/worker/receivers/receiver-1/batches", "worker-token", "worker-1",
+		protocol.ReceiverBatchRequest{SessionID: session.SessionID, Jobs: []protocol.JobSpecV1{{
+			ID: "discovered-1", URL: "https://example.test/discovered",
+		}}})
+	requireStatus(t, response, http.StatusCreated)
+	receiver := decode[protocol.ReceiverBatchResponse](t, response)
+	if receiver.ProjectID != "project-1" || receiver.ReceiverID != "receiver-1" || receiver.JobsCount != 1 {
+		t.Fatalf("receiver = %+v", receiver)
+	}
+	f.receiver.err = errors.New("R2 unavailable")
+	response = f.request(t, http.MethodPost, "/api/v1/worker/receivers/receiver-1/batches", "worker-token", "worker-1",
+		protocol.ReceiverBatchRequest{SessionID: session.SessionID, Jobs: []protocol.JobSpecV1{{
+			ID: "discovered-2", URL: "https://example.test/discovered-2",
+		}}})
+	requireStatus(t, response, http.StatusServiceUnavailable)
+	receiverError := decode[protocol.ErrorEnvelope](t, response)
+	if receiverError.Error.Code != protocol.ErrorReceiverUnavailable || !receiverError.Error.Retryable {
+		t.Fatalf("receiver error = %+v", receiverError)
+	}
+	f.receiver.err = nil
 
 	response = f.request(t, http.MethodPost, "/api/v1/worker/assignments", "worker-token", "worker-1", protocol.GetAssignmentRequest{
 		SessionID: session.SessionID, AcceptTypes: []string{protocol.JobTypeSeed},

@@ -162,6 +162,8 @@ source_etag=$(md5sum "${run_dir}/source.jobs.jsonl.zst" | awk '{print $1}')
 "${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id worker-e2e \
   --roles worker --machine-token-file "${run_dir}/worker.token"
 "${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-e2e
+"${run_dir}/tracker" put-receiver --database-url "${database_url}" --project-id project-e2e \
+  --receiver-id receiver-e2e --sink-uri s3://source/receiver-output
 shard_id=$("${run_dir}/shard" init --out "${run_dir}/shard.identity")
 tls_pin=$("${run_dir}/shard" tls-init --key-out "${run_dir}/shard.key" \
   --cert-out "${run_dir}/shard.pem" --server-name 127.0.0.1)
@@ -213,8 +215,18 @@ printf 'Running Go and Python workers through tracker routing...\n'
   --machine-token-file "${run_dir}/worker.token"
 uv run --project sdk/python python e2e/python_worker.py --tracker-url "${tracker_url}" \
   --machine-token-file "${run_dir}/worker.token"
+"${run_dir}/go-worker" --phase receiver --tracker-url "${tracker_url}" \
+  --machine-token-file "${run_dir}/worker.token"
 "${run_dir}/go-worker" --phase verify --tracker-url "${tracker_url}" \
   --machine-token-file "${run_dir}/worker.token"
+
+receiver_objects=$(docker run --rm --network host -e "MC_HOST_hq=${mc_host}" \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
+  find hq/source/receiver-output --name '*.jobs.jsonl.zst' | wc -l)
+if [ "${receiver_objects}" -ne 2 ]; then
+  printf 'expected two immutable receiver objects, got %s\n' "${receiver_objects}" >&2
+  exit 1
+fi
 
 printf 'Fencing an in-flight generation and recovering its job...\n'
 "${run_dir}/go-worker" --phase takeover --tracker-url "${tracker_url}" \

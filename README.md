@@ -45,8 +45,9 @@ make test-postgres
 
 The cross-process E2E test also needs Docker. It starts PostgreSQL and an
 S3-compatible MinIO test server, then exercises tracker, pinned-HTTPS shards,
-both worker SDKs, generation takeover, source loading, multipart checkpoint
-publication, and restoration onto a blank replacement machine:
+both worker SDKs, generation takeover, source loading, receiver-only writes,
+multipart checkpoint publication, and restoration onto a blank replacement
+machine:
 
 ```bash
 make test-e2e
@@ -129,6 +130,26 @@ go run ./cmd/tracker put-project --database-url "$HQ_DATABASE_URL" --project-id 
 go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
   --project-id project-1 --shard-id shard-1 --owner-agent-id sh_xxx
 ```
+
+A receiver is a deliberately smaller primitive for multi-stage work. It has
+no owner, SQLite database, generation, claim API, or automatic pipeline. The
+trusted tracker validates a worker session and writes one immutable
+`jobs-jsonl-zstd-v1` object to an operator-chosen R2 prefix:
+
+```bash
+go run ./cmd/tracker put-receiver --database-url "$HQ_DATABASE_URL" \
+  --project-id project-1 --receiver-id stage-1-output \
+  --sink-uri s3://saveweb-receiver/project-1/stage-1-output
+```
+
+The defaults are at most 1,000 jobs and 16 MiB compressed output per request;
+`tracker serve` exposes `--receiver-max-jobs` and
+`--receiver-max-object-bytes`. A worker calls Go `session.SubmitReceiver` or
+Python `session.submit_receiver`, waits for the durable success response, and
+only then completes the parent job. The worker never receives R2 credentials.
+An ambiguous retry can create another immutable object, so the operator later
+merges and deduplicates by stable job ID before explicitly creating Stage 2
+source shards.
 
 To activate a manually pre-split `jobs.txt`, pack it locally, upload the
 result to a private R2 bucket, and register its immutable URI and ETag. The

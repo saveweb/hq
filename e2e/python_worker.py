@@ -25,6 +25,20 @@ def main() -> None:
         "project-e2e",
         {"sdk": "python"},
     ) as session:
+        receiver = session.submit_receiver(
+            "receiver-e2e",
+            [
+                {
+                    "id": "stage2-python",
+                    "url": "https://example.test/stage-2/python",
+                    "type": "seed",
+                    "attr": {"discovered_by": "python"},
+                }
+            ],
+        )
+        assert receiver["project_id"] == "project-e2e"
+        assert receiver["jobs_count"] == 1
+
         batch = session.claim(max_jobs=1, lease_seconds=60, accept_types=["seed"])
         assert batch.route.generation == 1
         assert len(batch.jobs) == 1 and batch.jobs[0]["id"] == "b-python"

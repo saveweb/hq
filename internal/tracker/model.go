@@ -45,9 +45,12 @@ type Error struct {
 	Retryable  bool
 	RetryAfter int64
 	Details    map[string]any
+	Cause      error
 }
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
+
+func (e *Error) Unwrap() error { return e.Cause }
 
 func IsCode(err error, code string) bool {
 	var domainError *Error
@@ -113,6 +116,30 @@ type AgentUpsert struct {
 type Project struct {
 	ID     string
 	Status string
+}
+
+const (
+	ReceiverStatusActive  = "active"
+	ReceiverStatusRemoved = "removed"
+)
+
+type Receiver struct {
+	ProjectID string
+	ID        string
+	Status    string
+	SinkURI   string
+	Format    string
+}
+
+type ReceiverObject struct {
+	ProjectID  string
+	ReceiverID string
+	ObjectURI  string
+	Format     string
+	JobsCount  int64
+	SizeBytes  int64
+	SHA256     string
+	CreatedAt  int64
 }
 
 type Shard struct {

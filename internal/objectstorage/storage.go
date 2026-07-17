@@ -3,6 +3,7 @@
 package objectstorage
 
 import (
+	"bytes"
 	"context"
 	"time"
 )
@@ -25,4 +26,9 @@ type CheckpointStore interface {
 	CompleteMultipart(ctx context.Context, uri, uploadID string, parts []CompletedPart) error
 	AbortMultipart(ctx context.Context, uri, uploadID string) error
 	Head(ctx context.Context, uri string) (sizeBytes int64, etag string, err error)
+}
+
+type ObjectWriter interface {
+	Put(context.Context, string, *bytes.Reader, int64, string) (etag string, err error)
+	Head(context.Context, string) (size int64, etag string, err error)
 }

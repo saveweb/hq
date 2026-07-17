@@ -65,6 +65,13 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 			_ = json.NewEncoder(response).Encode(protocol.SessionResponse{SessionID: "session-1", LeaseExpiresAt: 220})
 		case "/api/v1/worker/assignments":
 			_ = json.NewEncoder(response).Encode(protocol.GetAssignmentResponse{RetryAfterMS: 250})
+		case "/api/v1/worker/receivers/receiver-1/batches":
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(protocol.ReceiverBatchResponse{
+				ProjectID: "project-1", ReceiverID: "receiver-1",
+				ObjectURI: "s3://receiver-output/object.jobs.jsonl.zst", Format: "jobs-jsonl-zstd-v1",
+				JobsCount: 1, SizeBytes: 100, SHA256: strings.Repeat("a", 64), CreatedAt: 100,
+			})
 		default:
 			http.NotFound(response, request)
 		}
@@ -124,6 +131,12 @@ func TestClientSendsMachineBoundaryAndDecodesControlPlane(t *testing.T) {
 	assignment, err := client.GetAssignment(ctx, protocol.GetAssignmentRequest{})
 	if err != nil || assignment.RetryAfterMS != 250 {
 		t.Fatalf("assignment = %+v, %v", assignment, err)
+	}
+	receiver, err := client.SubmitReceiverBatch(ctx, "receiver-1", protocol.ReceiverBatchRequest{
+		SessionID: "session-1", Jobs: []protocol.JobSpecV1{{ID: "job-1", URL: "https://example.test", Via: nil}},
+	})
+	if err != nil || receiver.JobsCount != 1 {
+		t.Fatalf("receiver = %+v, %v", receiver, err)
 	}
 }
 

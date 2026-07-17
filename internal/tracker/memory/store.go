@@ -21,6 +21,7 @@ type Store struct {
 	tokenUsers        map[string]string
 	agents            map[string]tracker.Agent
 	projects          map[string]tracker.Project
+	receivers         map[string]tracker.Receiver
 	shards            map[string]tracker.Shard
 	sessions          map[string]tracker.Session
 	checkpointUploads map[string]tracker.CheckpointUpload
@@ -31,7 +32,8 @@ func New() *Store {
 	return &Store{
 		users: make(map[string]tracker.User), tokenUsers: make(map[string]string),
 		agents: make(map[string]tracker.Agent), projects: make(map[string]tracker.Project),
-		shards: make(map[string]tracker.Shard), sessions: make(map[string]tracker.Session),
+		receivers: make(map[string]tracker.Receiver),
+		shards:    make(map[string]tracker.Shard), sessions: make(map[string]tracker.Session),
 		checkpointUploads: make(map[string]tracker.CheckpointUpload),
 		checkpoints:       make(map[string]tracker.Checkpoint),
 	}
@@ -49,6 +51,12 @@ func (s *Store) AddProject(project tracker.Project) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.projects[project.ID] = project
+}
+
+func (s *Store) AddReceiver(receiver tracker.Receiver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.receivers[shardKey(receiver.ProjectID, receiver.ID)] = receiver
 }
 
 func (s *Store) AddShard(shard tracker.Shard) {
@@ -217,6 +225,35 @@ func (s *Store) CreateSession(
 	}
 	s.sessions[session.ID] = session
 	return cloneSession(session), nil
+}
+
+func (s *Store) GetReceiverTarget(
+	_ context.Context,
+	userID, agentID, sessionID, receiverID string,
+	now int64,
+) (tracker.Receiver, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session, ok := s.sessions[sessionID]
+	if !ok || session.UserID != userID || session.AgentID != agentID {
+		return tracker.Receiver{}, &tracker.Error{Code: protocol.ErrorNotFound, Message: "session not found"}
+	}
+	if now >= session.LeaseExpiresAt {
+		return tracker.Receiver{}, &tracker.Error{Code: protocol.ErrorSessionExpired, Message: "session lease expired"}
+	}
+	agent, agentOK := s.agents[agentID]
+	user := s.users[userID]
+	project := s.projects[session.ProjectID]
+	receiver, receiverOK := s.receivers[shardKey(session.ProjectID, receiverID)]
+	if !agentOK || agent.UserID != userID || agent.Kind != protocol.AgentKindWorker || agent.Status != "online" ||
+		user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleWorker) ||
+		(project.Status != tracker.ProjectStatusActive && project.Status != tracker.ProjectStatusDraining) ||
+		!receiverOK || receiver.Status != tracker.ReceiverStatusActive {
+		return tracker.Receiver{}, &tracker.Error{
+			Code: protocol.ErrorShardNotActive, Message: "receiver is not active for this session project",
+		}
+	}
+	return receiver, nil
 }
 
 func (s *Store) HeartbeatSession(

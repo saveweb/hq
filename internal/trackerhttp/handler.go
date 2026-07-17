@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	trackerBodyLimit            = int64(64 << 10)
-	checkpointCompleteBodyLimit = int64(8 << 20)
+	trackerBodyLimit = int64(64 << 10)
+	largeBodyLimit   = int64(8 << 20)
 )
 
 type Handler struct {
@@ -36,7 +36,7 @@ func New(service *tracker.Service, logger *slog.Logger) *echo.Echo {
 	server.Pre(sanitizeRequestID)
 	server.Use(middleware.RequestID())
 	server.Use(middleware.Recover())
-	server.Use(middleware.BodyLimit(checkpointCompleteBodyLimit))
+	server.Use(middleware.BodyLimit(largeBodyLimit))
 	server.Use(middleware.Secure())
 	server.Use(noStoreAPI)
 
@@ -52,6 +52,7 @@ func New(service *tracker.Service, logger *slog.Logger) *echo.Echo {
 	server.POST("/api/v1/worker/sessions", handler.createSession)
 	server.POST("/api/v1/worker/sessions/:session_id/heartbeat", handler.heartbeatSession)
 	server.POST("/api/v1/worker/assignments", handler.getAssignment)
+	server.POST("/api/v1/worker/receivers/:receiver_id/batches", handler.submitReceiverBatch)
 	return server
 }
 
@@ -222,7 +223,7 @@ func (h *Handler) completeCheckpoint(ctx *echo.Context) error {
 		return nil
 	}
 	var body protocol.CompleteCheckpointRequest
-	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), checkpointCompleteBodyLimit, &body); err != nil {
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), largeBodyLimit, &body); err != nil {
 		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
 	}
 	result, err := h.service.CompleteCheckpoint(ctx.Request().Context(), token, agentID,
@@ -294,6 +295,24 @@ func (h *Handler) getAssignment(ctx *echo.Context) error {
 	return ctx.JSON(http.StatusOK, result)
 }
 
+func (h *Handler) submitReceiverBatch(ctx *echo.Context) error {
+	token, agentID, ok := machineCredentials(ctx)
+	if !ok {
+		return nil
+	}
+	var body protocol.ReceiverBatchRequest
+	if err := httpapi.DecodeJSON(ctx.Response(), ctx.Request(), largeBodyLimit, &body); err != nil {
+		return h.writeDomainError(ctx, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: err.Error()})
+	}
+	result, err := h.service.SubmitReceiverBatch(
+		ctx.Request().Context(), token, agentID, ctx.Param("receiver_id"), body,
+	)
+	if err != nil {
+		return h.writeDomainError(ctx, err)
+	}
+	return ctx.JSON(http.StatusCreated, result)
+}
+
 func machineCredentials(ctx *echo.Context) (token, agentID string, ok bool) {
 	token, ok = httpapi.BearerToken(ctx.Request().Header.Get(echo.HeaderAuthorization))
 	agentID = ctx.Request().Header.Get("X-Saveweb-Agent-ID")
@@ -316,6 +335,9 @@ func (h *Handler) writeDomainError(ctx *echo.Context, err error) error {
 		return nil
 	}
 	status := statusForCode(domainError.Code)
+	if status >= 500 && domainError.Cause != nil {
+		h.logger.Error("tracker request dependency failed", "code", domainError.Code, "error", domainError.Cause)
+	}
 	httpapi.WriteError(ctx.Response(), status, protocol.APIError{
 		Code: domainError.Code, Message: domainError.Message, Retryable: domainError.Retryable,
 		RetryAfterMS: domainError.RetryAfter, Details: domainError.Details,
@@ -327,7 +349,7 @@ func statusForCode(code string) int {
 	switch code {
 	case protocol.ErrorInternal:
 		return http.StatusInternalServerError
-	case protocol.ErrorInvalidRequest, protocol.ErrorInvalidJob:
+	case protocol.ErrorInvalidRequest, protocol.ErrorInvalidJob, protocol.ErrorUnsupportedOperation:
 		return http.StatusBadRequest
 	case protocol.ErrorInvalidMachineToken, protocol.ErrorInvalidAccessToken:
 		return http.StatusUnauthorized
@@ -341,7 +363,7 @@ func statusForCode(code string) int {
 		return http.StatusConflict
 	case protocol.ErrorRateLimited, protocol.ErrorBackpressure:
 		return http.StatusTooManyRequests
-	case protocol.ErrorShardUnavailable, protocol.ErrorOwnerLeaseExpired:
+	case protocol.ErrorShardUnavailable, protocol.ErrorReceiverUnavailable, protocol.ErrorOwnerLeaseExpired:
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError

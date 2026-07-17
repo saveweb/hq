@@ -26,11 +26,13 @@ Worker 直接访问 shard，claim/complete/fail 不经过 tracker。因此 track
 - shard assignment 和 endpoint 查询；
 - 短期 shard access token 签发；
 - Project/shard 控制面与管理页面；
-- receiver、artifact gateway 和 checkpoint 控制流量中的 HQ 部分。
+- receiver object body、artifact gateway 和 checkpoint 控制流量中的 HQ 部分。
 
 Assignment 和 access token 可以缓存到过期前，不需要每个 batch 都访问 tracker。100,000 completed jobs/s 是否成立，主要由 shard 总数、每个 SQLite shard 的批量事务吞吐、志愿者上下行和平均 JobSpec 大小决定。
 
-WARC、页面正文、截图、receiver 大 batch 和 checkpoint 不得放进 queue RPC JSON。若这些内容仍通过与 tracker 同机的 HQ gateway，它们会单独竞争 1 Gbps 带宽，必须独立做容量规划，不能算入 queue QPS 结论。
+WARC、页面正文、截图和 checkpoint 不得放进 queue RPC JSON。Receiver 使用独立、
+有限长的 Tracker ingress API；若这些内容经过与 tracker 同机的 HQ gateway，它们会
+单独竞争 1 Gbps 带宽，必须独立做容量规划，不能算入 queue QPS 结论。
 
 ### 1.3 网络拓扑
 
@@ -461,6 +463,7 @@ Item-level rejection 把同一个 `error` object 放入对应 result。`message`
 | 409 | `checkpoint_in_progress` | 同一 shard 已有另一份 checkpoint upload | 等待或显式 abort 后重试 |
 | 429 | `rate_limited` / `backpressure` | 配额或 shard 有界队列已满 | 按 `retry_after_ms` + jitter 重试 |
 | 503 | `shard_unavailable` / `owner_lease_expired` | shard 正在停止或其 owner lease 已失效 | 刷新 assignment；outcome 不转交新 owner |
+| 503 | `receiver_unavailable` | receiver 对象存储暂时不可用或写入结果不确定 | 不完成父 job；按调用方策略重试 |
 
 稳定的 item-level code：
 
@@ -499,6 +502,7 @@ Claim(assignment, session_id, max_jobs, lease_seconds)
 CompleteBatch(route, session_id, items)
 FailBatch(route, session_id, items)
 ExtendLeaseBatch(route, session_id, attempts, extend_seconds)
+SubmitReceiver(receiver_id, session_id, jobs)
 DefaultJobID(type, url)
 ```
 
@@ -531,8 +535,9 @@ GitHub login
   → SQLite state verified
 ```
 
-当前实现还覆盖 immutable R2 source、generation-CAS checkpoint multipart 发布，
-以及空数据目录的新 owner 恢复；跨进程 E2E 使用 PostgreSQL、HTTPS shard 和
-S3-compatible MinIO 验证这些路径。Receiver、artifact body 上传和完整运营管理页
-仍属于后续阶段。容量结论仍必须用真实平均 JobSpec 对多个 shard endpoint 压测，
+当前实现还覆盖 immutable R2 source、receiver-only R2 ingress、generation-CAS
+checkpoint multipart 发布，以及空数据目录的新 owner 恢复；跨进程 E2E 使用
+PostgreSQL、HTTPS shard 和 S3-compatible MinIO 验证这些路径。Artifact body 上传、
+Stage 2 merge/split 工具和完整运营管理页仍属于后续阶段。容量结论仍必须用真实
+平均 JobSpec 对多个 shard endpoint 压测，
 分别记录 tracker 控制面 QPS、单 shard SQLite 吞吐和系统 aggregate completed jobs/s。

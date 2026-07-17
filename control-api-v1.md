@@ -83,7 +83,29 @@ assignment 的 `owner_lease_expires_at`。本地时间达到 owner lease 后，s
 Worker heartbeat 不返回 owner assignment。Worker 的 job session 使用独立
 的 session heartbeat，不由 agent heartbeat 隐式续租。
 
-### 2.1 Source assignment 与载入回报
+### 2.1 Receiver-only ingress
+
+一个有效 worker session 可以把下一阶段的 jobs 写到同一 Project 下由管理员
+显式登记的 receiver：
+
+```http
+POST /api/v1/worker/receivers/{receiver_id}/batches
+Authorization: Bearer <machine-token>
+X-Saveweb-Agent-ID: <worker-agent-id>
+```
+
+Request 包含 `session_id` 和 1–1000 个 `JobSpecV1`；部署可以把该上限调低，但
+不能提高 v1 的硬上限。Tracker 校验 user、worker
+agent、session lease、Project 和 receiver 状态，规范化全部 jobs，再压缩为一个
+不可变的 `jobs-jsonl-zstd-v1` 对象并直接 PUT 到受信配置中的 R2 prefix。Client
+不能指定 bucket、prefix 或 object key，也不会得到 R2 credential。
+
+只有 PUT 和 `HeadObject` 大小/ETag 校验成功后才返回 `201`，response 包含 object
+URI、记录数、压缩大小、SHA-256 和 int64 UNIX `created_at`。Receiver 没有 owner、
+generation、SQLite 或 queue endpoint。网络结果不确定时可能留下重复对象；worker
+不得把该情况当成成功，Stage 2 工具按稳定 job ID 去重。
+
+### 2.2 Source assignment 与载入回报
 
 状态为 `loading` 且登记了 source 的 owner assignment 同时
 包含不可变的 `source_uri`、`source_format=jobs-jsonl-zstd-v1`、
@@ -109,7 +131,7 @@ agent、owner、generation、owner lease 和原状态都匹配时更新同一 sh
 迟到或 takeover 后的回报返回 `409 stale_generation`。若 source 已写入但回报
 暂时失败，shard 只重试回报，不重新导入 source。
 
-### 2.2 Checkpoint multipart 与发布点
+### 2.3 Checkpoint multipart 与发布点
 
 当前 `active` 或 `draining` owner 可以发布 `sqlite-zstd-v1` checkpoint：
 
@@ -132,7 +154,7 @@ agent、owner、generation、owner lease 和原状态都匹配时更新同一 sh
 part 续签。R2 complete 不是提交点，`checkpoint_uri` 的 generation-CAS 才是。
 旧 owner 即使上传成功，CAS 失败后对象也不能用于恢复。
 
-### 2.3 Checkpoint recovery 与回报
+### 2.4 Checkpoint recovery 与回报
 
 管理员把已有 checkpoint 的 shard 指派给新 owner 时，必须递增 generation 并
 显式设置 `recovering`。这种 assignment 不再复用 source loader；它包含最新已

@@ -21,7 +21,7 @@ func main() {
 }
 
 func run() error {
-	phase := flag.String("phase", "", "initial, verify, takeover, recover, source, or checkpoint-recovery")
+	phase := flag.String("phase", "", "initial, receiver, verify, takeover, recover, source, or checkpoint-recovery")
 	projectID := flag.String("project-id", "project-e2e", "explicit project identifier")
 	trackerURL := flag.String("tracker-url", "", "tracker base URL")
 	tokenFile := flag.String("machine-token-file", "", "worker machine token file")
@@ -50,6 +50,8 @@ func run() error {
 	switch *phase {
 	case "initial":
 		return initial(ctx, session)
+	case "receiver":
+		return submitReceiver(ctx, session)
 	case "verify":
 		return verify(ctx, session)
 	case "takeover":
@@ -66,6 +68,21 @@ func run() error {
 	default:
 		return fmt.Errorf("go-worker: invalid phase %q", *phase)
 	}
+}
+
+func submitReceiver(ctx context.Context, session *worker.Session) error {
+	result, err := session.SubmitReceiver(ctx, "receiver-e2e", []protocol.JobSpecV1{{
+		ID: "stage2-go", URL: "https://example.test/stage-2/go", Type: protocol.JobTypeSeed,
+		Attrs: protocol.Attrs{"discovered_by": "go"},
+	}})
+	if err != nil {
+		return fmt.Errorf("go-worker: submit receiver: %w", err)
+	}
+	if result.ProjectID != session.ProjectID() || result.ReceiverID != "receiver-e2e" ||
+		result.JobsCount != 1 || result.SizeBytes < 1 || len(result.SHA256) != 64 {
+		return fmt.Errorf("go-worker: unexpected receiver result: %+v", result)
+	}
+	return nil
 }
 
 func consumeCheckpointRecovery(ctx context.Context, session *worker.Session) error {

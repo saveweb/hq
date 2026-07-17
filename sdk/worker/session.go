@@ -76,6 +76,34 @@ func (s *Session) ID() string { return s.id }
 
 func (s *Session) ProjectID() string { return s.projectID }
 
+// SubmitReceiver writes one immutable jobs-jsonl-zstd-v1 object through the
+// trusted tracker gateway. A transport ambiguity may create a duplicate object;
+// later stages deduplicate by stable job ID.
+func (s *Session) SubmitReceiver(
+	ctx context.Context,
+	receiverID string,
+	jobs []protocol.JobSpecV1,
+) (protocol.ReceiverBatchResponse, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return protocol.ReceiverBatchResponse{}, ErrSessionClosed
+	}
+	sessionID := s.id
+	s.mu.Unlock()
+	result, err := s.tracker.SubmitReceiverBatch(ctx, receiverID, protocol.ReceiverBatchRequest{
+		SessionID: sessionID, Jobs: jobs,
+	})
+	if err != nil {
+		return protocol.ReceiverBatchResponse{}, convertTrackerError(err)
+	}
+	if result.ProjectID != s.projectID || result.ReceiverID != receiverID ||
+		result.Format != "jobs-jsonl-zstd-v1" || result.JobsCount != int64(len(jobs)) {
+		return protocol.ReceiverBatchResponse{}, fmt.Errorf("worker: tracker returned a mismatched receiver result")
+	}
+	return result, nil
+}
+
 func (s *Session) Close() error {
 	s.mu.Lock()
 	if s.closed {

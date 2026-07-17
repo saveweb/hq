@@ -35,10 +35,16 @@ type Config struct {
 	CheckpointPartURLTTL    int64
 	CheckpointPartSizeBytes int64
 	CheckpointMaxBytes      int64
+	ReceiverSink            ReceiverSink
+	ReceiverMaxJobs         int
 }
 
 type SourceURLSigner interface {
 	PresignGet(context.Context, string, int64, time.Duration) (string, int64, error)
+}
+
+type ReceiverSink interface {
+	Write(context.Context, Receiver, []protocol.JobSpecV1, int64) (ReceiverObject, error)
 }
 
 func DefaultConfig() Config {
@@ -50,6 +56,7 @@ func DefaultConfig() Config {
 		CheckpointURLTTLSeconds: 3600,
 		CheckpointPartURLTTL:    3600, CheckpointPartSizeBytes: 8 << 20,
 		CheckpointMaxBytes: 64 << 30,
+		ReceiverMaxJobs:    1000,
 	}
 }
 
@@ -77,7 +84,8 @@ func NewService(store Store, endpointChecker EndpointChecker, signer *access.Sig
 			config.CheckpointPartSizeBytes < 5<<20 || config.CheckpointPartSizeBytes > 64<<20 ||
 			config.CheckpointMaxBytes < 1 || config.CheckpointMaxBytes > 5<<40 ||
 			config.CheckpointMaxBytes > config.CheckpointPartSizeBytes*10_000 ||
-			!validS3Prefix(config.CheckpointPrefixURI))) {
+			!validS3Prefix(config.CheckpointPrefixURI))) ||
+		config.ReceiverMaxJobs < 1 || config.ReceiverMaxJobs > 1000 {
 		return nil, fmt.Errorf("tracker: invalid service configuration")
 	}
 	if config.SigningKeyNotBefore == 0 {
@@ -561,6 +569,62 @@ func (s *Service) ReportShardRecovery(
 	return protocol.ShardRecoveryResultResponse{
 		ProjectID: value.ProjectID, ShardID: value.ID,
 		Generation: value.Generation, Status: value.Status,
+	}, nil
+}
+
+func (s *Service) SubmitReceiverBatch(
+	ctx context.Context,
+	machineToken, agentID, receiverID string,
+	request protocol.ReceiverBatchRequest,
+) (protocol.ReceiverBatchResponse, error) {
+	user, err := s.authenticate(ctx, machineToken)
+	if err != nil {
+		return protocol.ReceiverBatchResponse{}, err
+	}
+	if !user.HasRole(RoleWorker) {
+		return protocol.ReceiverBatchResponse{}, permissionDenied("worker role required")
+	}
+	if s.config.ReceiverSink == nil {
+		return protocol.ReceiverBatchResponse{}, &Error{
+			Code: protocol.ErrorUnsupportedOperation, Message: "receiver object storage is not configured",
+		}
+	}
+	if !queue.ValidateIdentifier(agentID) || !queue.ValidateIdentifier(receiverID) ||
+		!queue.ValidateIdentifier(request.SessionID) || len(request.Jobs) < 1 ||
+		len(request.Jobs) > s.config.ReceiverMaxJobs {
+		return protocol.ReceiverBatchResponse{}, invalidRequest("invalid receiver batch")
+	}
+	jobs := make([]protocol.JobSpecV1, len(request.Jobs))
+	for index, job := range request.Jobs {
+		normalized, validation := queue.NormalizeJob(queue.JobSpec{
+			ID: job.ID, URL: job.URL, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs,
+		})
+		if validation != nil {
+			return protocol.ReceiverBatchResponse{}, &Error{
+				Code: validation.Code, Message: fmt.Sprintf("jobs[%d]: %s", index, validation.Message),
+			}
+		}
+		jobs[index] = protocol.JobSpecV1{
+			ID: normalized.ID, URL: normalized.URL, Type: normalized.Type,
+			Via: normalized.Via, Hops: normalized.Hops, Attrs: normalized.Attrs,
+		}
+	}
+	now := s.now()
+	target, err := s.store.GetReceiverTarget(ctx, user.ID, agentID, request.SessionID, receiverID, now)
+	if err != nil {
+		return protocol.ReceiverBatchResponse{}, err
+	}
+	object, err := s.config.ReceiverSink.Write(ctx, target, jobs, now)
+	if err != nil {
+		return protocol.ReceiverBatchResponse{}, &Error{
+			Code: protocol.ErrorReceiverUnavailable, Message: "receiver object storage is unavailable",
+			Retryable: true, Cause: err,
+		}
+	}
+	return protocol.ReceiverBatchResponse{
+		ProjectID: object.ProjectID, ReceiverID: object.ReceiverID,
+		ObjectURI: object.ObjectURI, Format: object.Format, JobsCount: object.JobsCount,
+		SizeBytes: object.SizeBytes, SHA256: object.SHA256, CreatedAt: object.CreatedAt,
 	}, nil
 }
 
