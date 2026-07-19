@@ -74,7 +74,8 @@ services:
       HQ_OAUTH_ADMIN_ORG: ${HQ_OAUTH_ADMIN_ORG:-saveweb}
       HQ_OAUTH_ADMIN_TEAM: ${HQ_OAUTH_ADMIN_TEAM:-core}
     volumes:
-      - ./secrets:/run/secrets:ro
+      - ./secrets/github-client.secret:/run/secrets/github-client.secret:ro
+      - ./secrets/tracker-web.secret:/run/secrets/tracker-web.secret:ro
     ports:
       - 127.0.0.74:8080:8080
     networks:
