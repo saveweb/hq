@@ -1,5 +1,5 @@
 // Package httpapi contains small HTTP/JSON primitives shared by tracker and
-// shard adapters. It contains no application routing or authorization logic.
+// HTTP adapters. It contains no application routing or authorization logic.
 package httpapi
 
 import (

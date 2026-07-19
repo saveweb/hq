@@ -1,33 +1,26 @@
+// Package worker is the public Go SDK for SavewebHQ workers.
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"git.saveweb.org/saveweb/hq/internal/trackerclient"
+	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
 type Config struct {
-	TrackerURL        string
-	MachineToken      string
-	AgentID           string
-	AgentName         string
-	AgentVersion      string
-	AllowHTTPTracker  bool
-	AllowHTTPShard    bool
-	RequestTimeout    time.Duration
-	OnBackgroundError func(error)
+	TrackerURL       string
+	MachineToken     string
+	WorkerID         string
+	AllowHTTPTracker bool
+	RequestTimeout   time.Duration
 }
 
 func (c Config) normalized() (Config, error) {
-	if c.TrackerURL == "" || c.MachineToken == "" || c.AgentID == "" {
-		return Config{}, fmt.Errorf("worker: tracker URL and machine credentials are required")
-	}
-	if c.AgentName == "" {
-		c.AgentName = "Saveweb worker"
-	}
-	if c.AgentVersion == "" {
-		c.AgentVersion = "go-sdk-dev"
+	if c.TrackerURL == "" || c.MachineToken == "" || c.WorkerID == "" {
+		return Config{}, fmt.Errorf("worker: tracker URL, machine token, and worker ID are required")
 	}
 	if c.RequestTimeout == 0 {
 		c.RequestTimeout = 45 * time.Second
@@ -37,10 +30,26 @@ func (c Config) normalized() (Config, error) {
 	}
 	return c, nil
 }
+func trackerFor(c Config) (*trackerclient.Client, error) {
+	return trackerclient.New(trackerclient.Config{BaseURL: c.TrackerURL, MachineToken: c.MachineToken, WorkerID: c.WorkerID, AllowHTTP: c.AllowHTTPTracker, RequestTimeout: c.RequestTimeout})
+}
 
-func trackerFor(config Config) (*trackerclient.Client, error) {
-	return trackerclient.New(trackerclient.Config{
-		BaseURL: config.TrackerURL, MachineToken: config.MachineToken,
-		AgentID: config.AgentID, AllowHTTP: config.AllowHTTPTracker,
-	})
+type APIError struct {
+	Status int
+	API    protocol.APIError
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("worker HTTP %d: %s: %s", e.Status, e.API.Code, e.API.Message)
+}
+func IsCode(err error, code string) bool {
+	var target *APIError
+	return errors.As(err, &target) && target.API.Code == code
+}
+func convertTrackerError(err error) error {
+	var target *trackerclient.Error
+	if errors.As(err, &target) {
+		return &APIError{Status: target.Status, API: target.API}
+	}
+	return err
 }

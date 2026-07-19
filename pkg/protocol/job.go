@@ -13,7 +13,7 @@ const (
 )
 
 // JobSpecV1 is the stable queue identity and work description exchanged by
-// source loaders, shards, and workers.
+// source tools, HQ, and workers.
 type JobSpecV1 struct {
 	ID    string         `json:"id"`
 	URL   string         `json:"url"`

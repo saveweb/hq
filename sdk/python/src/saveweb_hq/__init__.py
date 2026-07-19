@@ -1,29 +1,16 @@
-"""SavewebHQ worker SDK."""
+"""SavewebHQ Project Queue SDK."""
 
+from .config import Config
+from .errors import APIError, SavewebHQError, TransportError
 from .job import default_job_id
-from .errors import (
-    APIError,
-    ClaimsPausedError,
-    NoAssignmentError,
-    RouteRetiredError,
-    SavewebHQError,
-    SessionClosedError,
-    TransportError,
-)
-from .session import Batch, Config, Route, Session, open_session
+from .project_queue import ProjectQueue, open_project_queue
 
 __all__ = [
     "APIError",
-    "Batch",
-    "ClaimsPausedError",
     "Config",
-    "NoAssignmentError",
-    "Route",
-    "RouteRetiredError",
+    "ProjectQueue",
     "SavewebHQError",
-    "Session",
-    "SessionClosedError",
     "TransportError",
     "default_job_id",
-    "open_session",
+    "open_project_queue",
 ]

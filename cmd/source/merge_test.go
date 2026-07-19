@@ -17,8 +17,8 @@ import (
 func TestMergeDeduplicatesInInputOrderAndSplits(t *testing.T) {
 	directory := t.TempDir()
 	via := "https://different-discovery.test/"
-	first := filepath.Join(directory, "receiver-1.jobs.jsonl.zst")
-	second := filepath.Join(directory, "receiver-2.jobs.jsonl.zst")
+	first := filepath.Join(directory, "input-1.jobs.jsonl.zst")
+	second := filepath.Join(directory, "input-2.jobs.jsonl.zst")
 	writeSource(t, first, []protocol.JobSpecV1{
 		{ID: "job-a", URL: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"stage": 2}},
 		{ID: "job-b", URL: "https://example.test/b", Type: protocol.JobTypeAsset, Via: nil, Attrs: map[string]any{}},

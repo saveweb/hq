@@ -1,355 +1,111 @@
 # SavewebHQ
 
-SavewebHQ is a small, explicit distributed queue for volunteer-operated web
-archive workers. A trusted tracker owns the control plane, each active shard
-owns one SQLite queue, and workers connect directly to the shard selected by
-the tracker. Go HTTP adapters use Echo v5; domain and storage packages do not
-depend on the web framework.
+SavewebHQ is a single-site PostgreSQL job coordinator for Saveweb archive
+workers. HQ owns projects, job attempts, leases, outcomes, and bounded WARC
+receipts. It does not receive WARC files, operate volunteer queue shards, or
+track delivery to Internet Archive.
 
-The first version intentionally supports only explicit, pre-split projects.
-Its design priorities are layering, modularity, low operational weight, and
-explicit behavior over implicit automation.
-
-## Repository layout
+## Boundary
 
 ```text
-api/                 OpenAPI contract and cross-language conformance vectors
-cmd/tracker/         Go tracker process
-cmd/shard/           Go shard process
-cmd/source/          Immutable source pack/merge/split tool
-internal/            Go implementation packages
-pkg/protocol/        Shared public Go protocol types
-sdk/worker/          Go worker SDK
-sdk/python/          Python worker SDK (managed with uv)
-design.md            System design
-api-v1.md            Queue API rationale and semantics
-control-api-v1.md    Agent and access-token control-plane semantics
-review.md            Scoped design review
+source -> HQ/PostgreSQL -> worker -> WARC Core -> sink adapters
+                ^            |
+                +-- receipt --+
 ```
 
-## Development
+- HQ decides whether a job is `todo`, `wip`, `done`, `failed`, or
+  `reset_exhausted`.
+- WARC Core validates and durably accepts WARC files, then issues signed
+  receipts.
+- A receipt proves that WARC Core accepted responsibility for an object. It
+  does not prove delivery to Internet Archive or another final sink.
+- `go2internetarchive` is expected to remain an IA client library used by WARC
+  Core, not an HQ component or WARC receiver.
 
-Prerequisites are Go 1.25 or newer and `uv` 0.9 or newer.
+## Components
+
+The production image contains only:
+
+- `tracker`: migrations, project/user administration, source import, and HTTP
+  queue service;
+- `source`: tools for producing `jobs-jsonl-zstd-v1` source files.
+
+PostgreSQL is the only HQ state store. There is no shard daemon, queue relay,
+R2 credential, checkpoint protocol, owner generation, or route assignment in
+the production service.
+
+## Local development
+
+Prerequisites are Go 1.25 or newer, `uv` 0.9 or newer, and Docker for the
+PostgreSQL integration test.
 
 ```bash
 make test
 make check
-```
-
-The local SQLite and full Echo/JSON queue-path capacity baseline is reproducible
-with `make bench-capacity`; see [capacity.md](./capacity.md) for measured results,
-the 100,000 completed-jobs/s shard model, and its production caveats.
-
-The PostgreSQL store contract test is explicit because it starts a temporary
-Docker container:
-
-```bash
 make test-postgres
 ```
 
-The cross-process E2E test also needs Docker. It starts PostgreSQL and an
-S3-compatible MinIO test server, then exercises tracker, pinned-HTTPS shards,
-both worker SDKs, generation takeover, source loading, receiver-only writes,
-multipart checkpoint publication, and restoration onto a blank replacement
-machine:
+## Deployment
+
+The included Compose file starts PostgreSQL and HQ. PostgreSQL data is stored
+under `./data/postgres`.
 
 ```bash
-make test-e2e
-```
-
-Python commands always run through `uv`:
-
-```bash
-uv sync --project sdk/python --dev
-uv run --project sdk/python pytest
-```
-
-## Container deployment
-
-The root [Dockerfile](./Dockerfile) builds the `tracker`, `shard`, and `source`
-binaries into one small runtime image. [compose.yml](./compose.yml) runs the
-Tracker with a private PostgreSQL service and publishes it only on
-`127.0.0.74:8080` for a host Caddy reverse proxy. PostgreSQL has no host port;
-its trust authentication is confined to an internal Docker network containing
-only PostgreSQL and Tracker. Its data is bind-mounted at `data/postgres/` so it
-can be inspected and backed up directly from the deployment directory.
-
-```bash
-cp .env.example .env
-mkdir -p secrets
-chmod 700 secrets
-mkdir -p data/postgres
-chmod 700 data/postgres
-docker compose config
 docker compose build
 docker compose up -d
 docker compose ps
 ```
 
-The one-shot `tracker-init` service creates persistent `0600` signing and web
-session secrets under `secrets/`. Tracker runs migrations on every start. To
-enable GitHub OAuth, set `HQ_GITHUB_CLIENT_ID` and create
-`secrets/github-client.secret`; to enable R2, set the `HQ_S3_*` values and
-create `secrets/r2-access-key` plus `secrets/r2-secret-key`. Those paths and
-`.env` are ignored by Git. The container fails closed when only half of either
-optional configuration is present.
+HQ runs migrations before serving and listens on `127.0.0.74:8080` for a host
+HTTPS reverse proxy. PostgreSQL is not published to the host.
 
-Production serves the loopback port through HTTPS. The included deployment is
-configured for `https://hq.saveweb.org`; do not expose port 8080 directly.
+## Bootstrap
 
-See [api-v1.md](./api-v1.md) for protocol semantics and
-[design.md](./design.md) for the full design. The current pilot deployment,
-planned pause/recovery, R2 lifecycle, and shutdown procedures are in
-[operations.md](./operations.md).
-
-## Tracker commands
-
-Tracker state is PostgreSQL-backed. Schema migration and key creation are
-deliberately separate from serving:
+Create a private machine-token file, then create a worker and a project:
 
 ```bash
-go run ./cmd/tracker keygen --out ./tracker-key.json --key-id key-2026-01
-go run ./cmd/tracker web-keygen --out ./tracker-web.secret
-go run ./cmd/tracker migrate --database-url "$HQ_DATABASE_URL"
-go run ./cmd/tracker serve \
+tracker bootstrap-user \
   --database-url "$HQ_DATABASE_URL" \
-  --public-url https://tracker.example \
-  --signing-key-file ./tracker-key.json \
-  --github-client-id "$HQ_GITHUB_CLIENT_ID" \
-  --github-client-secret-file ./github-client.secret \
-  --web-session-secret-file ./tracker-web.secret
-```
+  --user-id worker-1 \
+  --roles worker \
+  --machine-token-file ./worker.token
 
-Cloudflare R2 uses its S3 endpoint, region `auto`, and private credential
-files. Credentials remain in the trusted tracker; a shard receives only a
-short-lived URL for its exact source object:
-
-```bash
-go run ./cmd/tracker serve \
+tracker put-project \
   --database-url "$HQ_DATABASE_URL" \
-  --public-url https://tracker.example \
-  --signing-key-file ./tracker-key.json \
-  --s3-endpoint https://ACCOUNT_ID.r2.cloudflarestorage.com \
-  --s3-region auto \
-  --s3-access-key-id-file ./r2-access-key \
-  --s3-secret-access-key-file ./r2-secret-key \
-  --checkpoint-prefix-uri s3://saveweb-checkpoints/checkpoints
+  --project-id sinavideo
 ```
 
-The GitHub OAuth callback is
-`https://tracker.example/auth/github/callback`. Tracker uses OAuth `state` and
-PKCE S256, requests only the `read:org` scope, and discards the GitHub access
-token after fetching `/user` and the configured team membership. Configure
-`--oauth-admin-org` and `--oauth-admin-team` together. Active members of that
-team become active admins with shard-owner and worker roles; everyone else
-becomes an active worker. A suspended user remains suspended. The contributor
-portal is at `/`, and active admins can review users at `/admin/users`.
-
-`bootstrap-user` exists only for creating the first administrator before the
-web administration flow is configured. It reads the reusable machine token
-from a private `0600` file and never writes the token to logs. The trusted
-tracker database retains the current value so the contributor can reuse it on
-multiple machines, as defined in the v1 design.
-
-To link an emergency bootstrap administrator to GitHub, pass its immutable
-numeric GitHub ID during bootstrap. The configured GitHub team policy is
-reapplied at the next login:
+Pack URLs and import them directly into the project queue:
 
 ```bash
-go run ./cmd/tracker bootstrap-user \
-  --database-url "$HQ_DATABASE_URL" --user-id initial-admin \
-  --github-user-id 123456 --roles admin,shard_owner,worker \
-  --machine-token-file ./initial-admin.token
+source pack --input urls.txt --output sinavideo.jobs.jsonl.zst
+
+tracker enqueue-source \
+  --database-url "$HQ_DATABASE_URL" \
+  --project-id sinavideo \
+  --input sinavideo.jobs.jsonl.zst
 ```
 
-Active administrators can inspect and manage Projects, source-loading or
-checkpoint-recovering shards, Job Receivers, owner/generation/lease state,
-checkpoint pointers, and recent audit events at `/admin/projects`. Every web
-mutation requires a reason and is audited in the same PostgreSQL transaction.
-An active shard can be moved through the deliberately small lifecycle
-`active ↔ draining → paused`; pausing requires a published checkpoint and
-clears the owner lease. Resume from `paused` uses the existing recovery form
-with a higher generation and an owner.
-The equivalent explicit commands remain available for bootstrap and
-automation:
+Import is idempotent for identical `(project_id, job_id, spec)` values and
+rejects an existing job ID with a different spec.
 
-```bash
-go run ./cmd/tracker put-project --database-url "$HQ_DATABASE_URL" --project-id project-1
+## Worker API
 
-go run ./cmd/tracker transition-shard --database-url "$HQ_DATABASE_URL" \
-  --actor-user-id admin-user --project-id project-1 --shard-id shard-1 \
-  --expected-generation 1 --target-status draining --reason 'planned pause'
+All requests use `Authorization: Bearer <machine-token>`. Workers call:
+
+```text
+POST /api/v1/projects/{project_id}/jobs/claim
+POST /api/v1/projects/{project_id}/jobs/complete
+POST /api/v1/projects/{project_id}/jobs/fail
+POST /api/v1/projects/{project_id}/jobs/extend-lease
 ```
 
-Only an active administrator can run `transition-shard`; it uses generation
-as a compare-and-swap guard and writes the same audit log as the web page.
-`draining` stops new claims after the owner's next heartbeat while allowing
-existing attempts and checkpoint publication. After WIP reaches zero and a
-checkpoint is published, transition to `paused`; a replacement owner cannot
-enter `recovering` until the prior owner lease has expired or been cleared by
-this planned-pause path.
+Claims and mutations are bounded batches. Every claim creates a unique
+`attempt_id`; late or replayed outcomes cannot finalize a newer attempt.
 
-`put-shard` always requires an explicit `--status`. Normal production attach
-uses the source-backed `loading` example below; source-less `active` exists only
-for a pre-existing local SQLite queue and should not be used to create an empty
-production shard accidentally.
+The Go SDK exposes `worker.OpenProjectQueue`; the Python SDK exposes
+`open_project_queue`. Both call the project queue directly and contain no
+routing or inbound-server lifecycle.
 
-A receiver is a deliberately smaller primitive for multi-stage work. It has
-no owner, SQLite database, generation, claim API, or automatic pipeline. The
-trusted tracker validates a worker session and writes one immutable
-`jobs-jsonl-zstd-v1` object to an operator-chosen R2 prefix:
-
-```bash
-go run ./cmd/tracker put-receiver --database-url "$HQ_DATABASE_URL" \
-  --project-id project-1 --receiver-id stage-1-output \
-  --sink-uri s3://saveweb-receiver/project-1/stage-1-output
-```
-
-The defaults are at most 1,000 jobs and 16 MiB compressed output per request;
-`tracker serve` exposes `--receiver-max-jobs` and
-`--receiver-max-object-bytes`. A worker calls Go `session.SubmitReceiver` or
-Python `session.submit_receiver`, waits for the durable success response, and
-only then completes the parent job. The worker never receives R2 credentials.
-An ambiguous retry can create another immutable object. After listing and
-downloading the receiver objects in a deterministic order, the operator can
-merge, deduplicate, and split them into new immutable sources:
-
-```bash
-go run ./cmd/source merge \
-  --input receiver-0001.jobs.jsonl.zst \
-  --input receiver-0002.jobs.jsonl.zst \
-  --output-prefix stage-2-shard \
-  --jobs-per-file 100000
-```
-
-This creates `stage-2-shard-000001.jobs.jsonl.zst`, and so on. Input order is
-preserved; the first occurrence of an ID wins. A repeated ID with different
-`type`, `url`, or `attr` is an identity conflict and removes all outputs made
-by that invocation. Existing output paths are never overwritten. Upload the
-results to R2 and register each one as another explicit source shard. There is
-still no automatic stage transition or pipeline state.
-
-This job receiver is separate from the WARC Receiver. Workers upload large
-WARC bodies directly to a Saveweb-operated WARC Receiver; those bytes never
-pass through tracker or shard. Once the Receiver has durably accepted and
-validated a WARC, it returns a signed receipt. The Worker carries that receipt
-in its ordinary queue completion, so only the holder of the current attempt
-changes job state. Later MegaWARC packing and final-sink publication are
-tracked independently and never reopen or block the completed job. The WARC
-Receiver implementation lives outside this repository.
-
-To activate a manually pre-split `jobs.txt`, pack it locally, upload the
-result to a private R2 bucket, and register its immutable URI and ETag. The
-packer generates stable job IDs and refuses to overwrite its output:
-
-```bash
-go run ./cmd/source pack --input jobs.txt --output jobs.jobs.jsonl.zst
-
-go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
-  --project-id project-1 --shard-id shard-2 --owner-agent-id sh_xxx \
-  --generation 1 --status loading \
-  --source-uri s3://saveweb-sources/project-1/shard-2.jobs.jsonl.zst \
-  --source-format jobs-jsonl-zstd-v1 --source-etag ETAG_FROM_R2
-```
-
-The shard streams Zstd decoding into its fenced SQLite queue. URI, ETag, and
-generation form the idempotency identity, so rotating the presigned URL does
-not re-import the source. A successful generation-CAS changes the shard to
-`active`; failure uses the distinct `load_failed` status.
-
-## Shard commands
-
-Initialization creates a private identity file containing only the stable
-agent ID:
-
-```bash
-go run ./cmd/shard init --out ./shard-identity.json
-```
-
-For a daemon exposed directly with pinned HTTPS, create a stable P-256 key and
-self-signed certificate. `tls-init` prints the SPKI SHA-256 value to register:
-
-```bash
-go run ./cmd/shard tls-init \
-  --key-out ./shard-tls.key --cert-out ./shard-tls.crt \
-  --server-name shard.example
-```
-
-Then run `serve` with both TLS files and the printed pin. An HTTPS endpoint
-terminated by Caddy or cloudflared instead uses `--tls-terminated-by-proxy` and
-normally omits the pin. Plain HTTP requires
-`--allow-insecure-public-endpoint`. Tracker HTTP likewise requires the separate
-`--allow-http-tracker` local-test opt-in.
-
-Set `--checkpoint-interval-seconds` to enable periodic publication. Each run
-uses SQLite `VACUUM INTO`, Zstd level 6, and SHA-256. The tracker creates the
-multipart upload and returns one exact presigned URL at a time; the shard never
-receives R2 credentials and checkpoint bytes do not pass through tracker. The
-URL TTL limits one part only, so a slow contributor can request fresh URLs for
-later or retried parts without a fixed total upload window. Temporary files are
-kept under `<data-dir>/runtime/checkpoints` and deleted after each attempt.
-
-To move a published shard to another registered machine, use a strictly newer
-generation and the explicit `recovering` status:
-
-```bash
-go run ./cmd/tracker put-shard --database-url "$HQ_DATABASE_URL" \
-  --project-id project-1 --shard-id shard-1 --owner-agent-id sh_new \
-  --generation 2 --status recovering
-```
-
-The new shard receives an exact checkpoint GET URL, verifies compressed size,
-SHA-256, Zstd limits, SQLite integrity and queue identity, atomically installs
-the file, advances its generation fence, and only then reports `active`.
-Failure uses the distinct `recovery_failed` status. A recovering shard cannot
-serve queue claims or mutations.
-
-Shard also starts a separate management server on `127.0.0.1:9081`. By
-default, each `serve` invocation rotates a 256-bit token into
-`<data-dir>/runtime/local-admin.token` with mode `0600`; only the file path is
-logged. Set `SAVEWEB_LOCAL_ADMIN_TOKEN` to provide a stable value of at least
-32 characters. The local page can inspect assignments and queue counts and can
-pause/resume new claims without blocking completion of existing attempts. It
-cannot change tracker ownership or generation. Use an SSH tunnel for remote
-access; the admin listener cannot bind a non-loopback address.
-
-## Go worker SDK
-
-The Go SDK opens and heartbeats a worker session, obtains a direct shard route,
-and returns a route-bound batch:
-
-```go
-session, err := worker.OpenSession(ctx, worker.Config{
-    TrackerURL:   "https://tracker.example",
-    MachineToken: machineToken,
-    AgentID:      workerAgentID,
-}, "project-1", protocol.Attrs{})
-if err != nil { /* handle */ }
-defer session.Close()
-
-admin, err := session.StartLocalAdmin(worker.LocalAdminConfig{
-    Listen: "127.0.0.1:9082",
-    Token:  os.Getenv("SAVEWEB_LOCAL_ADMIN_TOKEN"),
-})
-if err != nil { /* handle */ }
-defer admin.Close()
-// If TokenWasGenerated is true, deliver admin.Token() to the local operator
-// through an application-controlled private channel.
-
-batch, err := session.Claim(ctx, 64, 300, []string{protocol.JobTypeSeed})
-```
-
-Call `batch.Complete`, `batch.Fail`, or `batch.ExtendLease` for the returned
-attempts. Those methods can refresh an expired access token only while the
-tracker still reports the same shard owner and generation. If takeover has
-occurred they return `worker.ErrRouteRetired`; the caller must discard the
-local outcome and must not replay it to the new generation.
-
-The optional worker management page uses Echo and can bind only explicit
-`127.0.0.1` (default `:9082`). It reuses the shard page's 30-minute local
-session, CSRF, bearer status API, and no-store policy. Pausing returns
-`worker.ErrClaimsPaused` from subsequent `Claim` calls but does not interrupt
-heartbeats or existing batch complete/fail/lease-extension calls. When neither
-the config nor `SAVEWEB_LOCAL_ADMIN_TOKEN` supplies a token, the SDK generates
-a fresh 256-bit value and returns it through `LocalAdmin.Token`; it is never
-included in runtime status.
+See [design.md](./design.md) for state semantics and
+[operations.md](./operations.md) for the minimal runbook.

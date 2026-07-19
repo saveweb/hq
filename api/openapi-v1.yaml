@@ -1,36 +1,16 @@
 openapi: 3.1.0
 info:
-  title: SavewebHQ API
+  title: SavewebHQ Project Queue API
   version: 1.0.0
-  summary: Explicit tracker control plane and shard queue protocol
-  description: |
-    The tracker endpoints use a user machine token. Queue endpoints use a
-    short-lived Ed25519-signed shard access token returned in an assignment.
-    All timestamps are int64 UNIX seconds. Unknown request fields are rejected.
-
-    A shard access token uses compact JWS with `alg=EdDSA`, `typ=JWT`, and a
-    required `kid`. Its claims are `iss`, `aud=saveweb-shard`, `sub` (worker
-    agent ID), `jti`, `iat`, `nbf`, `exp`, `worker_agent_id`, `session_id`,
-    `session_expires_at`, `project_id`, `shard_id`, `generation`, and
-    `owner_agent_id`. A shard verifies the signature and every scoped claim
-    locally, then separately verifies its current local owner lease.
+  summary: Single-site PostgreSQL job coordination
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
-
-tags:
-  - name: agents
-  - name: shards
-  - name: sessions
-  - name: receivers
-  - name: queue
-  - name: health
-
+security:
+  - MachineToken: []
 paths:
   /healthz:
     get:
-      tags: [health]
-      operationId: health
-      summary: Report process liveness without inspecting dependencies
       security: []
+      operationId: health
       responses:
         '200':
           description: Process is alive
@@ -42,1031 +22,117 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, const: ok}
-
-  /api/v1/agents/{agent_id}:
-    parameters:
-      - $ref: '#/components/parameters/AgentID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    put:
-      tags: [agents]
-      operationId: upsertAgent
-      summary: Register an agent or explicitly update its advertised identity
-      security:
-        - MachineToken: []
+  /api/v1/projects/{project_id}/jobs/claim:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    post:
+      operationId: claimProjectJobs
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/AgentUpsertRequest'
+            schema: {$ref: '#/components/schemas/ProjectClaimRequest'}
       responses:
         '200':
-          description: Agent registered or updated
+          description: Claimed jobs
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/AgentResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/agents/{agent_id}/heartbeat:
-    parameters:
-      - $ref: '#/components/parameters/AgentID'
-      - $ref: '#/components/parameters/AgentIDHeader'
+              schema: {$ref: '#/components/schemas/ProjectClaimResponse'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/projects/{project_id}/jobs/complete:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
     post:
-      tags: [agents]
-      operationId: heartbeatAgent
-      summary: Report liveness and renew control-plane leases
-      security:
-        - MachineToken: []
+      operationId: completeProjectJobs
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/AgentHeartbeatRequest'
+            schema: {$ref: '#/components/schemas/ProjectCompleteRequest'}
       responses:
-        '200':
-          description: Heartbeat accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AgentHeartbeatResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {$ref: '#/components/responses/NotFound'}
-
-  /api/v1/worker/sessions:
-    parameters:
-      - $ref: '#/components/parameters/AgentIDHeader'
+        '200': {$ref: '#/components/responses/BatchResult'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/projects/{project_id}/jobs/fail:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
     post:
-      tags: [sessions]
-      operationId: createSession
-      summary: Create a worker session for one explicit project
-      security:
-        - MachineToken: []
+      operationId: failProjectJobs
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/CreateSessionRequest'
+            schema: {$ref: '#/components/schemas/ProjectFailRequest'}
       responses:
-        '201':
-          description: Session created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {$ref: '#/components/responses/NotFound'}
-
-  /api/v1/worker/sessions/{session_id}/heartbeat:
-    parameters:
-      - $ref: '#/components/parameters/SessionID'
-      - $ref: '#/components/parameters/AgentIDHeader'
+        '200': {$ref: '#/components/responses/BatchResult'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/projects/{project_id}/jobs/extend-lease:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
     post:
-      tags: [sessions]
-      operationId: heartbeatSession
-      summary: Renew a worker session lease
-      security:
-        - MachineToken: []
-      responses:
-        '200':
-          description: Session renewed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionResponse'
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {$ref: '#/components/responses/NotFound'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/worker/assignments:
-    parameters:
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [sessions]
-      operationId: getAssignment
-      summary: Get a direct route and access token for an active shard
-      security:
-        - MachineToken: []
+      operationId: extendProjectJobLeases
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/GetAssignmentRequest'
+            schema: {$ref: '#/components/schemas/ProjectExtendLeaseRequest'}
       responses:
-        '200':
-          description: Assignment or an explicit empty result
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GetAssignmentResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {$ref: '#/components/responses/NotFound'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/worker/receivers/{receiver_id}/batches:
-    parameters:
-      - $ref: '#/components/parameters/ReceiverID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [receivers]
-      operationId: submitReceiverBatch
-      summary: Store one immutable discovered-job batch for a later explicit project stage
-      description: |
-        This is a trusted Tracker ingress, not a claimable shard. The worker never
-        receives object-storage credentials. Ambiguous transport retries may create
-        duplicate objects; the later explicit stage deduplicates stable job IDs.
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/ReceiverBatchRequest'}
-      responses:
-        '201':
-          description: One immutable jobs-jsonl-zstd-v1 object was stored
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ReceiverBatchResponse'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {$ref: '#/components/responses/NotFound'}
-        '409': {$ref: '#/components/responses/Conflict'}
-        '503': {$ref: '#/components/responses/Unavailable'}
-
-  /api/v1/shards/{project_id}/{shard_id}/load-result:
-    parameters:
-      - $ref: '#/components/parameters/ProjectID'
-      - $ref: '#/components/parameters/ShardID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [shards]
-      operationId: reportShardLoadResult
-      summary: Atomically finish source loading for the current owner generation
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ShardLoadResultRequest'
-      responses:
-        '200':
-          description: The shard became active or was marked load_failed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ShardLoadResultResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/shards/{project_id}/{shard_id}/recovery-result:
-    parameters:
-      - $ref: '#/components/parameters/ProjectID'
-      - $ref: '#/components/parameters/ShardID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [shards]
-      operationId: reportShardRecoveryResult
-      summary: Atomically finish checkpoint recovery for the current owner generation
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ShardRecoveryResultRequest'
-      responses:
-        '200':
-          description: The shard became active or was marked recovery_failed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ShardRecoveryResultResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/shards/{project_id}/{shard_id}/checkpoints:
-    parameters:
-      - $ref: '#/components/parameters/ProjectID'
-      - $ref: '#/components/parameters/ShardID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [shards]
-      operationId: beginCheckpoint
-      summary: Begin or resume one checkpoint upload for the current owner generation
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/BeginCheckpointRequest'}
-      responses:
-        '201':
-          description: Multipart upload allocated or resumed
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/BeginCheckpointResponse'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/shards/{project_id}/{shard_id}/checkpoints/{upload_id}/parts:
-    parameters:
-      - $ref: '#/components/parameters/ProjectID'
-      - $ref: '#/components/parameters/ShardID'
-      - $ref: '#/components/parameters/UploadID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [shards]
-      operationId: presignCheckpointPart
-      summary: Issue a renewable URL for one exact multipart part
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/CheckpointPartURLRequest'}
-      responses:
-        '200':
-          description: Exact part upload URL and required signed headers
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/CheckpointPartURLResponse'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/shards/{project_id}/{shard_id}/checkpoints/{upload_id}/complete:
-    parameters:
-      - $ref: '#/components/parameters/ProjectID'
-      - $ref: '#/components/parameters/ShardID'
-      - $ref: '#/components/parameters/UploadID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [shards]
-      operationId: completeCheckpoint
-      summary: Complete multipart and generation-CAS publish its checkpoint pointer
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/CompleteCheckpointRequest'}
-      responses:
-        '200':
-          description: Checkpoint pointer published
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/CheckpointResponse'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/shards/{project_id}/{shard_id}/checkpoints/{upload_id}/abort:
-    parameters:
-      - $ref: '#/components/parameters/ProjectID'
-      - $ref: '#/components/parameters/ShardID'
-      - $ref: '#/components/parameters/UploadID'
-      - $ref: '#/components/parameters/AgentIDHeader'
-    post:
-      tags: [shards]
-      operationId: abortCheckpoint
-      summary: Abort the current generation's multipart checkpoint
-      security:
-        - MachineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/AbortCheckpointRequest'}
-      responses:
-        '200':
-          description: Multipart upload aborted
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AbortCheckpointResponse'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-
-  /api/v1/shard/endpoint-challenge:
-    post:
-      tags: [health]
-      operationId: endpointChallenge
-      summary: Echo a tracker challenge while proving the configured agent ID
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/EndpointChallenge'
-      responses:
-        '200':
-          description: Exact challenge echo
-          headers:
-            Cache-Control: {$ref: '#/components/headers/NoStore'}
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EndpointChallenge'
-        '400': {$ref: '#/components/responses/BadRequest'}
-
-  /api/v1/queue/claim:
-    post:
-      tags: [queue]
-      operationId: claim
-      summary: Atomically claim a batch from one shard generation
-      security:
-        - ShardAccessToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ClaimRequest'
-      responses:
-        '200':
-          description: Claimed jobs, possibly empty
-          headers:
-            Cache-Control: {$ref: '#/components/headers/NoStore'}
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ClaimResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-        '429': {$ref: '#/components/responses/TooManyRequests'}
-        '503': {$ref: '#/components/responses/Unavailable'}
-
-  /api/v1/queue/complete:
-    post:
-      tags: [queue]
-      operationId: completeBatch
-      summary: Complete attempts and atomically enqueue same-shard discoveries
-      security:
-        - ShardAccessToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CompleteRequest'
-      responses:
-        '200':
-          description: One result for every input item
-          headers:
-            Cache-Control: {$ref: '#/components/headers/NoStore'}
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BatchResultResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-        '429': {$ref: '#/components/responses/TooManyRequests'}
-        '503': {$ref: '#/components/responses/Unavailable'}
-
-  /api/v1/queue/fail:
-    post:
-      tags: [queue]
-      operationId: failBatch
-      summary: Apply retryable or terminal execution failures
-      security:
-        - ShardAccessToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/FailRequest'
-      responses:
-        '200':
-          description: One result for every input item
-          headers:
-            Cache-Control: {$ref: '#/components/headers/NoStore'}
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BatchResultResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-        '429': {$ref: '#/components/responses/TooManyRequests'}
-        '503': {$ref: '#/components/responses/Unavailable'}
-
-  /api/v1/queue/extend-lease:
-    post:
-      tags: [queue]
-      operationId: extendLeaseBatch
-      summary: Extend leases for still-current attempts
-      security:
-        - ShardAccessToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ExtendLeaseRequest'
-      responses:
-        '200':
-          description: One result for every input item
-          headers:
-            Cache-Control: {$ref: '#/components/headers/NoStore'}
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BatchResultResponse'
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
-        '429': {$ref: '#/components/responses/TooManyRequests'}
-        '503': {$ref: '#/components/responses/Unavailable'}
-
+        '200': {$ref: '#/components/responses/BatchResult'}
+        default: {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
-    MachineToken:
-      type: http
-      scheme: bearer
-      bearerFormat: opaque-machine-token
-    ShardAccessToken:
-      type: http
-      scheme: bearer
-      bearerFormat: EdDSA-JWT
-
+    MachineToken: {type: http, scheme: bearer}
   parameters:
-    AgentID:
-      name: agent_id
-      in: path
-      required: true
-      schema: {$ref: '#/components/schemas/Identifier'}
-    AgentIDHeader:
-      name: X-Saveweb-Agent-ID
-      in: header
-      required: true
-      description: Stable local agent identity bound to the machine token owner.
-      schema: {$ref: '#/components/schemas/Identifier'}
-    SessionID:
-      name: session_id
-      in: path
-      required: true
-      schema: {$ref: '#/components/schemas/Identifier'}
-    ReceiverID:
-      name: receiver_id
-      in: path
-      required: true
-      schema: {$ref: '#/components/schemas/Identifier'}
     ProjectID:
       name: project_id
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
-    ShardID:
-      name: shard_id
-      in: path
-      required: true
-      schema: {$ref: '#/components/schemas/Identifier'}
-    UploadID:
-      name: upload_id
-      in: path
-      required: true
-      schema: {$ref: '#/components/schemas/Identifier'}
-
-  headers:
-    NoStore:
-      description: Responses must not be cached or transformed by proxies.
-      schema:
-        type: string
-        const: no-store, no-cache, max-age=0
-
   responses:
-    BadRequest:
-      description: Invalid schema, field, size, or job
+    BatchResult:
+      description: Per-item mutation results
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/BatchResultResponse'}
+    Error:
+      description: Request error
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-    Unauthorized:
-      description: Missing, invalid, expired, or incorrectly scoped token
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-    Forbidden:
-      description: User, role, project, or agent is not permitted
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-    NotFound:
-      description: Requested resource does not exist
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-    Conflict:
-      description: State, generation, attempt, or identity conflict
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-    TooManyRequests:
-      description: Rate limit or bounded queue backpressure
-      headers:
-        Retry-After:
-          schema: {type: integer, minimum: 0}
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-    Unavailable:
-      description: Shard, receiver storage, or owner lease is unavailable
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-
   schemas:
-    Identifier:
-      type: string
-      minLength: 1
-      maxLength: 128
-      pattern: '^[A-Za-z0-9._:-]+$'
-
-    UnixTime:
-      type: integer
-      format: int64
-      minimum: 0
-
-    JSONAttrs:
-      type: object
-      additionalProperties: true
-
-    AgentKind:
-      type: string
-      enum: [shard, worker]
-
-    AgentStatus:
-      type: string
-      enum: [registered, online, offline, revoked]
-
-    EndpointStatus:
-      type: string
-      enum: [not_applicable, unchecked, healthy, insecure, unreachable, tls_failed, cache_misconfigured]
-
-    AgentUpsertRequest:
+    Identifier: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
+    Attrs: {type: object, additionalProperties: true}
+    JobSpec:
       type: object
       additionalProperties: false
-      required: [kind, name, version, attrs]
-      properties:
-        kind: {$ref: '#/components/schemas/AgentKind'}
-        name: {type: string, minLength: 1, maxLength: 128}
-        version: {type: string, minLength: 1, maxLength: 64}
-        attrs: {$ref: '#/components/schemas/JSONAttrs'}
-        endpoint:
-          type: [string, 'null']
-          format: uri
-          maxLength: 2048
-          description: Required for a shard and forbidden for a worker.
-        endpoint_version:
-          type: [integer, 'null']
-          format: int64
-          minimum: 1
-        tls_spki_sha256:
-          type: [string, 'null']
-          pattern: '^[A-Za-z0-9_-]{43}$'
-          description: Base64url without padding; valid only for HTTPS.
-
-    Agent:
-      type: object
-      additionalProperties: false
-      required: [id, kind, name, status, endpoint, endpoint_version, tls_spki_sha256, endpoint_status, last_heartbeat_at]
-      properties:
-        id: {$ref: '#/components/schemas/Identifier'}
-        kind: {$ref: '#/components/schemas/AgentKind'}
-        name: {type: string}
-        status: {$ref: '#/components/schemas/AgentStatus'}
-        endpoint: {type: [string, 'null'], format: uri}
-        endpoint_version: {type: [integer, 'null'], format: int64}
-        tls_spki_sha256: {type: [string, 'null']}
-        endpoint_status: {$ref: '#/components/schemas/EndpointStatus'}
-        last_heartbeat_at:
-          oneOf:
-            - {$ref: '#/components/schemas/UnixTime'}
-            - {type: 'null'}
-
-    AgentResponse:
-      type: object
-      additionalProperties: false
-      required: [agent, heartbeat_after_seconds, server_time]
-      properties:
-        agent: {$ref: '#/components/schemas/Agent'}
-        heartbeat_after_seconds: {type: integer, minimum: 1, maximum: 300}
-        server_time: {$ref: '#/components/schemas/UnixTime'}
-
-    AgentHeartbeatRequest:
-      type: object
-      additionalProperties: false
-      required: [version, attrs]
-      properties:
-        version: {type: string, minLength: 1, maxLength: 64}
-        attrs: {$ref: '#/components/schemas/JSONAttrs'}
-
-    SigningKey:
-      type: object
-      additionalProperties: false
-      required: [kid, alg, public_key_ed25519, not_before, not_after]
-      properties:
-        kid: {$ref: '#/components/schemas/Identifier'}
-        alg: {type: string, const: EdDSA}
-        public_key_ed25519:
-          type: string
-          pattern: '^[A-Za-z0-9_-]{43}$'
-          description: Raw 32-byte public key, base64url without padding.
-        not_before: {$ref: '#/components/schemas/UnixTime'}
-        not_after: {$ref: '#/components/schemas/UnixTime'}
-
-    OwnerAssignment:
-      type: object
-      additionalProperties: false
-      required: [project_id, shard_id, generation, status, owner_lease_expires_at, source_uri, source_format, source_etag, source_download_url, source_url_expires_at, checkpoint]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        status:
-          type: string
-          enum: [loading, active, draining, paused, offline, recovering]
-        owner_lease_expires_at: {$ref: '#/components/schemas/UnixTime'}
-        source_uri: {type: [string, 'null'], maxLength: 4096}
-        source_format: {type: [string, 'null'], enum: [jobs-jsonl-zstd-v1, null]}
-        source_etag: {type: [string, 'null'], maxLength: 512}
-        source_download_url:
-          type: [string, 'null']
-          maxLength: 8192
-          description: Short-lived exact-object GET URL; never log or persist it.
-        source_url_expires_at: {type: [integer, 'null'], format: int64, minimum: 0}
-        checkpoint:
-          oneOf:
-            - {$ref: '#/components/schemas/CheckpointRestore'}
-            - {type: 'null'}
-
-    CheckpointRestore:
-      type: object
-      additionalProperties: false
-      required: [generation, sequence, format, sha256, size_bytes, created_at, download_url, url_expires_at]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-        sequence: {type: integer, format: int64, minimum: 1}
-        format: {type: string, const: sqlite-zstd-v1}
-        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
-        size_bytes: {type: integer, format: int64, minimum: 1}
-        created_at: {$ref: '#/components/schemas/UnixTime'}
-        download_url:
-          type: string
-          format: uri
-          maxLength: 8192
-          description: Short-lived exact-object GET URL; never log or persist it.
-        url_expires_at: {$ref: '#/components/schemas/UnixTime'}
-
-    AgentHeartbeatResponse:
-      type: object
-      additionalProperties: false
-      required: [server_time, heartbeat_after_seconds, owner_assignments, signing_keys]
-      properties:
-        server_time: {$ref: '#/components/schemas/UnixTime'}
-        heartbeat_after_seconds: {type: integer, minimum: 1, maximum: 300}
-        owner_assignments:
-          type: array
-          maxItems: 1024
-          items: {$ref: '#/components/schemas/OwnerAssignment'}
-        signing_keys:
-          type: array
-          maxItems: 8
-          items: {$ref: '#/components/schemas/SigningKey'}
-
-    ShardLoadResultRequest:
-      type: object
-      additionalProperties: false
-      required: [generation, success, error_code]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-        success: {type: boolean}
-        error_code:
-          type: string
-          maxLength: 64
-          description: Empty on success; a stable machine-readable code on failure.
-
-    ShardLoadResultResponse:
-      type: object
-      additionalProperties: false
-      required: [project_id, shard_id, generation, status]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        status: {type: string, enum: [active, load_failed]}
-
-    ShardRecoveryResultRequest:
-      type: object
-      additionalProperties: false
-      required: [generation, success, error_code]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-        success: {type: boolean}
-        error_code:
-          type: string
-          maxLength: 64
-          description: Empty on success; a stable machine-readable code on failure.
-
-    ShardRecoveryResultResponse:
-      type: object
-      additionalProperties: false
-      required: [project_id, shard_id, generation, status]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        status: {type: string, enum: [active, recovery_failed]}
-
-    BeginCheckpointRequest:
-      type: object
-      additionalProperties: false
-      required: [generation, size_bytes, sha256]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-        size_bytes: {type: integer, format: int64, minimum: 1}
-        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
-
-    BeginCheckpointResponse:
-      type: object
-      additionalProperties: false
-      required: [project_id, shard_id, generation, upload_id, part_size_bytes, created_at]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        upload_id: {$ref: '#/components/schemas/Identifier'}
-        part_size_bytes: {type: integer, format: int64, minimum: 5242880}
-        created_at: {$ref: '#/components/schemas/UnixTime'}
-
-    CheckpointPartURLRequest:
-      type: object
-      additionalProperties: false
-      required: [generation, part_number, size_bytes, content_md5]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-        part_number: {type: integer, minimum: 1, maximum: 10000}
-        size_bytes: {type: integer, format: int64, minimum: 1, maximum: 5368709120}
-        content_md5: {type: string, minLength: 24, maxLength: 24}
-
-    CheckpointPartURLResponse:
-      type: object
-      additionalProperties: false
-      required: [upload_id, part_number, url, headers, expires_at]
-      properties:
-        upload_id: {$ref: '#/components/schemas/Identifier'}
-        part_number: {type: integer, minimum: 1, maximum: 10000}
-        url: {type: string, format: uri, maxLength: 8192}
-        headers:
-          type: object
-          additionalProperties: {type: string, maxLength: 4096}
-        expires_at: {$ref: '#/components/schemas/UnixTime'}
-
-    CheckpointPart:
-      type: object
-      additionalProperties: false
-      required: [part_number, etag]
-      properties:
-        part_number: {type: integer, minimum: 1, maximum: 10000}
-        etag: {type: string, minLength: 1, maxLength: 512}
-
-    CompleteCheckpointRequest:
-      type: object
-      additionalProperties: false
-      required: [generation, parts]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-        parts:
-          type: array
-          minItems: 1
-          maxItems: 10000
-          items: {$ref: '#/components/schemas/CheckpointPart'}
-
-    AbortCheckpointRequest:
-      type: object
-      additionalProperties: false
-      required: [generation]
-      properties:
-        generation: {type: integer, format: int64, minimum: 1}
-
-    CheckpointResponse:
-      type: object
-      additionalProperties: false
-      required: [project_id, shard_id, generation, sequence, uri, format, sha256, size_bytes, created_at]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        sequence: {type: integer, format: int64, minimum: 1}
-        uri: {type: string, maxLength: 4096}
-        format: {type: string, const: sqlite-zstd-v1}
-        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
-        size_bytes: {type: integer, format: int64, minimum: 1}
-        created_at: {$ref: '#/components/schemas/UnixTime'}
-
-    AbortCheckpointResponse:
-      type: object
-      additionalProperties: false
-      required: [upload_id, status]
-      properties:
-        upload_id: {$ref: '#/components/schemas/Identifier'}
-        status: {type: string, const: aborted}
-
-    CreateSessionRequest:
-      type: object
-      additionalProperties: false
-      required: [project_id, attrs]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        attrs: {$ref: '#/components/schemas/JSONAttrs'}
-
-    SessionResponse:
-      type: object
-      additionalProperties: false
-      required: [session_id, lease_expires_at, heartbeat_after_seconds]
-      properties:
-        session_id: {$ref: '#/components/schemas/Identifier'}
-        lease_expires_at: {$ref: '#/components/schemas/UnixTime'}
-        heartbeat_after_seconds: {type: integer, minimum: 1, maximum: 300}
-
-    GetAssignmentRequest:
-      type: object
-      additionalProperties: false
-      required: [session_id, accept_types]
-      properties:
-        session_id: {$ref: '#/components/schemas/Identifier'}
-        accept_types:
-          type: array
-          uniqueItems: true
-          maxItems: 2
-          items: {$ref: '#/components/schemas/JobType'}
-
-    Assignment:
-      type: object
-      additionalProperties: false
-      required: [project_id, shard_id, generation, owner_agent_id, endpoint, endpoint_version, tls_spki_sha256, access_token, access_token_expires_at]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        owner_agent_id: {$ref: '#/components/schemas/Identifier'}
-        endpoint: {type: string, format: uri, maxLength: 2048}
-        endpoint_version: {type: integer, format: int64, minimum: 1}
-        tls_spki_sha256: {type: [string, 'null']}
-        access_token: {type: string, minLength: 64, maxLength: 4096}
-        access_token_expires_at: {$ref: '#/components/schemas/UnixTime'}
-
-    GetAssignmentResponse:
-      type: object
-      additionalProperties: false
-      required: [assignment, retry_after_ms]
-      properties:
-        assignment:
-          oneOf:
-            - {$ref: '#/components/schemas/Assignment'}
-            - {type: 'null'}
-        retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
-
-    ReceiverBatchRequest:
-      type: object
-      additionalProperties: false
-      required: [session_id, jobs]
-      properties:
-        session_id: {$ref: '#/components/schemas/Identifier'}
-        jobs:
-          type: array
-          minItems: 1
-          maxItems: 1000
-          items: {$ref: '#/components/schemas/JobSpecV1'}
-
-    ReceiverBatchResponse:
-      type: object
-      additionalProperties: false
-      required: [project_id, receiver_id, object_uri, format, jobs_count, size_bytes, sha256, created_at]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        receiver_id: {$ref: '#/components/schemas/Identifier'}
-        object_uri: {type: string, minLength: 1, maxLength: 4096}
-        format: {type: string, const: jobs-jsonl-zstd-v1}
-        jobs_count: {type: integer, format: int64, minimum: 1, maximum: 1000}
-        size_bytes: {type: integer, format: int64, minimum: 1}
-        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
-        created_at: {$ref: '#/components/schemas/UnixTime'}
-
-    EndpointChallenge:
-      type: object
-      additionalProperties: false
-      required: [agent_id, challenge]
-      properties:
-        agent_id: {$ref: '#/components/schemas/Identifier'}
-        challenge: {type: string, minLength: 32, maxLength: 256}
-
-    JobType:
-      type: string
-      enum: [seed, asset]
-
-    JobFields:
-      type: object
+      required: [id, url, via]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         url: {type: string, minLength: 1, maxLength: 8192}
-        type: {$ref: '#/components/schemas/JobType'}
-        via: {type: [string, 'null'], maxLength: 8192, default: null}
-        hops: {type: integer, minimum: 0, default: 0}
-        attr: {$ref: '#/components/schemas/JSONAttrs'}
-
-    JobSpecV1:
-      allOf:
-        - $ref: '#/components/schemas/JobFields'
-      type: object
-      unevaluatedProperties: false
-      required: [id, url]
-
+        type: {type: string, enum: [seed, asset], default: seed}
+        via: {type: [string, 'null'], maxLength: 8192}
+        hops: {type: integer, minimum: 0}
+        attr: {$ref: '#/components/schemas/Attrs'}
     ClaimedJob:
       allOf:
-        - $ref: '#/components/schemas/JobFields'
-      type: object
-      unevaluatedProperties: false
-      required: [id, url, attempt_id, lease_expires_at]
-      properties:
-        attempt_id: {$ref: '#/components/schemas/Identifier'}
-        lease_expires_at: {$ref: '#/components/schemas/UnixTime'}
-
-    RouteRequest:
-      type: object
-      required: [project_id, shard_id, generation, session_id]
-      properties:
-        project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        session_id: {$ref: '#/components/schemas/Identifier'}
-
-    ClaimRequest:
-      allOf:
-        - $ref: '#/components/schemas/RouteRequest'
+        - {$ref: '#/components/schemas/JobSpec'}
         - type: object
-          required: [max_jobs, lease_seconds, accept_types]
+          required: [attempt_id, lease_expires_at]
           properties:
-            max_jobs: {type: integer, minimum: 1, maximum: 256, default: 64}
-            lease_seconds: {type: integer, minimum: 30, maximum: 3600, default: 300}
-            accept_types:
-              type: array
-              uniqueItems: true
-              maxItems: 2
-              items: {$ref: '#/components/schemas/JobType'}
-      unevaluatedProperties: false
-
-    ClaimResponse:
+            attempt_id: {$ref: '#/components/schemas/Identifier'}
+            lease_expires_at: {type: integer, format: int64}
+    ProjectClaimRequest:
       type: object
       additionalProperties: false
-      required: [project_id, shard_id, generation, jobs, retry_after_ms]
+      required: [worker_id, max_jobs, lease_seconds, accept_types]
+      properties:
+        worker_id: {$ref: '#/components/schemas/Identifier'}
+        max_jobs: {type: integer, minimum: 1, maximum: 256}
+        lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
+        accept_types: {type: array, maxItems: 16, items: {type: string, enum: [seed, asset]}}
+    ProjectClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, jobs, retry_after_ms]
       properties:
         project_id: {$ref: '#/components/schemas/Identifier'}
-        shard_id: {$ref: '#/components/schemas/Identifier'}
-        generation: {type: integer, format: int64, minimum: 1}
-        jobs:
-          type: array
-          maxItems: 256
-          items: {$ref: '#/components/schemas/ClaimedJob'}
-        retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
-
+        jobs: {type: array, items: {$ref: '#/components/schemas/ClaimedJob'}}
+        retry_after_ms: {type: integer, format: int64, minimum: 0}
     Outcome:
       type: object
       additionalProperties: false
@@ -1075,43 +141,43 @@ components:
         kind: {type: string, enum: [success, http_error, skipped]}
         code: {type: [integer, 'null'], minimum: 0, maximum: 999}
         uri: {type: [string, 'null'], maxLength: 4096}
-        meta: {$ref: '#/components/schemas/JSONAttrs'}
-
-    CompleteItem:
+        meta: {$ref: '#/components/schemas/Attrs'}
+    WARCReceipt:
       type: object
       additionalProperties: false
-      required: [job_id, attempt_id, outcome, discovered_jobs]
+      required: [id, issuer, object_id, sha256, size_bytes, accepted_at, signature]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        issuer: {type: string, minLength: 1, maxLength: 512}
+        object_id: {type: string, minLength: 1, maxLength: 1024}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        size_bytes: {type: integer, format: int64, minimum: 1}
+        accepted_at: {type: integer, format: int64, minimum: 1}
+        signature: {type: string, minLength: 1, maxLength: 4096}
+    ProjectCompleteItem:
+      type: object
+      additionalProperties: false
+      required: [job_id, attempt_id, outcome, warc_receipts]
       properties:
         job_id: {$ref: '#/components/schemas/Identifier'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
         outcome: {$ref: '#/components/schemas/Outcome'}
-        discovered_jobs:
-          type: array
-          maxItems: 256
-          items: {$ref: '#/components/schemas/JobSpecV1'}
-
-    CompleteRequest:
-      allOf:
-        - $ref: '#/components/schemas/RouteRequest'
-        - type: object
-          required: [items]
-          properties:
-            items:
-              type: array
-              minItems: 1
-              maxItems: 256
-              items: {$ref: '#/components/schemas/CompleteItem'}
-      unevaluatedProperties: false
-
+        warc_receipts: {type: array, maxItems: 16, items: {$ref: '#/components/schemas/WARCReceipt'}}
+    ProjectCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [worker_id, items]
+      properties:
+        worker_id: {$ref: '#/components/schemas/Identifier'}
+        items: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/ProjectCompleteItem'}}
     ExecutionError:
       type: object
       additionalProperties: false
       required: [code, message, details]
       properties:
-        code: {type: string, minLength: 1, maxLength: 64}
+        code: {$ref: '#/components/schemas/Identifier'}
         message: {type: string, maxLength: 2048}
-        details: {$ref: '#/components/schemas/JSONAttrs'}
-
+        details: {$ref: '#/components/schemas/Attrs'}
     FailItem:
       type: object
       additionalProperties: false
@@ -1121,20 +187,13 @@ components:
         attempt_id: {$ref: '#/components/schemas/Identifier'}
         retryable: {type: boolean}
         error: {$ref: '#/components/schemas/ExecutionError'}
-
-    FailRequest:
-      allOf:
-        - $ref: '#/components/schemas/RouteRequest'
-        - type: object
-          required: [items]
-          properties:
-            items:
-              type: array
-              minItems: 1
-              maxItems: 256
-              items: {$ref: '#/components/schemas/FailItem'}
-      unevaluatedProperties: false
-
+    ProjectFailRequest:
+      type: object
+      additionalProperties: false
+      required: [worker_id, items]
+      properties:
+        worker_id: {$ref: '#/components/schemas/Identifier'}
+        items: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/FailItem'}}
     AttemptRef:
       type: object
       additionalProperties: false
@@ -1142,90 +201,41 @@ components:
       properties:
         job_id: {$ref: '#/components/schemas/Identifier'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
-
-    ExtendLeaseRequest:
-      allOf:
-        - $ref: '#/components/schemas/RouteRequest'
-        - type: object
-          required: [extend_seconds, items]
-          properties:
-            extend_seconds: {type: integer, minimum: 30, maximum: 3600}
-            items:
-              type: array
-              minItems: 1
-              maxItems: 256
-              items: {$ref: '#/components/schemas/AttemptRef'}
-      unevaluatedProperties: false
-
+    ProjectExtendLeaseRequest:
+      type: object
+      additionalProperties: false
+      required: [worker_id, extend_seconds, items]
+      properties:
+        worker_id: {$ref: '#/components/schemas/Identifier'}
+        extend_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
+        items: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/AttemptRef'}}
     ItemResult:
       type: object
       additionalProperties: false
-      required: [job_id, attempt_id, status, job_status, lease_expires_at, error]
+      required: [job_id, attempt_id, status]
       properties:
         job_id: {$ref: '#/components/schemas/Identifier'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
-        status: {type: string, enum: [applied, already_applied, rejected]}
-        job_status:
-          type: [string, 'null']
-          enum: [todo, wip, done, failed, reset_exhausted, null]
-        lease_expires_at:
-          oneOf:
-            - {$ref: '#/components/schemas/UnixTime'}
-            - {type: 'null'}
-        error:
-          oneOf:
-            - {$ref: '#/components/schemas/APIError'}
-            - {type: 'null'}
-
+        status: {type: string, enum: [applied, rejected]}
+        job_status: {type: [string, 'null'], enum: [todo, wip, done, failed, reset_exhausted, null]}
+        lease_expires_at: {type: [integer, 'null'], format: int64}
+        error: {oneOf: [{$ref: '#/components/schemas/APIError'}, {type: 'null'}]}
     BatchResultResponse:
       type: object
       additionalProperties: false
       required: [results]
       properties:
-        results:
-          type: array
-          minItems: 1
-          maxItems: 256
-          items: {$ref: '#/components/schemas/ItemResult'}
-
-    ErrorCode:
-      type: string
-      enum:
-        - internal_error
-        - invalid_request
-        - invalid_job
-        - invalid_machine_token
-        - invalid_access_token
-        - permission_denied
-        - agent_disabled
-        - not_found
-        - stale_generation
-        - stale_endpoint_version
-        - shard_not_active
-        - identity_conflict
-        - rate_limited
-        - backpressure
-        - cache_misconfigured
-        - shard_unavailable
-        - owner_lease_expired
-        - lease_expired
-        - stale_attempt
-        - session_expired
-        - attempt_already_finalized
-        - unsupported_operation
-        - checkpoint_in_progress
-
+        results: {type: array, items: {$ref: '#/components/schemas/ItemResult'}}
     APIError:
       type: object
       additionalProperties: false
       required: [code, message, retryable, retry_after_ms, details]
       properties:
-        code: {$ref: '#/components/schemas/ErrorCode'}
-        message: {type: string, maxLength: 2048}
+        code: {type: string}
+        message: {type: string}
         retryable: {type: boolean}
-        retry_after_ms: {type: integer, minimum: 0, maximum: 300000}
-        details: {$ref: '#/components/schemas/JSONAttrs'}
-
+        retry_after_ms: {type: integer, format: int64}
+        details: {$ref: '#/components/schemas/Attrs'}
     ErrorEnvelope:
       type: object
       additionalProperties: false

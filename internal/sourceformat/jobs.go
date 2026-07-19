@@ -1,5 +1,5 @@
 // Package sourceformat implements the immutable jobs-jsonl-zstd-v1 source
-// format shared by the source packer and shard loader.
+// format shared by the source packer and HQ importer.
 package sourceformat
 
 import (
