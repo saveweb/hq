@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -12,11 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	"git.saveweb.org/saveweb/hq/internal/githuboauth"
 	"git.saveweb.org/saveweb/hq/internal/projectqueuehttp"
 	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/sourceformat"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
+	"git.saveweb.org/saveweb/hq/internal/trackerweb"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
@@ -33,6 +37,8 @@ func run(args []string, logger *slog.Logger) error {
 		return usageError()
 	}
 	switch args[0] {
+	case "web-keygen":
+		return runWebKeygen(args[1:])
 	case "migrate":
 		return runMigrate(args[1:])
 	case "bootstrap-user":
@@ -49,7 +55,44 @@ func run(args []string, logger *slog.Logger) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: tracker {migrate|bootstrap-user|put-project|enqueue-source|serve} [flags]")
+	return fmt.Errorf("usage: tracker {web-keygen|migrate|bootstrap-user|put-project|enqueue-source|serve} [flags]")
+}
+
+func runWebKeygen(args []string) error {
+	flags := flag.NewFlagSet("web-keygen", flag.ContinueOnError)
+	out := flags.String("out", "", "new 0600 web session secret file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *out == "" {
+		return fmt.Errorf("web-keygen: --out is required")
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return fmt.Errorf("web-keygen: random: %w", err)
+	}
+	file, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("web-keygen: create: %w", err)
+	}
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(*out)
+		}
+	}()
+	if _, err := fmt.Fprintln(file, base64.RawURLEncoding.EncodeToString(random[:])); err != nil {
+		return fmt.Errorf("web-keygen: write: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("web-keygen: sync: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("web-keygen: close: %w", err)
+	}
+	remove = false
+	return nil
 }
 
 func runMigrate(args []string) error {
@@ -167,6 +210,12 @@ func runServe(args []string, logger *slog.Logger) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := flags.String("listen", envOr("HQ_LISTEN", ":8080"), "HTTP listen address")
 	databaseURL := flags.String("database-url", os.Getenv("HQ_DATABASE_URL"), "PostgreSQL connection URL")
+	publicURL := flags.String("public-url", os.Getenv("HQ_PUBLIC_URL"), "public HQ URL")
+	githubClientID := flags.String("github-client-id", os.Getenv("HQ_GITHUB_CLIENT_ID"), "GitHub OAuth app client ID")
+	githubClientSecretFile := flags.String("github-client-secret-file", os.Getenv("HQ_GITHUB_CLIENT_SECRET_FILE"), "0600 GitHub OAuth client secret file")
+	webSessionSecretFile := flags.String("web-session-secret-file", os.Getenv("HQ_WEB_SESSION_SECRET_FILE"), "0600 web session secret file")
+	oauthAdminOrganization := flags.String("oauth-admin-org", os.Getenv("HQ_OAUTH_ADMIN_ORG"), "GitHub organization containing the administrator team")
+	oauthAdminTeam := flags.String("oauth-admin-team", os.Getenv("HQ_OAUTH_ADMIN_TEAM"), "GitHub team slug whose active members become administrators")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -179,6 +228,44 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	defer store.Close()
 	handler := projectqueuehttp.New(store, func() int64 { return time.Now().Unix() }, logger)
+	webValues := []string{*publicURL, *githubClientID, *githubClientSecretFile, *webSessionSecretFile, *oauthAdminOrganization, *oauthAdminTeam}
+	webEnabled := false
+	for _, value := range webValues {
+		webEnabled = webEnabled || value != ""
+	}
+	if webEnabled {
+		for _, value := range webValues {
+			if value == "" {
+				return fmt.Errorf("serve: public URL, GitHub OAuth credentials, web session secret, organization, and team are all required when web administration is enabled")
+			}
+		}
+		clientSecret, err := readSecretFile(*githubClientSecretFile)
+		if err != nil {
+			return fmt.Errorf("serve: read GitHub client secret: %w", err)
+		}
+		encodedWebSecret, err := readSecretFile(*webSessionSecretFile)
+		if err != nil {
+			return fmt.Errorf("serve: read web session secret: %w", err)
+		}
+		webSecret, err := base64.RawURLEncoding.DecodeString(encodedWebSecret)
+		if err != nil || len(webSecret) < 32 {
+			return fmt.Errorf("serve: invalid web session secret")
+		}
+		redirectURL := strings.TrimSuffix(*publicURL, "/") + "/auth/github/callback"
+		oauthClient, err := githuboauth.New(githuboauth.Config{ClientID: *githubClientID, ClientSecret: clientSecret, RedirectURL: redirectURL})
+		if err != nil {
+			return err
+		}
+		webHandler, err := trackerweb.New(store, oauthClient, trackerweb.Config{
+			PublicURL: *publicURL, AdminOrganization: *oauthAdminOrganization,
+			AdminTeam: *oauthAdminTeam, Secret: webSecret,
+		}, logger)
+		if err != nil {
+			return err
+		}
+		webHandler.Register(handler)
+		logger.Info("web administration enabled", "public_url", *publicURL, "github_team", *oauthAdminOrganization+"/"+*oauthAdminTeam)
+	}
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -227,7 +314,7 @@ func readSecretFile(path string) (string, error) {
 	}
 	value := strings.TrimSpace(string(raw))
 	if value == "" || len(value) > 1024 {
-		return "", fmt.Errorf("invalid machine token")
+		return "", fmt.Errorf("invalid secret")
 	}
 	return value, nil
 }

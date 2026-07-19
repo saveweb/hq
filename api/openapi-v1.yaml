@@ -22,6 +22,61 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, const: ok}
+  /api/v1/admin/projects:
+    get:
+      operationId: listAdminProjects
+      description: Requires an active user with the admin role.
+      responses:
+        '200':
+          description: Projects and queue counts
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminProjectListResponse'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/projects/{project_id}:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    get:
+      operationId: getAdminProject
+      description: Requires an active user with the admin role.
+      responses:
+        '200':
+          description: Project and queue counts
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminProjectSummary'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putAdminProject
+      description: Creates a project or updates its lifecycle status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminProjectRequest'}
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminProjectSummary'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/projects/{project_id}/jobs:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    post:
+      operationId: enqueueAdminProjectJobs
+      description: Idempotently inserts a bounded batch into a non-archived project.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminEnqueueJobsRequest'}
+      responses:
+        '200':
+          description: Import result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminEnqueueJobsResponse'}
+        default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/claim:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
     post:
@@ -97,6 +152,52 @@ components:
   schemas:
     Identifier: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
     Attrs: {type: object, additionalProperties: true}
+    JobCounts:
+      type: object
+      additionalProperties: false
+      required: [todo, wip, done, failed, reset_exhausted]
+      properties:
+        todo: {type: integer, format: int64, minimum: 0}
+        wip: {type: integer, format: int64, minimum: 0}
+        done: {type: integer, format: int64, minimum: 0}
+        failed: {type: integer, format: int64, minimum: 0}
+        reset_exhausted: {type: integer, format: int64, minimum: 0}
+    AdminProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, enum: [active, draining, archived]}
+    AdminProjectSummary:
+      type: object
+      additionalProperties: false
+      required: [id, status, job_counts, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        status: {type: string, enum: [active, draining, archived]}
+        job_counts: {$ref: '#/components/schemas/JobCounts'}
+        created_at: {type: integer, format: int64}
+        updated_at: {type: integer, format: int64}
+    AdminProjectListResponse:
+      type: object
+      additionalProperties: false
+      required: [projects]
+      properties:
+        projects: {type: array, items: {$ref: '#/components/schemas/AdminProjectSummary'}}
+    AdminEnqueueJobsRequest:
+      type: object
+      additionalProperties: false
+      required: [jobs]
+      properties:
+        jobs: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/JobSpec'}}
+    AdminEnqueueJobsResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, submitted, inserted]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        submitted: {type: integer, minimum: 1, maximum: 256}
+        inserted: {type: integer, format: int64, minimum: 0, maximum: 256}
     JobSpec:
       type: object
       additionalProperties: false

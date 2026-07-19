@@ -112,7 +112,7 @@ func (s *Store) PutUserAndToken(ctx context.Context, user tracker.User, token st
 }
 func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int64) error {
 	if !queue.ValidateIdentifier(project.ID) || (project.Status != tracker.ProjectStatusActive && project.Status != tracker.ProjectStatusDraining && project.Status != tracker.ProjectStatusArchived) {
-		return fmt.Errorf("invalid project")
+		return tracker.InvalidRequest("invalid project")
 	}
 	_, err := s.pool.Exec(ctx, `INSERT INTO tracker_projects(id,status,created_at,updated_at) VALUES($1,$2,$3,$3) ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at`, project.ID, project.Status, now)
 	return err

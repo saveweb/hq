@@ -28,6 +28,34 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  tracker-init:
+    <<: *hq-image
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mkdir -p /run/secrets
+        chown 65532:65532 /run/secrets
+        chmod 0700 /run/secrets
+        test -s /run/secrets/github-client.secret
+        if [ ! -e /run/secrets/tracker-web.secret ]; then
+          /usr/local/bin/tracker web-keygen --out /run/secrets/tracker-web.secret
+        fi
+        chown 65532:65532 /run/secrets/github-client.secret /run/secrets/tracker-web.secret
+        chmod 0600 /run/secrets/github-client.secret /run/secrets/tracker-web.secret
+    volumes:
+      - ./secrets:/run/secrets
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+
   tracker:
     <<: *hq-image
     restart: unless-stopped
@@ -35,8 +63,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tracker-init:
+        condition: service_completed_successfully
     environment:
       HQ_DATABASE_URL: postgres://hq@postgres:5432/hq?sslmode=disable
+      HQ_PUBLIC_URL: ${HQ_PUBLIC_URL:-https://hq.saveweb.org}
+      HQ_GITHUB_CLIENT_ID: ${HQ_GITHUB_CLIENT_ID:-}
+      HQ_GITHUB_CLIENT_SECRET_FILE: /run/secrets/github-client.secret
+      HQ_WEB_SESSION_SECRET_FILE: /run/secrets/tracker-web.secret
+      HQ_OAUTH_ADMIN_ORG: ${HQ_OAUTH_ADMIN_ORG:-saveweb}
+      HQ_OAUTH_ADMIN_TEAM: ${HQ_OAUTH_ADMIN_TEAM:-core}
+    volumes:
+      - ./secrets:/run/secrets:ro
     ports:
       - 127.0.0.74:8080:8080
     networks:

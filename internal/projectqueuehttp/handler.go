@@ -68,10 +68,74 @@ func New(store *postgres.Store, now func() int64, logger *slog.Logger) *echo.Ech
 
 func Register(server *echo.Echo, store *postgres.Store, now func() int64) {
 	h := &handler{store: store, now: now}
+	server.GET("/api/v1/admin/projects", h.listProjects)
+	server.GET("/api/v1/admin/projects/:project_id", h.getProject)
+	server.PUT("/api/v1/admin/projects/:project_id", h.putProject)
+	server.POST("/api/v1/admin/projects/:project_id/jobs", h.enqueueJobs)
 	server.POST("/api/v1/projects/:project_id/jobs/claim", h.claim)
 	server.POST("/api/v1/projects/:project_id/jobs/complete", h.complete)
 	server.POST("/api/v1/projects/:project_id/jobs/fail", h.fail)
 	server.POST("/api/v1/projects/:project_id/jobs/extend-lease", h.extendLease)
+}
+
+func (h *handler) listProjects(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	projects, err := h.store.ListProjectSummaries(ctx.Request().Context())
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, protocol.AdminProjectListResponse{Projects: projects})
+}
+
+func (h *handler) getProject(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	project, err := h.store.ProjectSummary(ctx.Request().Context(), ctx.Param("project_id"))
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, project)
+}
+
+func (h *handler) putProject(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	var request protocol.AdminProjectRequest
+	if !h.decode(ctx, &request) {
+		return nil
+	}
+	projectID := ctx.Param("project_id")
+	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: request.Status}, h.now()); err != nil {
+		return h.writeError(ctx, err)
+	}
+	project, err := h.store.ProjectSummary(ctx.Request().Context(), projectID)
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, project)
+}
+
+func (h *handler) enqueueJobs(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	var request protocol.AdminEnqueueJobsRequest
+	if !h.decode(ctx, &request) {
+		return nil
+	}
+	if len(request.Jobs) == 0 || len(request.Jobs) > 256 {
+		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "jobs must contain 1-256 items"})
+	}
+	projectID := ctx.Param("project_id")
+	inserted, err := h.store.EnqueueProjectJobs(ctx.Request().Context(), projectID, request.Jobs, h.now())
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, protocol.AdminEnqueueJobsResponse{ProjectID: projectID, Submitted: len(request.Jobs), Inserted: inserted})
 }
 
 func (h *handler) claim(ctx *echo.Context) error {
@@ -147,6 +211,18 @@ func (h *handler) authenticate(ctx *echo.Context) (tracker.User, bool) {
 	user, err := h.store.AuthenticateMachineToken(ctx.Request().Context(), token)
 	if err != nil {
 		h.writeError(ctx, err)
+		return tracker.User{}, false
+	}
+	return user, true
+}
+
+func (h *handler) authenticateAdmin(ctx *echo.Context) (tracker.User, bool) {
+	user, ok := h.authenticate(ctx)
+	if !ok {
+		return tracker.User{}, false
+	}
+	if user.Status != tracker.UserStatusActive || !user.HasRole(tracker.RoleAdmin) {
+		h.writeAPIError(ctx, http.StatusForbidden, protocol.APIError{Code: protocol.ErrorPermissionDenied, Message: "active admin role required"})
 		return tracker.User{}, false
 	}
 	return user, true

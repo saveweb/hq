@@ -26,8 +26,8 @@ source -> HQ/PostgreSQL -> worker -> WARC Core -> sink adapters
 
 The production image contains only:
 
-- `tracker`: migrations, project/user administration, source import, and HTTP
-  queue service;
+- `tracker`: migrations, GitHub-authenticated web administration, machine API,
+  and source import;
 - `source`: tools for producing `jobs-jsonl-zstd-v1` source files.
 
 PostgreSQL is the only HQ state store. There is no shard daemon, queue relay,
@@ -48,9 +48,22 @@ make test-postgres
 ## Deployment
 
 The included Compose file starts PostgreSQL and HQ. PostgreSQL data is stored
-under `./data/postgres`.
+under `./data/postgres`. Before the first start, create a GitHub OAuth App with
+this callback URL:
+
+```text
+https://hq.saveweb.org/auth/github/callback
+```
+
+Set its client ID in `.env`, and put its client secret in the ignored secrets
+directory. Replace the public URL and team when deploying under another host
+or organization.
 
 ```bash
+cp .env.example .env
+install -d -m 0700 secrets
+printf '%s\n' 'GITHUB_OAUTH_CLIENT_SECRET' > secrets/github-client.secret
+chmod 0600 secrets/github-client.secret
 docker compose build
 docker compose up -d
 docker compose ps
@@ -88,6 +101,14 @@ tracker enqueue-source \
 
 Import is idempotent for identical `(project_id, job_id, spec)` values and
 rejects an existing job ID with a different spec.
+
+Active members of the configured GitHub organization team can sign in at `/`
+and manage projects, statuses, and bounded job batches. The callback verifies
+team membership on every login; GitHub access tokens are not persisted.
+
+An active administrator machine token can perform the same operations through
+`/api/v1/admin/projects`. Project responses include queue counts for all job
+states. Browser sessions are not accepted by machine API routes.
 
 ## Worker API
 

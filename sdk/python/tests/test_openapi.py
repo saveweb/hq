@@ -16,15 +16,18 @@ def test_openapi_contract_has_all_v1_operations() -> None:
     assert document["openapi"] == "3.1.0"
 
     expected = {
-        "/healthz": "get",
-        "/api/v1/projects/{project_id}/jobs/claim": "post",
-        "/api/v1/projects/{project_id}/jobs/complete": "post",
-        "/api/v1/projects/{project_id}/jobs/fail": "post",
-        "/api/v1/projects/{project_id}/jobs/extend-lease": "post",
+        "/healthz": {"get"},
+        "/api/v1/admin/projects": {"get"},
+        "/api/v1/admin/projects/{project_id}": {"get", "put"},
+        "/api/v1/admin/projects/{project_id}/jobs": {"post"},
+        "/api/v1/projects/{project_id}/jobs/claim": {"post"},
+        "/api/v1/projects/{project_id}/jobs/complete": {"post"},
+        "/api/v1/projects/{project_id}/jobs/fail": {"post"},
+        "/api/v1/projects/{project_id}/jobs/extend-lease": {"post"},
     }
     assert set(document["paths"]) == set(expected)
-    for path, method in expected.items():
-        assert set(document["paths"][path]) - {"parameters"} == {method}
+    for path, methods in expected.items():
+        assert set(document["paths"][path]) - {"parameters"} == methods
 
 
 def test_openapi_has_no_worker_inbound_endpoint() -> None:

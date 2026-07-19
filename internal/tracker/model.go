@@ -7,6 +7,8 @@ import (
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
+var ErrWebSessionNotFound = errors.New("web session not found")
+
 const (
 	UserStatusPending     = "pending"
 	UserStatusActive      = "active"
@@ -35,12 +37,22 @@ func IsCode(err error, code string) bool {
 }
 
 type User struct {
-	ID     string
-	Status string
-	Roles  map[string]bool
+	ID              string
+	GitHubUserID    *int64
+	GitHubLogin     string
+	GitHubAvatarURL *string
+	Status          string
+	Roles           map[string]bool
+	LastLoginAt     *int64
 }
 
 func (u User) HasRole(role string) bool { return u.Roles[role] }
+
+type GitHubIdentity struct {
+	UserID    int64
+	Login     string
+	AvatarURL *string
+}
 
 type Project struct {
 	ID     string

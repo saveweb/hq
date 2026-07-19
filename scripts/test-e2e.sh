@@ -5,12 +5,18 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 run_dir=$(mktemp -d)
 container="saveweb-hq-e2e-pg-$$"
 tracker_pid=""
+
 cleanup() {
   status=$?
   trap - EXIT
-  if [ -n "${tracker_pid}" ]; then kill -TERM "${tracker_pid}" >/dev/null 2>&1 || true; wait "${tracker_pid}" >/dev/null 2>&1 || true; fi
+  if [ -n "${tracker_pid}" ]; then
+    kill -TERM "${tracker_pid}" >/dev/null 2>&1 || true
+    wait "${tracker_pid}" >/dev/null 2>&1 || true
+  fi
   docker rm -f "${container}" >/dev/null 2>&1 || true
-  if [ "${status}" -ne 0 ] && [ -s "${run_dir}/tracker.log" ]; then tail -n 200 "${run_dir}/tracker.log" >&2; fi
+  if [ "${status}" -ne 0 ] && [ -s "${run_dir}/tracker.log" ]; then
+    tail -n 200 "${run_dir}/tracker.log" >&2
+  fi
   rm -rf "${run_dir}"
   exit "${status}"
 }
@@ -18,37 +24,160 @@ trap cleanup EXIT
 cd "${root}"
 
 go build -o "${run_dir}/tracker" ./cmd/tracker
-go build -o "${run_dir}/source" ./cmd/source
-docker run --rm -d --name "${container}" -e POSTGRES_PASSWORD=test -e POSTGRES_DB=hq -p 127.0.0.1::5432 postgres:17-alpine >/dev/null
+docker run --rm -d --name "${container}" \
+  -e POSTGRES_PASSWORD=test -e POSTGRES_DB=hq \
+  -p 127.0.0.1::5432 postgres:17-alpine >/dev/null
 for _ in $(seq 1 300); do
-  if [ "$(docker logs "${container}" 2>&1 | grep -c 'database system is ready to accept connections' || true)" -ge 2 ]; then break; fi
+  ready=$(docker logs "${container}" 2>&1 | grep -c 'database system is ready to accept connections' || true)
+  if [ "${ready}" -ge 2 ]; then break; fi
   sleep 0.1
 done
 pg_port=$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')
 database_url="postgres://postgres:test@127.0.0.1:${pg_port}/hq?sslmode=disable"
 
 umask 077
-printf '%s\n' 'e2e-worker-token-0123456789abcdef' >"${run_dir}/worker.token"
-printf '%s\n' 'https://example.test/a' >"${run_dir}/jobs.txt"
-"${run_dir}/source" pack --input "${run_dir}/jobs.txt" --output "${run_dir}/jobs.zst"
+admin_token='e2e-admin-token-0123456789abcdef'
+worker_token='e2e-worker-token-0123456789abcdef'
+printf '%s\n' "${admin_token}" >"${run_dir}/admin.token"
+printf '%s\n' "${worker_token}" >"${run_dir}/worker.token"
 "${run_dir}/tracker" migrate --database-url "${database_url}"
-"${run_dir}/tracker" bootstrap-user --database-url "${database_url}" --user-id worker-e2e --roles worker --machine-token-file "${run_dir}/worker.token"
-"${run_dir}/tracker" put-project --database-url "${database_url}" --project-id project-e2e
-"${run_dir}/tracker" enqueue-source --database-url "${database_url}" --project-id project-e2e --input "${run_dir}/jobs.zst"
+"${run_dir}/tracker" bootstrap-user --database-url "${database_url}" \
+  --user-id admin-e2e --roles admin --machine-token-file "${run_dir}/admin.token"
+"${run_dir}/tracker" bootstrap-user --database-url "${database_url}" \
+  --user-id worker-e2e --roles worker --machine-token-file "${run_dir}/worker.token"
 
 port=$((20000 + RANDOM % 20000))
 base="http://127.0.0.1:${port}"
-"${run_dir}/tracker" serve --listen "127.0.0.1:${port}" --database-url "${database_url}" >"${run_dir}/tracker.log" 2>&1 &
+"${run_dir}/tracker" serve --listen "127.0.0.1:${port}" \
+  --database-url "${database_url}" >"${run_dir}/tracker.log" 2>&1 &
 tracker_pid=$!
-for _ in $(seq 1 200); do curl --fail --silent "${base}/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
+for _ in $(seq 1 200); do
+  if curl --fail --silent "${base}/healthz" >"${run_dir}/health.json" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+kill -0 "${tracker_pid}"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"status":"ok"}' "${run_dir}/health.json"
 
-claim=$(curl --fail --silent --show-error -H 'Authorization: Bearer e2e-worker-token-0123456789abcdef' -H 'Content-Type: application/json' -d '{"worker_id":"worker-e2e","max_jobs":1,"lease_seconds":300,"accept_types":[]}' "${base}/api/v1/projects/project-e2e/jobs/claim")
-job_id=$(printf '%s' "${claim}" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-attempt_id=$(printf '%s' "${claim}" | sed -n 's/.*"attempt_id":"\([^"]*\)".*/\1/p')
-test -n "${job_id}" && test -n "${attempt_id}"
+admin=(-H "Authorization: Bearer ${admin_token}")
+worker=(-H "Authorization: Bearer ${worker_token}")
+json=(-H 'Content-Type: application/json')
+
+# A worker credential must not cross the management boundary.
+status=$(curl --silent --output "${run_dir}/forbidden.json" --write-out '%{http_code}' \
+  "${worker[@]}" "${base}/api/v1/admin/projects")
+test "${status}" = 403
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"] == "permission_denied"' "${run_dir}/forbidden.json"
+
+# Create a project and enqueue a mixed workload entirely through the admin API.
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
+  -X PUT -d '{"status":"active"}' \
+  "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/project.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
+
+jobs='{"jobs":[
+  {"id":"seed-1","url":"https://example.test/seed/1","type":"seed","via":null,"attr":{"group":"seed"}},
+  {"id":"seed-2","url":"https://example.test/seed/2","type":"seed","via":null,"attr":{"group":"seed"}},
+  {"id":"asset-1","url":"https://example.test/asset/1","type":"asset","via":"https://example.test/seed/1","attr":{"group":"asset"}},
+  {"id":"asset-2","url":"https://example.test/asset/2","type":"asset","via":"https://example.test/seed/1","attr":{"group":"asset"}}
+]}'
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -d "${jobs}" \
+  "${base}/api/v1/admin/projects/project-e2e/jobs" >"${run_dir}/enqueue.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["submitted"] == 4 and r["inserted"] == 4' "${run_dir}/enqueue.json"
+
+# The same immutable batch is idempotent.
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -d "${jobs}" \
+  "${base}/api/v1/admin/projects/project-e2e/jobs" >"${run_dir}/reenqueue.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["submitted"] == 4 and r["inserted"] == 0' "${run_dir}/reenqueue.json"
+
+curl --fail --silent --show-error "${admin[@]}" \
+  "${base}/api/v1/admin/projects" >"${run_dir}/projects.json"
+python3 -c 'import json,sys; ps=json.load(open(sys.argv[1]))["projects"]; assert len(ps) == 1 and ps[0]["job_counts"]["todo"] == 4' "${run_dir}/projects.json"
+
+# Claim only seeds, extend one lease, complete one, and retry the other.
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  -d '{"worker_id":"worker-e2e","max_jobs":2,"lease_seconds":300,"accept_types":["seed"]}' \
+  "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/seeds.json"
+read -r seed1 attempt1 seed2 attempt2 < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==2 and all(x["type"]=="seed" for x in j); print(j[0]["id"],j[0]["attempt_id"],j[1]["id"],j[1]["attempt_id"])' "${run_dir}/seeds.json")
+
+printf '{"worker_id":"worker-e2e","extend_seconds":120,"items":[{"job_id":"%s","attempt_id":"%s"}]}' \
+  "${seed1}" "${attempt1}" >"${run_dir}/extend-request.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  --data-binary "@${run_dir}/extend-request.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/extend-lease" >"${run_dir}/extend.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "wip" and r["lease_expires_at"] > 0' "${run_dir}/extend.json"
+
 accepted_at=$(date +%s)
-complete=$(curl --fail --silent --show-error -H 'Authorization: Bearer e2e-worker-token-0123456789abcdef' -H 'Content-Type: application/json' -d "{\"worker_id\":\"worker-e2e\",\"items\":[{\"job_id\":\"${job_id}\",\"attempt_id\":\"${attempt_id}\",\"outcome\":{\"kind\":\"success\",\"code\":200,\"uri\":null,\"meta\":{}},\"warc_receipts\":[{\"id\":\"receipt-e2e\",\"issuer\":\"https://warc.example\",\"object_id\":\"warc-e2e\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size_bytes\":123,\"accepted_at\":${accepted_at},\"signature\":\"test\"}]}]}" "${base}/api/v1/projects/project-e2e/jobs/complete")
-printf '%s' "${complete}" | grep -q '"status":"applied"'
-count=$(docker exec "${container}" psql -U postgres -d hq -Atc "SELECT count(*) FROM tracker_jobs WHERE project_id='project-e2e' AND status='done' AND jsonb_array_length(warc_receipts)=1")
-test "${count}" = 1
-printf 'SavewebHQ E2E passed\n'
+printf '{"worker_id":"worker-e2e","items":[{"job_id":"%s","attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[{"id":"receipt-seed-1","issuer":"https://warc.example","object_id":"warc-seed-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":123,"accepted_at":%s,"signature":"test-signature"}]}]}' \
+  "${seed1}" "${attempt1}" "${accepted_at}" >"${run_dir}/complete-seed.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  --data-binary "@${run_dir}/complete-seed.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-seed-result.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["results"][0]["status"] == "applied"' "${run_dir}/complete-seed-result.json"
+
+printf '{"worker_id":"worker-e2e","items":[{"job_id":"%s","attempt_id":"%s","retryable":true,"error":{"code":"temporary","message":"retry once","details":{}}}]}' \
+  "${seed2}" "${attempt2}" >"${run_dir}/retry-seed.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  --data-binary "@${run_dir}/retry-seed.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/fail" >"${run_dir}/retry-seed-result.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "todo"' "${run_dir}/retry-seed-result.json"
+
+# A late completion from the old attempt must be rejected.
+printf '{"worker_id":"worker-e2e","items":[{"job_id":"%s","attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[]}]}' \
+  "${seed2}" "${attempt2}" >"${run_dir}/stale.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  --data-binary "@${run_dir}/stale.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/stale-result.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "rejected" and r["error"]["code"] == "stale_attempt"' "${run_dir}/stale-result.json"
+
+# Claim assets separately; one succeeds and one is permanently failed.
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  -d '{"worker_id":"worker-e2e","max_jobs":2,"lease_seconds":300,"accept_types":["asset"]}' \
+  "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/assets.json"
+read -r asset1 asset_attempt1 asset2 asset_attempt2 < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==2 and all(x["type"]=="asset" for x in j); print(j[0]["id"],j[0]["attempt_id"],j[1]["id"],j[1]["attempt_id"])' "${run_dir}/assets.json")
+printf '{"worker_id":"worker-e2e","items":[{"job_id":"%s","attempt_id":"%s","retryable":false,"error":{"code":"not_found","message":"permanent","details":{}}}]}' \
+  "${asset1}" "${asset_attempt1}" >"${run_dir}/fail-asset.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${run_dir}/fail-asset.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/fail" >"${run_dir}/fail-asset-result.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "failed"' "${run_dir}/fail-asset-result.json"
+
+printf '{"worker_id":"worker-e2e","items":[{"job_id":"%s","attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[]}]}' \
+  "${asset2}" "${asset_attempt2}" >"${run_dir}/complete-asset.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${run_dir}/complete-asset.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-asset-result.json"
+
+# Reclaim and finish the retryable seed.
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
+  -d '{"worker_id":"worker-e2e","max_jobs":10,"lease_seconds":300,"accept_types":[]}' \
+  "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/retry-claim.json"
+read -r retry_job retry_attempt < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==1; print(j[0]["id"],j[0]["attempt_id"])' "${run_dir}/retry-claim.json")
+test "${retry_job}" = "${seed2}"
+printf '{"worker_id":"worker-e2e","items":[{"job_id":"%s","attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[]}]}' \
+  "${retry_job}" "${retry_attempt}" >"${run_dir}/complete-retry.json"
+curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${run_dir}/complete-retry.json" \
+  "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-retry-result.json"
+
+# Draining stops scheduling, and archived projects reject new jobs.
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"draining"}' \
+  "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/draining.json"
+status=$(curl --silent --output "${run_dir}/draining-claim.json" --write-out '%{http_code}' \
+  "${worker[@]}" "${json[@]}" -d '{"worker_id":"worker-e2e","max_jobs":1,"lease_seconds":30,"accept_types":[]}' \
+  "${base}/api/v1/projects/project-e2e/jobs/claim")
+test "${status}" = 409
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"] == "project_not_active"' "${run_dir}/draining-claim.json"
+
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"archived"}' \
+  "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/archived.json"
+status=$(curl --silent --output "${run_dir}/archived-enqueue.json" --write-out '%{http_code}' \
+  "${admin[@]}" "${json[@]}" -d '{"jobs":[{"id":"late-job","url":"https://example.test/late","type":"seed","via":null,"attr":{}}]}' \
+  "${base}/api/v1/admin/projects/project-e2e/jobs")
+test "${status}" = 409
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"] == "project_not_active"' "${run_dir}/archived-enqueue.json"
+
+curl --fail --silent --show-error "${admin[@]}" \
+  "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/final-project.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["status"] == "archived"; assert p["job_counts"] == {"todo":0,"wip":0,"done":3,"failed":1,"reset_exhausted":0}' "${run_dir}/final-project.json"
+
+database_check=$(docker exec "${container}" psql -U postgres -d hq -Atc \
+  "SELECT count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), count(*) FILTER (WHERE jsonb_array_length(warc_receipts)=1), count(*) FILTER (WHERE attempt_id IS NOT NULL) FROM tracker_jobs WHERE project_id='project-e2e'")
+test "${database_check}" = '3|1|1|0'
+printf 'SavewebHQ admin and scheduling E2E passed\n'

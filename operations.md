@@ -3,7 +3,18 @@
 ## Services
 
 HQ requires PostgreSQL and an HTTPS reverse proxy. It has no object-storage
-credentials and does not require a public endpoint for any worker.
+credentials and does not require a public endpoint for any worker. The web
+administrator does require a public HTTPS URL and a GitHub OAuth App.
+
+Before first startup:
+
+1. Configure the OAuth App callback as
+   `https://hq.saveweb.org/auth/github/callback`.
+2. Set `HQ_GITHUB_CLIENT_ID` and `HQ_PUBLIC_URL` in `.env`.
+3. Put the OAuth client secret in `secrets/github-client.secret` with mode
+   `0600`.
+4. Set `HQ_OAUTH_ADMIN_ORG` and `HQ_OAUTH_ADMIN_TEAM` to the team allowed to
+   administer HQ.
 
 ```bash
 docker compose up -d
@@ -22,6 +33,20 @@ must be monitored separately.
 5. Run `tracker enqueue-source`.
 6. Start workers with the HQ URL, project ID, worker ID, and machine token.
 
+The same setup can be performed over the management backend with an active
+administrator token:
+
+```text
+GET  /api/v1/admin/projects
+PUT  /api/v1/admin/projects/{project_id}
+POST /api/v1/admin/projects/{project_id}/jobs
+```
+
+Worker credentials cannot call these endpoints. Keep administrator tokens out
+of worker deployments and browser storage. The web UI uses an HttpOnly,
+SameSite browser session and CSRF tokens; it never stores the GitHub access
+token or a machine token in the browser.
+
 ## Normal shutdown
 
 Stop workers first if possible, then stop HQ. Attempts that lose their workers
@@ -34,6 +59,8 @@ shutdown does not need to rewrite job state.
 - Test restoration into a separate database.
 - Preserve machine-token files independently; rotating a token invalidates the
   previous value.
+- Preserve the web-session secret to avoid invalidating all browser sessions
+  on routine redeploys. Rotate it to revoke every browser session.
 - WARC Core has a separate backup and recovery plan because HQ stores receipts,
   not WARC bytes.
 

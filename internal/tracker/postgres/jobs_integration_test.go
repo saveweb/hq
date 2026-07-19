@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
 	"testing"
 
@@ -29,11 +30,37 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	}
 
 	const now = int64(1_780_100_000)
+	avatar := "https://avatars.example/admin"
+	admin, err := store.UpsertGitHubAdmin(ctx, tracker.GitHubIdentity{UserID: 42, Login: "hq-admin", AvatarURL: &avatar}, now)
+	if err != nil || admin.ID != "gh_42" || admin.GitHubUserID == nil || *admin.GitHubUserID != 42 || !admin.HasRole(tracker.RoleAdmin) {
+		t.Fatalf("GitHub admin = %+v, %v", admin, err)
+	}
+	sessionHash := sha256.Sum256([]byte("integration-session"))
+	if err := store.CreateWebSession(ctx, admin.ID, sessionHash[:], now, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := store.AuthenticateWebSession(ctx, sessionHash[:], now+1)
+	if err != nil || authenticated.ID != admin.ID || authenticated.GitHubLogin != "hq-admin" {
+		t.Fatalf("authenticated web session = %+v, %v", authenticated, err)
+	}
+	if _, err := store.AuthenticateWebSession(ctx, sessionHash[:], now+3600); err == nil {
+		t.Fatal("expired web session authenticated")
+	}
+	if err := store.DeleteWebSession(ctx, sessionHash[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateWebSession(ctx, sessionHash[:], now+2); err == nil {
+		t.Fatal("deleted web session authenticated")
+	}
 	if err := store.PutUserAndToken(ctx, tracker.User{ID: "queue-worker", Status: tracker.UserStatusActive, Roles: map[string]bool{tracker.RoleWorker: true}}, "queue-worker-token", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "queue-project", Status: tracker.ProjectStatusActive}, now); err != nil {
 		t.Fatal(err)
+	}
+	projects, err := store.ListProjectSummaries(ctx)
+	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
+		t.Fatalf("initial project summaries = %+v, %v", projects, err)
 	}
 	jobs := []protocol.JobSpecV1{{ID: "job-1", URL: "https://example.test/1", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"source": "test"}}, {ID: "job-2", URL: "https://example.test/2", Via: nil}}
 	inserted, err := store.EnqueueProjectJobs(ctx, "queue-project", jobs, now)
@@ -107,5 +134,9 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	counts, err := store.ProjectJobCounts(ctx, "queue-project")
 	if err != nil || counts[protocol.JobStatusDone] != 1 || counts[protocol.JobStatusResetExhausted] != 1 {
 		t.Fatalf("counts = %+v, %v", counts, err)
+	}
+	project, err := store.ProjectSummary(ctx, "queue-project")
+	if err != nil || project.JobCounts[protocol.JobStatusDone] != 1 || project.JobCounts[protocol.JobStatusResetExhausted] != 1 {
+		t.Fatalf("final project summary = %+v, %v", project, err)
 	}
 }

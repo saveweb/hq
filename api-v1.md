@@ -1,8 +1,30 @@
 # SavewebHQ Project Queue API v1
 
 All endpoints require `Authorization: Bearer <machine-token>`. The token owner
-must be active and have the `worker` role. JSON requests reject unknown fields.
-All timestamps are signed 64-bit UNIX seconds.
+must be active and have the role required by the route: `admin` for management
+and `worker` for scheduling. JSON requests reject unknown fields. All
+timestamps are signed 64-bit UNIX seconds.
+
+## Administration
+
+Administration uses the same machine-token authentication. The token owner
+must be active and have the `admin` role.
+
+```text
+GET  /api/v1/admin/projects
+GET  /api/v1/admin/projects/{project_id}
+PUT  /api/v1/admin/projects/{project_id}
+POST /api/v1/admin/projects/{project_id}/jobs
+```
+
+`PUT` creates a project or changes its status to `active`, `draining`, or
+`archived`. Project responses include `todo`, `wip`, `done`, `failed`, and
+`reset_exhausted` counts. The jobs endpoint accepts 1-256 JobSpecs and uses the
+same immutable, idempotent identity rules as source-file import.
+
+These endpoints also back the same-origin management UI. The UI uses a
+separate HttpOnly browser session established through GitHub OAuth; machine
+tokens remain the only authentication accepted by `/api/v1/**` routes.
 
 ## Claim
 

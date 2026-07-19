@@ -108,3 +108,29 @@ type ItemResult struct {
 type BatchResultResponse struct {
 	Results []ItemResult `json:"results"`
 }
+
+type AdminProjectRequest struct {
+	Status string `json:"status"`
+}
+
+type AdminProjectSummary struct {
+	ID        string           `json:"id"`
+	Status    string           `json:"status"`
+	JobCounts map[string]int64 `json:"job_counts"`
+	CreatedAt int64            `json:"created_at"`
+	UpdatedAt int64            `json:"updated_at"`
+}
+
+type AdminProjectListResponse struct {
+	Projects []AdminProjectSummary `json:"projects"`
+}
+
+type AdminEnqueueJobsRequest struct {
+	Jobs []JobSpecV1 `json:"jobs"`
+}
+
+type AdminEnqueueJobsResponse struct {
+	ProjectID string `json:"project_id"`
+	Submitted int    `json:"submitted"`
+	Inserted  int64  `json:"inserted"`
+}

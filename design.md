@@ -84,13 +84,21 @@ its durable retry queue and operator-visible delivery state.
 
 ## 5. Authentication
 
-The first deployment uses administrator-created machine tokens. A token maps
-to an active user with the `worker` role. `worker_id` identifies a process for
-attempt ownership and logs; it is not a separately leased agent or routing
-identity.
+Workers and automation use administrator-created machine tokens. A token maps
+to an active user with an explicit `worker` or `admin` role. `worker_id`
+identifies a process for attempt ownership and logs; it is not a separately
+leased agent or routing identity.
 
-GitHub OAuth, team synchronization, shard-owner roles, agent registration, and
-session heartbeat are not required by the production queue API.
+Human administrators use GitHub OAuth with state and PKCE. HQ requests
+`read:org`, fetches the GitHub identity, and verifies active membership in one
+configured organization team at every login. The GitHub access token is then
+discarded. HQ stores only a hash of a random, short-lived browser session token
+and requires a derived CSRF token for every state-changing web request.
+
+The web UI and machine API share project/job services but not credentials:
+browser sessions never authorize `/api/v1/**`, and machine tokens are never
+placed in browser storage. Shard-owner roles, agent registration, and session
+heartbeat remain outside the production queue API.
 
 ## 6. Source import
 
