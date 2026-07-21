@@ -64,9 +64,9 @@ GitHub OAuth is also the worker registration entry point. Accounts outside the
 configured administrator team are recorded as pending workers, receive no Web
 Dashboard session, and cannot run jobs until an administrator activates the
 account. The worker then signs in again at `/worker` to generate its own machine
-token. The administrator team remains the source of truth: deleting a team
-administrator locally does not prevent OAuth from recreating it on the next
-login.
+token and can view it again on later visits. The administrator team remains the
+source of truth: deleting a team administrator locally does not prevent OAuth
+from recreating it on the next login.
 
 ## Normal shutdown
 
@@ -78,8 +78,8 @@ shutdown does not need to rewrite job state.
 
 - Back up PostgreSQL regularly.
 - Test restoration into a separate database.
-- Preserve machine-token files independently; rotating a token invalidates the
-  previous value.
+- Machine tokens are included in PostgreSQL backups and can be viewed again in
+  the Web Dashboard.
 - Preserve the web-session secret to avoid invalidating all browser sessions
   on routine redeploys. Rotate it to revoke every browser session.
 - WARC Core has a separate backup and recovery plan because HQ stores receipts,

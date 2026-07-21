@@ -126,8 +126,8 @@ The administration API and Web Dashboard also import packed source files,
 manage user creation, deletion, and machine-token rotation, inspect current job
 state, requeue terminal failures, and delete non-WIP jobs or projects without
 WIP work. New machine tokens are displayed only in the rotation response or
-one-time Web page. Active workers can generate, rotate, or revoke their own
-machine token from the OAuth-authenticated worker page.
+the Web Dashboard. Active workers can view, generate, rotate, or revoke their
+own machine token from the OAuth-authenticated worker page.
 
 ## Worker API
 

@@ -63,11 +63,20 @@ paths:
         default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/users/{user_id}/machine-token:
     parameters: [{$ref: '#/components/parameters/UserID'}]
+    get:
+      operationId: getAdminMachineToken
+      responses:
+        '200':
+          description: Current machine token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminMachineTokenResponse'}
+        default: {$ref: '#/components/responses/Error'}
     post:
       operationId: rotateAdminMachineToken
       responses:
         '201':
-          description: New token, returned once
+          description: New token
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AdminMachineTokenResponse'}
@@ -292,13 +301,14 @@ components:
     AdminUserSummary:
       type: object
       additionalProperties: false
-      required: [id, status, roles, machine_token_active, created_at, updated_at]
+      required: [id, status, roles, machine_token_active, machine_token_viewable, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         github_login: {type: string}
         status: {type: string, enum: [pending, active, suspended]}
         roles: {type: array, items: {type: string, enum: [admin, worker]}}
         machine_token_active: {type: boolean}
+        machine_token_viewable: {type: boolean}
         created_at: {type: integer, format: int64}
         updated_at: {type: integer, format: int64}
     AdminUserListResponse:

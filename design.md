@@ -122,9 +122,10 @@ heartbeat remain outside the production queue API.
 
 Administrators can manage user status and roles, delete users, rotate or revoke
 machine tokens, inspect current job state, requeue terminal failures, and delete
-jobs or projects that have no active attempt. Token rotation returns plaintext
-exactly once; HQ otherwise stores only its hash. HQ does not synthesize attempt
-history: the administration API exposes the current row and its terminal data.
+jobs or projects that have no active attempt. HQ stores each machine token in
+plain text for repeated display and stores its digest for indexed
+authentication. HQ does not synthesize attempt history: the administration API
+exposes the current row and its terminal data.
 
 ## 6. Source import
 

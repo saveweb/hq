@@ -151,13 +151,14 @@ type AdminUserRequest struct {
 }
 
 type AdminUserSummary struct {
-	ID                 string   `json:"id"`
-	GitHubLogin        string   `json:"github_login,omitempty"`
-	Status             string   `json:"status"`
-	Roles              []string `json:"roles"`
-	MachineTokenActive bool     `json:"machine_token_active"`
-	CreatedAt          int64    `json:"created_at"`
-	UpdatedAt          int64    `json:"updated_at"`
+	ID                   string   `json:"id"`
+	GitHubLogin          string   `json:"github_login,omitempty"`
+	Status               string   `json:"status"`
+	Roles                []string `json:"roles"`
+	MachineTokenActive   bool     `json:"machine_token_active"`
+	MachineTokenViewable bool     `json:"machine_token_viewable"`
+	CreatedAt            int64    `json:"created_at"`
+	UpdatedAt            int64    `json:"updated_at"`
 }
 
 type AdminUserListResponse struct {

@@ -84,6 +84,7 @@ func Register(server *echo.Echo, store *postgres.Store, now func() int64) {
 	server.GET("/api/v1/admin/users", h.listUsers)
 	server.PUT("/api/v1/admin/users/:user_id", h.putUser)
 	server.DELETE("/api/v1/admin/users/:user_id", h.deleteUser)
+	server.GET("/api/v1/admin/users/:user_id/machine-token", h.getMachineToken)
 	server.POST("/api/v1/admin/users/:user_id/machine-token", h.rotateMachineToken)
 	server.DELETE("/api/v1/admin/users/:user_id/machine-token", h.revokeMachineToken)
 	server.GET("/api/v1/admin/projects/:project_id", h.getProject)
@@ -150,6 +151,21 @@ func (h *handler) rotateMachineToken(ctx *echo.Context) error {
 		return h.writeError(ctx, err)
 	}
 	return ctx.JSON(http.StatusCreated, protocol.AdminMachineTokenResponse{UserID: userID, Token: token})
+}
+
+func (h *handler) getMachineToken(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	userID := ctx.Param("user_id")
+	token, active, err := h.store.MachineToken(ctx.Request().Context(), userID)
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	if !active || token == "" {
+		return h.writeError(ctx, &tracker.Error{Code: protocol.ErrorNotFound, Message: "machine token not found"})
+	}
+	return ctx.JSON(http.StatusOK, protocol.AdminMachineTokenResponse{UserID: userID, Token: token})
 }
 
 func (h *handler) revokeMachineToken(ctx *echo.Context) error {

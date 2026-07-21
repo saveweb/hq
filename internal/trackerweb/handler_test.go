@@ -24,13 +24,14 @@ type fakeStore struct {
 	enqueued     []protocol.JobSpecV1
 	jobs         map[string][]protocol.AdminJob
 	users        map[string]protocol.AdminUserSummary
+	tokens       map[string]string
 	deleted      bool
 	upsertedID   int64
 	registeredID int64
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}}
+	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}, tokens: map[string]string{}}
 }
 
 func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
@@ -115,8 +116,12 @@ func (s *fakeStore) ListUsers(context.Context) ([]protocol.AdminUserSummary, err
 	}
 	return result, nil
 }
-func (s *fakeStore) MachineTokenActive(_ context.Context, id string) (bool, error) {
-	return s.users[id].MachineTokenActive, nil
+func (s *fakeStore) MachineToken(_ context.Context, id string) (string, bool, error) {
+	active := s.users[id].MachineTokenActive
+	if !active {
+		return "", false, nil
+	}
+	return s.tokens[id], true, nil
 }
 func (s *fakeStore) PutUser(_ context.Context, id, status string, roles []string, _ int64) error {
 	s.users[id] = protocol.AdminUserSummary{ID: id, Status: status, Roles: roles}
@@ -126,15 +131,16 @@ func (s *fakeStore) DeleteUser(_ context.Context, id string) error {
 	delete(s.users, id)
 	return nil
 }
-func (s *fakeStore) RotateMachineToken(_ context.Context, id, _ string, _ int64) error {
+func (s *fakeStore) RotateMachineToken(_ context.Context, id, token string, _ int64) error {
 	user := s.users[id]
-	user.ID, user.MachineTokenActive = id, true
+	user.ID, user.MachineTokenActive, user.MachineTokenViewable = id, true, true
 	s.users[id] = user
+	s.tokens[id] = token
 	return nil
 }
 func (s *fakeStore) RevokeMachineToken(_ context.Context, id string, _ int64) error {
 	user := s.users[id]
-	user.MachineTokenActive = false
+	user.MachineTokenActive, user.MachineTokenViewable = false, false
 	s.users[id] = user
 	return nil
 }
@@ -268,6 +274,10 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	if token.Code != http.StatusOK || !strings.Contains(token.Body.String(), "hq_") || !store.users["worker-web"].MachineTokenActive {
 		t.Fatalf("rotate token = %d %q", token.Code, token.Body.String())
 	}
+	viewToken := request(t, server, http.MethodGet, "/admin/users/worker-web/token", "", sessionCookie)
+	if viewToken.Code != http.StatusOK || !strings.Contains(viewToken.Body.String(), store.tokens["worker-web"]) {
+		t.Fatalf("view token = %d %q", viewToken.Code, viewToken.Body.String())
+	}
 	deletedUser := postForm(t, server, "/admin/users/worker-web/delete", url.Values{"csrf": {csrf}}, sessionCookie)
 	if deletedUser.Code != http.StatusSeeOther {
 		t.Fatalf("delete user = %d", deletedUser.Code)
@@ -332,6 +342,11 @@ func TestActiveWorkerManagesOwnMachineToken(t *testing.T) {
 	token := postForm(t, server, "/worker/token", url.Values{"csrf": {csrf}}, sessionCookie)
 	if token.Code != http.StatusOK || !strings.Contains(token.Body.String(), "hq_") || !store.users["gh_42"].MachineTokenActive {
 		t.Fatalf("worker token = %d %q", token.Code, token.Body.String())
+	}
+	portal = request(t, server, http.MethodGet, "/worker", "", sessionCookie)
+	if portal.Code != http.StatusOK || !strings.Contains(portal.Body.String(), "View token") ||
+		!strings.Contains(portal.Body.String(), store.tokens["gh_42"]) {
+		t.Fatalf("worker token view = %d %q", portal.Code, portal.Body.String())
 	}
 	admin := request(t, server, http.MethodGet, "/admin", "", sessionCookie)
 	if admin.Code != http.StatusForbidden {

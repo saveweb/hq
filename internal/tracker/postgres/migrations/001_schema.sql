@@ -20,9 +20,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS tracker_users_github_id_idx
 CREATE TABLE IF NOT EXISTS tracker_machine_tokens (
     user_id text PRIMARY KEY REFERENCES tracker_users(id) ON DELETE CASCADE,
     token_hash bytea NOT NULL UNIQUE,
+    token text,
     created_at bigint NOT NULL,
     revoked_at bigint
 );
+ALTER TABLE tracker_machine_tokens ADD COLUMN IF NOT EXISTS token text;
 
 CREATE TABLE IF NOT EXISTS tracker_web_sessions (
     token_hash bytea PRIMARY KEY,

@@ -17,6 +17,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]protocol.AdminUserSummary, err
 	rows, err := s.pool.Query(ctx, `
 		SELECT u.id,COALESCE(u.github_login,''),u.status,u.roles,
 			EXISTS(SELECT 1 FROM tracker_machine_tokens mt WHERE mt.user_id=u.id AND mt.revoked_at IS NULL),
+			EXISTS(SELECT 1 FROM tracker_machine_tokens mt WHERE mt.user_id=u.id AND mt.revoked_at IS NULL AND mt.token IS NOT NULL),
 			u.created_at,u.updated_at
 		FROM tracker_users u ORDER BY u.id
 	`)
@@ -27,7 +28,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]protocol.AdminUserSummary, err
 	result := []protocol.AdminUserSummary{}
 	for rows.Next() {
 		var item protocol.AdminUserSummary
-		if err := rows.Scan(&item.ID, &item.GitHubLogin, &item.Status, &item.Roles, &item.MachineTokenActive, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.GitHubLogin, &item.Status, &item.Roles, &item.MachineTokenActive, &item.MachineTokenViewable, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, storeError("list users", err)
 		}
 		result = append(result, item)
@@ -35,15 +36,16 @@ func (s *Store) ListUsers(ctx context.Context) ([]protocol.AdminUserSummary, err
 	return result, storeError("list users", rows.Err())
 }
 
-func (s *Store) MachineTokenActive(ctx context.Context, userID string) (bool, error) {
+func (s *Store) MachineToken(ctx context.Context, userID string) (string, bool, error) {
 	if !queue.ValidateIdentifier(userID) {
-		return false, tracker.InvalidRequest("invalid user ID")
+		return "", false, tracker.InvalidRequest("invalid user ID")
 	}
-	var active bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM tracker_machine_tokens WHERE user_id=$1 AND revoked_at IS NULL
-	)`, userID).Scan(&active)
-	return active, storeError("get machine token state", err)
+	var token string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(token,'') FROM tracker_machine_tokens WHERE user_id=$1 AND revoked_at IS NULL`, userID).Scan(&token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	return token, err == nil, storeError("get machine token", err)
 }
 
 func (s *Store) PutUser(ctx context.Context, userID, status string, roles []string, now int64) error {
@@ -85,10 +87,10 @@ func (s *Store) RotateMachineToken(ctx context.Context, userID, token string, no
 		return tracker.InvalidRequest("invalid user or token")
 	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO tracker_machine_tokens(user_id,token_hash,created_at,revoked_at)
-		SELECT id,$2,$3,NULL FROM tracker_users WHERE id=$1
-		ON CONFLICT(user_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,created_at=EXCLUDED.created_at,revoked_at=NULL
-	`, userID, tokenDigest(token), now)
+		INSERT INTO tracker_machine_tokens(user_id,token_hash,token,created_at,revoked_at)
+		SELECT id,$2,$3,$4,NULL FROM tracker_users WHERE id=$1
+		ON CONFLICT(user_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,token=EXCLUDED.token,created_at=EXCLUDED.created_at,revoked_at=NULL
+	`, userID, tokenDigest(token), token, now)
 	if err != nil {
 		return storeError("rotate machine token", err)
 	}

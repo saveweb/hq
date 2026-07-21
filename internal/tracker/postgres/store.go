@@ -106,7 +106,7 @@ func (s *Store) PutUserAndToken(ctx context.Context, user tracker.User, token st
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO tracker_machine_tokens(user_id,token_hash,created_at,revoked_at) VALUES($1,$2,$3,NULL) ON CONFLICT(user_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,created_at=EXCLUDED.created_at,revoked_at=NULL`, user.ID, tokenDigest(token), now)
+		_, err = tx.Exec(ctx, `INSERT INTO tracker_machine_tokens(user_id,token_hash,token,created_at,revoked_at) VALUES($1,$2,$3,$4,NULL) ON CONFLICT(user_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,token=EXCLUDED.token,created_at=EXCLUDED.created_at,revoked_at=NULL`, user.ID, tokenDigest(token), token, now)
 		return err
 	})
 }

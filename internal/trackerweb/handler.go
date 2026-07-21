@@ -49,7 +49,7 @@ type Store interface {
 	PutProject(context.Context, tracker.Project, int64) error
 	EnqueueProjectJobs(context.Context, string, []protocol.JobSpecV1, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
-	MachineTokenActive(context.Context, string) (bool, error)
+	MachineToken(context.Context, string) (string, bool, error)
 	PutUser(context.Context, string, string, []string, int64) error
 	DeleteUser(context.Context, string) error
 	RotateMachineToken(context.Context, string, string, int64) error
@@ -130,6 +130,7 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/admin/users", h.users)
 	server.POST("/admin/users", h.putUser)
 	server.POST("/admin/users/:user_id/delete", h.deleteUser)
+	server.GET("/admin/users/:user_id/token", h.viewUserToken)
 	server.POST("/admin/users/:user_id/token", h.rotateUserToken)
 	server.POST("/admin/users/:user_id/token/revoke", h.revokeUserToken)
 	server.POST("/admin/projects", h.createProject)
@@ -255,12 +256,12 @@ func (h *Handler) workerPortal(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
-	tokenActive, err := h.store.MachineTokenActive(ctx.Request().Context(), user.ID)
+	token, tokenActive, err := h.store.MachineToken(ctx.Request().Context(), user.ID)
 	if err != nil {
 		return h.internal(ctx, err)
 	}
 	return render(ctx, http.StatusOK, "worker", map[string]any{
-		"User": user, "TokenActive": tokenActive, "CSRF": h.csrfToken(sessionToken),
+		"User": user, "Token": token, "TokenActive": tokenActive, "CSRF": h.csrfToken(sessionToken),
 	})
 }
 
@@ -385,6 +386,25 @@ func (h *Handler) rotateUserToken(ctx *echo.Context) error {
 	}
 	h.webHeaders(ctx.Response().Header())
 	return render(ctx, http.StatusOK, "token", map[string]any{"User": user, "UserID": userID, "Token": token, "CSRF": h.csrfToken(sessionToken)})
+}
+
+func (h *Handler) viewUserToken(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, sessionToken, ok := h.requireAdmin(ctx)
+	if !ok {
+		return nil
+	}
+	userID := ctx.Param("user_id")
+	token, active, err := h.store.MachineToken(ctx.Request().Context(), userID)
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	if !active || token == "" {
+		return h.pageError(ctx, http.StatusNotFound, "Machine token is not available")
+	}
+	return render(ctx, http.StatusOK, "token", map[string]any{
+		"User": user, "UserID": userID, "Token": token, "CSRF": h.csrfToken(sessionToken),
+	})
 }
 
 func (h *Handler) revokeUserToken(ctx *echo.Context) error {
