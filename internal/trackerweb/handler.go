@@ -40,6 +40,7 @@ const (
 
 type Store interface {
 	UpsertGitHubAdmin(context.Context, tracker.GitHubIdentity, int64) (tracker.User, error)
+	UpsertGitHubPendingWorker(context.Context, tracker.GitHubIdentity, int64) (tracker.User, error)
 	CreateWebSession(context.Context, string, []byte, int64, int64) error
 	AuthenticateWebSession(context.Context, []byte, int64) (tracker.User, error)
 	DeleteWebSession(context.Context, []byte) error
@@ -49,6 +50,7 @@ type Store interface {
 	EnqueueProjectJobs(context.Context, string, []protocol.JobSpecV1, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
 	PutUser(context.Context, string, string, []string, int64) error
+	DeleteUser(context.Context, string) error
 	RotateMachineToken(context.Context, string, string, int64) error
 	RevokeMachineToken(context.Context, string, int64) error
 	DeleteProject(context.Context, string) error
@@ -123,6 +125,7 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/admin", h.dashboard)
 	server.GET("/admin/users", h.users)
 	server.POST("/admin/users", h.putUser)
+	server.POST("/admin/users/:user_id/delete", h.deleteUser)
 	server.POST("/admin/users/:user_id/token", h.rotateUserToken)
 	server.POST("/admin/users/:user_id/token/revoke", h.revokeUserToken)
 	server.POST("/admin/projects", h.createProject)
@@ -204,10 +207,14 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 		h.logger.Warn("GitHub team membership lookup failed", "error", err)
 		return h.pageError(ctx, http.StatusBadGateway, "GitHub team membership lookup failed")
 	}
-	if !member {
-		return h.pageError(ctx, http.StatusForbidden, "GitHub account is not authorized for HQ administration")
-	}
 	now := h.clock()
+	if !member {
+		user, err := h.store.UpsertGitHubPendingWorker(requestContext, identity, now)
+		if err != nil {
+			return h.internal(ctx, err)
+		}
+		return render(ctx, http.StatusOK, "worker-registration", map[string]any{"User": user})
+	}
 	user, err := h.store.UpsertGitHubAdmin(requestContext, identity, now)
 	if err != nil {
 		return h.internal(ctx, err)
@@ -286,6 +293,17 @@ func (h *Handler) putUser(ctx *echo.Context) error {
 	}
 	if err := h.store.PutUser(ctx.Request().Context(), ctx.FormValue("user_id"), ctx.FormValue("status"), ctx.Request().Form["roles"], h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "User update was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/users")
+}
+
+func (h *Handler) deleteUser(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	if err := h.store.DeleteUser(ctx.Request().Context(), ctx.Param("user_id")); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "User deletion was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/users")
 }

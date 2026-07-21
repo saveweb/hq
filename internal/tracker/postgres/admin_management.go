@@ -55,6 +55,20 @@ func (s *Store) PutUser(ctx context.Context, userID, status string, roles []stri
 	return storeError("put user", err)
 }
 
+func (s *Store) DeleteUser(ctx context.Context, userID string) error {
+	if !queue.ValidateIdentifier(userID) {
+		return tracker.InvalidRequest("invalid user ID")
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM tracker_users WHERE id=$1`, userID)
+	if err != nil {
+		return storeError("delete user", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "user not found"}
+	}
+	return nil
+}
+
 func (s *Store) RotateMachineToken(ctx context.Context, userID, token string, now int64) error {
 	if !queue.ValidateIdentifier(userID) || token == "" {
 		return tracker.InvalidRequest("invalid user or token")

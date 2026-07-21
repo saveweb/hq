@@ -46,11 +46,11 @@ POST /api/v1/admin/projects/{project_id}/jobs
 POST /api/v1/admin/projects/{project_id}/source
 ```
 
-Routine remote administration also supports user status and roles, machine
-token rotation or revocation, compressed source import, paginated job
-inspection, terminal-failure requeue, and deletion of non-WIP jobs. Bootstrap,
-migrations, secret generation, and source pack/merge remain local operational
-commands.
+Routine remote administration also supports user status and roles, user
+deletion, machine-token rotation or revocation, compressed source import,
+paginated job inspection, terminal-failure requeue, and deletion of non-WIP
+jobs. Bootstrap, migrations, secret generation, and source pack/merge remain
+local operational commands.
 
 The Web Dashboard exposes the same identity-mode selection when creating a
 project and shows the fixed mode on project lists and detail pages.
@@ -59,6 +59,13 @@ Worker credentials cannot call these endpoints. Keep administrator tokens out
 of worker deployments and browser storage. The web UI uses an HttpOnly,
 SameSite browser session and CSRF tokens; it never stores the GitHub access
 token or a machine token in the browser.
+
+GitHub OAuth is also the worker registration entry point. Accounts outside the
+configured administrator team are recorded as pending workers, receive no Web
+Dashboard session, and cannot run jobs until an administrator activates the
+account and issues a machine token. The administrator team remains the source
+of truth: deleting a team administrator locally does not prevent OAuth from
+recreating it on the next login.
 
 ## Normal shutdown
 

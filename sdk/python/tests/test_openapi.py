@@ -19,7 +19,7 @@ def test_openapi_contract_has_all_v1_operations() -> None:
         "/healthz": {"get"},
         "/api/v1/admin/projects": {"get"},
         "/api/v1/admin/users": {"get"},
-        "/api/v1/admin/users/{user_id}": {"put"},
+        "/api/v1/admin/users/{user_id}": {"put", "delete"},
         "/api/v1/admin/users/{user_id}/machine-token": {"post", "delete"},
         "/api/v1/admin/projects/{project_id}": {"get", "put", "delete"},
         "/api/v1/admin/projects/{project_id}/jobs": {"get", "post"},

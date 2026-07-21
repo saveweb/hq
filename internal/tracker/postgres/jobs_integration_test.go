@@ -35,6 +35,17 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err != nil || admin.ID != "gh_42" || admin.GitHubUserID == nil || *admin.GitHubUserID != 42 || !admin.HasRole(tracker.RoleAdmin) {
 		t.Fatalf("GitHub admin = %+v, %v", admin, err)
 	}
+	pending, err := store.UpsertGitHubPendingWorker(ctx, tracker.GitHubIdentity{UserID: 43, Login: "new-worker"}, now)
+	if err != nil || pending.ID != "gh_43" || pending.Status != tracker.UserStatusPending || !pending.HasRole(tracker.RoleWorker) {
+		t.Fatalf("GitHub pending worker = %+v, %v", pending, err)
+	}
+	if err := store.PutUser(ctx, pending.ID, tracker.UserStatusActive, []string{tracker.RoleWorker}, now+1); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.UpsertGitHubPendingWorker(ctx, tracker.GitHubIdentity{UserID: 43, Login: "renamed-worker"}, now+2)
+	if err != nil || pending.Status != tracker.UserStatusActive || !pending.HasRole(tracker.RoleWorker) || pending.GitHubLogin != "renamed-worker" {
+		t.Fatalf("returning GitHub worker = %+v, %v", pending, err)
+	}
 	sessionHash := sha256.Sum256([]byte("integration-session"))
 	if err := store.CreateWebSession(ctx, admin.ID, sessionHash[:], now, now+3600); err != nil {
 		t.Fatal(err)
@@ -73,6 +84,25 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	}
 	if _, err := store.AuthenticateMachineToken(ctx, "managed-token"); err == nil {
 		t.Fatal("revoked token authenticated")
+	}
+	if err := store.RotateMachineToken(ctx, pending.ID, "pending-worker-token", now+3); err != nil {
+		t.Fatal(err)
+	}
+	pendingSessionHash := sha256.Sum256([]byte("pending-worker-session"))
+	if err := store.CreateWebSession(ctx, pending.ID, pendingSessionHash[:], now+3, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteUser(ctx, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateMachineToken(ctx, "pending-worker-token"); err == nil {
+		t.Fatal("deleted user's token authenticated")
+	}
+	if _, err := store.AuthenticateWebSession(ctx, pendingSessionHash[:], now+4); err == nil {
+		t.Fatal("deleted user's web session authenticated")
+	}
+	if err := store.DeleteUser(ctx, pending.ID); !tracker.IsCode(err, protocol.ErrorNotFound) {
+		t.Fatalf("delete missing user = %v", err)
 	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "queue-project", Status: tracker.ProjectStatusActive}, now); err != nil {
 		t.Fatal(err)

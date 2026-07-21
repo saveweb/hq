@@ -23,6 +23,7 @@ DELETE /api/v1/admin/projects/{project_id}/jobs/{job_id}
 DELETE /api/v1/admin/projects/{project_id}
 GET  /api/v1/admin/users
 PUT  /api/v1/admin/users/{user_id}
+DELETE /api/v1/admin/users/{user_id}
 POST /api/v1/admin/users/{user_id}/machine-token
 DELETE /api/v1/admin/users/{user_id}/machine-token
 ```
@@ -59,12 +60,18 @@ cannot be deleted, and projects with WIP jobs cannot be deleted.
 User management creates or updates `pending`, `active`, or `suspended` users
 with explicit `admin` and `worker` roles. Token rotation invalidates the old
 machine token and returns the replacement exactly once; revocation removes
-machine API access. The initial administrator must still be bootstrapped from
-the CLI because HTTP administration itself requires an administrator token.
+machine API access. Deleting a user also deletes its machine token and browser
+sessions. Deleting a GitHub team administrator is temporary while that account
+remains in the configured team: its next OAuth login recreates it from the team
+source of truth. The initial machine-API administrator must still be bootstrapped
+from the CLI because HTTP administration itself requires an administrator token.
 
 These endpoints also back the same-origin management UI. The UI uses a
 separate HttpOnly browser session established through GitHub OAuth; machine
 tokens remain the only authentication accepted by `/api/v1/**` routes.
+OAuth users outside the configured administrator team are registered as
+`pending` workers without a browser session. An administrator must activate the
+user and issue a machine token before it can call worker endpoints.
 
 ## Claim
 

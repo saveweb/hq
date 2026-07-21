@@ -14,8 +14,8 @@ import (
 const webUserColumns = `id,github_user_id,COALESCE(github_login,''),github_avatar_url,status,roles,last_login_at`
 
 func (s *Store) UpsertGitHubAdmin(ctx context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
-	if identity.UserID < 1 || identity.Login == "" || len(identity.Login) > 255 || (identity.AvatarURL != nil && len(*identity.AvatarURL) > 2048) {
-		return tracker.User{}, fmt.Errorf("tracker postgres: invalid GitHub identity")
+	if err := validateGitHubIdentity(identity); err != nil {
+		return tracker.User{}, err
 	}
 	roles := []string{tracker.RoleAdmin}
 	var user tracker.User
@@ -44,6 +44,33 @@ func (s *Store) UpsertGitHubAdmin(ctx context.Context, identity tracker.GitHubId
 		return tracker.User{}, storeError("upsert GitHub admin", err)
 	}
 	return user, nil
+}
+
+func (s *Store) UpsertGitHubPendingWorker(ctx context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
+	if err := validateGitHubIdentity(identity); err != nil {
+		return tracker.User{}, err
+	}
+	userID := "gh_" + strconv.FormatInt(identity.UserID, 10)
+	roles := []string{tracker.RoleWorker}
+	user, err := scanWebUser(s.pool.QueryRow(ctx, `
+		INSERT INTO tracker_users(id,github_user_id,github_login,github_avatar_url,status,roles,last_login_at,created_at,updated_at)
+		VALUES($1,$2,$3,$4,'pending',$5,$6,$6,$6)
+		ON CONFLICT (github_user_id) WHERE github_user_id IS NOT NULL DO UPDATE
+		SET github_login=EXCLUDED.github_login,github_avatar_url=EXCLUDED.github_avatar_url,
+			last_login_at=EXCLUDED.last_login_at,updated_at=EXCLUDED.updated_at
+		RETURNING `+webUserColumns,
+		userID, identity.UserID, identity.Login, identity.AvatarURL, roles, now))
+	if err != nil {
+		return tracker.User{}, storeError("upsert GitHub pending worker", err)
+	}
+	return user, nil
+}
+
+func validateGitHubIdentity(identity tracker.GitHubIdentity) error {
+	if identity.UserID < 1 || identity.Login == "" || len(identity.Login) > 255 || (identity.AvatarURL != nil && len(*identity.AvatarURL) > 2048) {
+		return fmt.Errorf("tracker postgres: invalid GitHub identity")
+	}
+	return nil
 }
 
 func (s *Store) CreateWebSession(ctx context.Context, userID string, tokenHash []byte, now, expiresAt int64) error {

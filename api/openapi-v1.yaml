@@ -55,6 +55,12 @@ paths:
       responses:
         '204': {description: User created or updated}
         default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteAdminUser
+      description: Deletes the user and cascades to its machine token and web sessions.
+      responses:
+        '204': {description: User deleted}
+        default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/users/{user_id}/machine-token:
     parameters: [{$ref: '#/components/parameters/UserID'}]
     post:

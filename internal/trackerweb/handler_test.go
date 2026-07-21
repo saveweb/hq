@@ -18,14 +18,15 @@ import (
 )
 
 type fakeStore struct {
-	user       tracker.User
-	sessions   map[string]bool
-	projects   map[string]protocol.AdminProjectSummary
-	enqueued   []protocol.JobSpecV1
-	jobs       map[string][]protocol.AdminJob
-	users      map[string]protocol.AdminUserSummary
-	deleted    bool
-	upsertedID int64
+	user         tracker.User
+	sessions     map[string]bool
+	projects     map[string]protocol.AdminProjectSummary
+	enqueued     []protocol.JobSpecV1
+	jobs         map[string][]protocol.AdminJob
+	users        map[string]protocol.AdminUserSummary
+	deleted      bool
+	upsertedID   int64
+	registeredID int64
 }
 
 func newFakeStore() *fakeStore {
@@ -35,6 +36,12 @@ func newFakeStore() *fakeStore {
 func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
 	s.upsertedID = identity.UserID
 	s.user = tracker.User{ID: "gh_42", GitHubUserID: &identity.UserID, GitHubLogin: identity.Login, Status: tracker.UserStatusActive, Roles: map[string]bool{tracker.RoleAdmin: true}, LastLoginAt: &now}
+	return s.user, nil
+}
+func (s *fakeStore) UpsertGitHubPendingWorker(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
+	s.registeredID = identity.UserID
+	s.user = tracker.User{ID: "gh_42", GitHubUserID: &identity.UserID, GitHubLogin: identity.Login, Status: tracker.UserStatusPending, Roles: map[string]bool{tracker.RoleWorker: true}, LastLoginAt: &now}
+	s.users[s.user.ID] = protocol.AdminUserSummary{ID: s.user.ID, GitHubLogin: identity.Login, Status: s.user.Status, Roles: []string{tracker.RoleWorker}}
 	return s.user, nil
 }
 func (s *fakeStore) CreateWebSession(_ context.Context, _ string, hash []byte, _, _ int64) error {
@@ -100,6 +107,10 @@ func (s *fakeStore) ListUsers(context.Context) ([]protocol.AdminUserSummary, err
 }
 func (s *fakeStore) PutUser(_ context.Context, id, status string, roles []string, _ int64) error {
 	s.users[id] = protocol.AdminUserSummary{ID: id, Status: status, Roles: roles}
+	return nil
+}
+func (s *fakeStore) DeleteUser(_ context.Context, id string) error {
+	delete(s.users, id)
 	return nil
 }
 func (s *fakeStore) RotateMachineToken(_ context.Context, id, _ string, _ int64) error {
@@ -244,6 +255,13 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	if token.Code != http.StatusOK || !strings.Contains(token.Body.String(), "hq_") || !store.users["worker-web"].MachineTokenActive {
 		t.Fatalf("rotate token = %d %q", token.Code, token.Body.String())
 	}
+	deletedUser := postForm(t, server, "/admin/users/worker-web/delete", url.Values{"csrf": {csrf}}, sessionCookie)
+	if deletedUser.Code != http.StatusSeeOther {
+		t.Fatalf("delete user = %d", deletedUser.Code)
+	}
+	if _, exists := store.users["worker-web"]; exists {
+		t.Fatal("deleted user remains in store")
+	}
 	deleteJob := postForm(t, server, "/admin/projects/demo/jobs/1/delete", url.Values{"csrf": {csrf}}, sessionCookie)
 	if deleteJob.Code != http.StatusSeeOther || len(store.jobs["demo"]) != 0 {
 		t.Fatalf("delete job = %d jobs=%+v", deleteJob.Code, store.jobs["demo"])
@@ -262,14 +280,16 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	}
 }
 
-func TestOAuthRejectsNonTeamMember(t *testing.T) {
+func TestOAuthRegistersNonTeamMemberAsPendingWorker(t *testing.T) {
 	store := newFakeStore()
 	server := newTestServer(t, store, &fakeOAuth{member: false})
 	start := request(t, server, http.MethodGet, "/auth/github/start", "", nil)
 	authorize, _ := url.Parse(start.Header().Get("Location"))
 	callback := request(t, server, http.MethodGet, "/auth/github/callback?code=accepted-code&state="+url.QueryEscape(authorize.Query().Get("state")), "", responseCookie(t, start, oauthCookieName))
-	if callback.Code != http.StatusForbidden || store.upsertedID != 0 {
-		t.Fatalf("callback = %d upsert=%d", callback.Code, store.upsertedID)
+	if callback.Code != http.StatusOK || store.upsertedID != 0 || store.registeredID != 42 ||
+		!strings.Contains(callback.Body.String(), "Worker registration") ||
+		store.users["gh_42"].Status != tracker.UserStatusPending {
+		t.Fatalf("callback = %d admin-upsert=%d registered=%d body=%q", callback.Code, store.upsertedID, store.registeredID, callback.Body.String())
 	}
 	for _, cookie := range callback.Result().Cookies() {
 		if cookie.Name == sessionCookieName {

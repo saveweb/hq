@@ -83,6 +83,7 @@ func Register(server *echo.Echo, store *postgres.Store, now func() int64) {
 	server.GET("/api/v1/admin/projects", h.listProjects)
 	server.GET("/api/v1/admin/users", h.listUsers)
 	server.PUT("/api/v1/admin/users/:user_id", h.putUser)
+	server.DELETE("/api/v1/admin/users/:user_id", h.deleteUser)
 	server.POST("/api/v1/admin/users/:user_id/machine-token", h.rotateMachineToken)
 	server.DELETE("/api/v1/admin/users/:user_id/machine-token", h.revokeMachineToken)
 	server.GET("/api/v1/admin/projects/:project_id", h.getProject)
@@ -120,6 +121,16 @@ func (h *handler) putUser(ctx *echo.Context) error {
 		return nil
 	}
 	if err := h.store.PutUser(ctx.Request().Context(), ctx.Param("user_id"), request.Status, request.Roles, h.now()); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
+}
+
+func (h *handler) deleteUser(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	if err := h.store.DeleteUser(ctx.Request().Context(), ctx.Param("user_id")); err != nil {
 		return h.writeError(ctx, err)
 	}
 	return ctx.NoContent(http.StatusNoContent)

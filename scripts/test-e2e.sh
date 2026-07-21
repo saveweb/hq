@@ -101,6 +101,11 @@ python3 -c 'import json,sys; assert any(u["id"] == "api-worker" and u["machine_t
 status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \
   "${base}/api/v1/admin/users/api-worker/machine-token")
 test "${status}" = 204
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \
+  "${base}/api/v1/admin/users/api-worker")
+test "${status}" = 204
+curl --fail --silent --show-error "${admin[@]}" "${base}/api/v1/admin/users" >"${run_dir}/users-after-delete.json"
+python3 -c 'import json,sys; assert all(u["id"] != "api-worker" for u in json.load(open(sys.argv[1]))["users"])' "${run_dir}/users-after-delete.json"
 
 jobs='{"jobs":[
   {"id":"seed-1","value":"https://example.test/seed/1","type":"seed","via":null,"attr":{"group":"seed"}},
@@ -224,4 +229,10 @@ test "${status}" = 204
 status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \
   "${base}/api/v1/admin/projects/project-e2e")
 test "${status}" = 204
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \
+  "${base}/api/v1/admin/users/admin-e2e")
+test "${status}" = 204
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" \
+  "${base}/api/v1/admin/users")
+test "${status}" = 401
 printf 'SavewebHQ admin and scheduling E2E passed\n'
