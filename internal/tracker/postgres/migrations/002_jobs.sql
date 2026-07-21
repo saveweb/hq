@@ -1,10 +1,7 @@
 CREATE TABLE IF NOT EXISTS tracker_jobs (
-    job_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     project_id text NOT NULL REFERENCES tracker_projects(id) ON DELETE CASCADE,
-    external_id text,
-    value text NOT NULL,
-    unique_value_digest bytea,
-    spec jsonb NOT NULL DEFAULT '{}',
+    id text NOT NULL,
+    spec jsonb NOT NULL,
     status text NOT NULL CHECK (status IN ('todo', 'wip', 'done', 'failed', 'reset_exhausted')),
     attempt_id text,
     worker_id text,
@@ -16,17 +13,13 @@ CREATE TABLE IF NOT EXISTS tracker_jobs (
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
     completed_at bigint,
-    CHECK (external_id IS NULL OR unique_value_digest IS NULL),
+    PRIMARY KEY (project_id, id),
     CHECK ((status = 'wip' AND attempt_id IS NOT NULL AND worker_id IS NOT NULL AND lease_expires_at IS NOT NULL)
         OR (status <> 'wip' AND attempt_id IS NULL AND worker_id IS NULL AND lease_expires_at IS NULL))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS tracker_jobs_external_id_uidx
-    ON tracker_jobs(project_id, external_id) WHERE external_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS tracker_jobs_value_digest_uidx
-    ON tracker_jobs(project_id, unique_value_digest) WHERE unique_value_digest IS NOT NULL;
 CREATE INDEX IF NOT EXISTS tracker_jobs_claim_idx
-    ON tracker_jobs(project_id, created_at, job_id) WHERE status = 'todo';
+    ON tracker_jobs(project_id, created_at, id) WHERE status = 'todo';
 CREATE INDEX IF NOT EXISTS tracker_jobs_expired_idx
     ON tracker_jobs(project_id, lease_expires_at) WHERE status = 'wip';
 
