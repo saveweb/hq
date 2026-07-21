@@ -110,9 +110,10 @@ Human administrators use GitHub OAuth with state and PKCE. HQ requests
 configured organization team at every login. The GitHub access token is then
 discarded. Team members are synchronized to active administrators. Other GitHub
 users are registered as pending workers without receiving a browser session;
-an administrator must activate them and issue a machine token. HQ stores only a
-hash of a random, short-lived browser session token and requires a derived CSRF
-token for every state-changing web request.
+an administrator must activate them. Once active, a worker can establish its own
+browser session and generate, rotate, or revoke its own machine token. HQ stores
+only a hash of a random, short-lived browser session token and requires a
+derived CSRF token for every state-changing web request.
 
 The web UI and machine API share project/job services but not credentials:
 browser sessions never authorize `/api/v1/**`, and machine tokens are never

@@ -72,6 +72,9 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err := store.RotateMachineToken(ctx, "managed-user", "managed-token", now); err != nil {
 		t.Fatal(err)
 	}
+	if active, err := store.MachineTokenActive(ctx, "managed-user"); err != nil || !active {
+		t.Fatalf("managed token state = %v, %v", active, err)
+	}
 	if user, err := store.AuthenticateMachineToken(ctx, "managed-token"); err != nil || user.ID != "managed-user" {
 		t.Fatalf("managed token authentication = %+v, %v", user, err)
 	}
@@ -84,6 +87,9 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	}
 	if _, err := store.AuthenticateMachineToken(ctx, "managed-token"); err == nil {
 		t.Fatal("revoked token authenticated")
+	}
+	if active, err := store.MachineTokenActive(ctx, "managed-user"); err != nil || active {
+		t.Fatalf("revoked token state = %v, %v", active, err)
 	}
 	if err := store.RotateMachineToken(ctx, pending.ID, "pending-worker-token", now+3); err != nil {
 		t.Fatal(err)

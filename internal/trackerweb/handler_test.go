@@ -40,8 +40,18 @@ func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHub
 }
 func (s *fakeStore) UpsertGitHubPendingWorker(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
 	s.registeredID = identity.UserID
-	s.user = tracker.User{ID: "gh_42", GitHubUserID: &identity.UserID, GitHubLogin: identity.Login, Status: tracker.UserStatusPending, Roles: map[string]bool{tracker.RoleWorker: true}, LastLoginAt: &now}
-	s.users[s.user.ID] = protocol.AdminUserSummary{ID: s.user.ID, GitHubLogin: identity.Login, Status: s.user.Status, Roles: []string{tracker.RoleWorker}}
+	id := "gh_42"
+	summary, exists := s.users[id]
+	if !exists {
+		summary = protocol.AdminUserSummary{ID: id, Status: tracker.UserStatusPending, Roles: []string{tracker.RoleWorker}}
+	}
+	summary.GitHubLogin = identity.Login
+	s.users[id] = summary
+	roles := map[string]bool{}
+	for _, role := range summary.Roles {
+		roles[role] = true
+	}
+	s.user = tracker.User{ID: id, GitHubUserID: &identity.UserID, GitHubLogin: identity.Login, Status: summary.Status, Roles: roles, LastLoginAt: &now}
 	return s.user, nil
 }
 func (s *fakeStore) CreateWebSession(_ context.Context, _ string, hash []byte, _, _ int64) error {
@@ -104,6 +114,9 @@ func (s *fakeStore) ListUsers(context.Context) ([]protocol.AdminUserSummary, err
 		result = append(result, user)
 	}
 	return result, nil
+}
+func (s *fakeStore) MachineTokenActive(_ context.Context, id string) (bool, error) {
+	return s.users[id].MachineTokenActive, nil
 }
 func (s *fakeStore) PutUser(_ context.Context, id, status string, roles []string, _ int64) error {
 	s.users[id] = protocol.AdminUserSummary{ID: id, Status: status, Roles: roles}
@@ -191,7 +204,7 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	server := newTestServer(t, store, oauth)
 
 	landing := request(t, server, http.MethodGet, "/", "", nil)
-	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), "Sign in with GitHub") {
+	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), "Continue with GitHub") {
 		t.Fatalf("landing = %d %q", landing.Code, landing.Body.String())
 	}
 	start := request(t, server, http.MethodGet, "/auth/github/start", "", nil)
@@ -295,6 +308,42 @@ func TestOAuthRegistersNonTeamMemberAsPendingWorker(t *testing.T) {
 		if cookie.Name == sessionCookieName {
 			t.Fatal("unauthorized user received a session cookie")
 		}
+	}
+}
+
+func TestActiveWorkerManagesOwnMachineToken(t *testing.T) {
+	store := newFakeStore()
+	store.users["gh_42"] = protocol.AdminUserSummary{
+		ID: "gh_42", Status: tracker.UserStatusActive, Roles: []string{tracker.RoleWorker},
+	}
+	server := newTestServer(t, store, &fakeOAuth{member: false})
+	start := request(t, server, http.MethodGet, "/auth/github/start", "", nil)
+	authorize, _ := url.Parse(start.Header().Get("Location"))
+	callback := request(t, server, http.MethodGet, "/auth/github/callback?code=accepted-code&state="+url.QueryEscape(authorize.Query().Get("state")), "", responseCookie(t, start, oauthCookieName))
+	if callback.Code != http.StatusSeeOther || callback.Header().Get("Location") != "/worker" {
+		t.Fatalf("worker callback = %d location=%q", callback.Code, callback.Header().Get("Location"))
+	}
+	sessionCookie := responseCookie(t, callback, sessionCookieName)
+	portal := request(t, server, http.MethodGet, "/worker", "", sessionCookie)
+	if portal.Code != http.StatusOK || !strings.Contains(portal.Body.String(), "Generate token") {
+		t.Fatalf("worker portal = %d %q", portal.Code, portal.Body.String())
+	}
+	csrf := extractCSRF(t, portal.Body.String())
+	token := postForm(t, server, "/worker/token", url.Values{"csrf": {csrf}}, sessionCookie)
+	if token.Code != http.StatusOK || !strings.Contains(token.Body.String(), "hq_") || !store.users["gh_42"].MachineTokenActive {
+		t.Fatalf("worker token = %d %q", token.Code, token.Body.String())
+	}
+	admin := request(t, server, http.MethodGet, "/admin", "", sessionCookie)
+	if admin.Code != http.StatusForbidden {
+		t.Fatalf("worker admin access = %d", admin.Code)
+	}
+	revoke := postForm(t, server, "/worker/token/revoke", url.Values{"csrf": {csrf}}, sessionCookie)
+	if revoke.Code != http.StatusSeeOther || store.users["gh_42"].MachineTokenActive {
+		t.Fatalf("worker revoke = %d active=%v", revoke.Code, store.users["gh_42"].MachineTokenActive)
+	}
+	logout := postForm(t, server, "/logout", url.Values{"csrf": {csrf}}, sessionCookie)
+	if logout.Code != http.StatusSeeOther {
+		t.Fatalf("worker logout = %d", logout.Code)
 	}
 }
 

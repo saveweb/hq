@@ -63,9 +63,10 @@ token or a machine token in the browser.
 GitHub OAuth is also the worker registration entry point. Accounts outside the
 configured administrator team are recorded as pending workers, receive no Web
 Dashboard session, and cannot run jobs until an administrator activates the
-account and issues a machine token. The administrator team remains the source
-of truth: deleting a team administrator locally does not prevent OAuth from
-recreating it on the next login.
+account. The worker then signs in again at `/worker` to generate its own machine
+token. The administrator team remains the source of truth: deleting a team
+administrator locally does not prevent OAuth from recreating it on the next
+login.
 
 ## Normal shutdown
 

@@ -35,6 +35,17 @@ func (s *Store) ListUsers(ctx context.Context) ([]protocol.AdminUserSummary, err
 	return result, storeError("list users", rows.Err())
 }
 
+func (s *Store) MachineTokenActive(ctx context.Context, userID string) (bool, error) {
+	if !queue.ValidateIdentifier(userID) {
+		return false, tracker.InvalidRequest("invalid user ID")
+	}
+	var active bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM tracker_machine_tokens WHERE user_id=$1 AND revoked_at IS NULL
+	)`, userID).Scan(&active)
+	return active, storeError("get machine token state", err)
+}
+
 func (s *Store) PutUser(ctx context.Context, userID, status string, roles []string, now int64) error {
 	if !queue.ValidateIdentifier(userID) || (status != tracker.UserStatusPending && status != tracker.UserStatusActive && status != tracker.UserStatusSuspended) {
 		return tracker.InvalidRequest("invalid user")

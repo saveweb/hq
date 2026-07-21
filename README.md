@@ -115,7 +115,8 @@ Active members of the configured GitHub organization team can sign in at `/`
 and manage projects, statuses, and bounded job batches. The callback verifies
 team membership on every login; GitHub access tokens are not persisted. Other
 GitHub users are registered as pending workers and receive no administration
-session. An administrator must activate them and issue a machine token.
+session. After an administrator activates the account, the worker signs in
+again and generates its own machine token at `/worker`.
 
 An active administrator machine token can perform the same operations through
 `/api/v1/admin/projects`. Project responses include queue counts for all job
@@ -125,7 +126,8 @@ The administration API and Web Dashboard also import packed source files,
 manage user creation, deletion, and machine-token rotation, inspect current job
 state, requeue terminal failures, and delete non-WIP jobs or projects without
 WIP work. New machine tokens are displayed only in the rotation response or
-one-time Web page.
+one-time Web page. Active workers can generate, rotate, or revoke their own
+machine token from the OAuth-authenticated worker page.
 
 ## Worker API
 

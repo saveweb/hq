@@ -49,6 +49,7 @@ type Store interface {
 	PutProject(context.Context, tracker.Project, int64) error
 	EnqueueProjectJobs(context.Context, string, []protocol.JobSpecV1, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
+	MachineTokenActive(context.Context, string) (bool, error)
 	PutUser(context.Context, string, string, []string, int64) error
 	DeleteUser(context.Context, string) error
 	RotateMachineToken(context.Context, string, string, int64) error
@@ -122,6 +123,9 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/auth/github/start", h.oauthStart)
 	server.GET("/auth/github/callback", h.oauthCallback)
 	server.POST("/logout", h.logout)
+	server.GET("/worker", h.workerPortal)
+	server.POST("/worker/token", h.rotateOwnToken)
+	server.POST("/worker/token/revoke", h.revokeOwnToken)
 	server.GET("/admin", h.dashboard)
 	server.GET("/admin/users", h.users)
 	server.POST("/admin/users", h.putUser)
@@ -141,8 +145,13 @@ func (h *Handler) Register(server *echo.Echo) {
 
 func (h *Handler) landing(ctx *echo.Context) error {
 	h.webHeaders(ctx.Response().Header())
-	if _, _, err := h.currentUser(ctx); err == nil {
-		return ctx.Redirect(http.StatusSeeOther, "/admin")
+	if user, _, err := h.currentUser(ctx); err == nil {
+		if user.HasRole(tracker.RoleAdmin) {
+			return ctx.Redirect(http.StatusSeeOther, "/admin")
+		}
+		if user.HasRole(tracker.RoleWorker) {
+			return ctx.Redirect(http.StatusSeeOther, "/worker")
+		}
 	} else if !errors.Is(err, tracker.ErrWebSessionNotFound) {
 		return h.internal(ctx, err)
 	}
@@ -213,12 +222,19 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 		if err != nil {
 			return h.internal(ctx, err)
 		}
+		if user.Status == tracker.UserStatusActive && user.HasRole(tracker.RoleWorker) {
+			return h.createSession(ctx, requestContext, user, now, "/worker")
+		}
 		return render(ctx, http.StatusOK, "worker-registration", map[string]any{"User": user})
 	}
 	user, err := h.store.UpsertGitHubAdmin(requestContext, identity, now)
 	if err != nil {
 		return h.internal(ctx, err)
 	}
+	return h.createSession(ctx, requestContext, user, now, "/admin")
+}
+
+func (h *Handler) createSession(ctx *echo.Context, requestContext context.Context, user tracker.User, now int64, destination string) error {
 	sessionToken, err := randomValue()
 	if err != nil {
 		return h.internal(ctx, err)
@@ -230,7 +246,52 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 		Name: sessionCookieName, Value: sessionToken, Path: "/", MaxAge: int(h.sessionTTL / time.Second),
 		HttpOnly: true, Secure: h.secureCookies, SameSite: http.SameSiteLaxMode,
 	})
-	return ctx.Redirect(http.StatusSeeOther, "/admin")
+	return ctx.Redirect(http.StatusSeeOther, destination)
+}
+
+func (h *Handler) workerPortal(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, sessionToken, ok := h.requireWorker(ctx)
+	if !ok {
+		return nil
+	}
+	tokenActive, err := h.store.MachineTokenActive(ctx.Request().Context(), user.ID)
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	return render(ctx, http.StatusOK, "worker", map[string]any{
+		"User": user, "TokenActive": tokenActive, "CSRF": h.csrfToken(sessionToken),
+	})
+}
+
+func (h *Handler) rotateOwnToken(ctx *echo.Context) error {
+	user, sessionToken, ok := h.authorizeWorkerPost(ctx)
+	if !ok {
+		return nil
+	}
+	random, err := randomValue()
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	token := "hq_" + random
+	if err := h.store.RotateMachineToken(ctx.Request().Context(), user.ID, token, h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Token rotation was rejected")
+	}
+	h.webHeaders(ctx.Response().Header())
+	return render(ctx, http.StatusOK, "worker-token", map[string]any{
+		"User": user, "Token": token, "CSRF": h.csrfToken(sessionToken),
+	})
+}
+
+func (h *Handler) revokeOwnToken(ctx *echo.Context) error {
+	user, _, ok := h.authorizeWorkerPost(ctx)
+	if !ok {
+		return nil
+	}
+	if err := h.store.RevokeMachineToken(ctx.Request().Context(), user.ID, h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Token revocation was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/worker")
 }
 
 func (h *Handler) dashboard(ctx *echo.Context) error {
@@ -512,7 +573,7 @@ func (h *Handler) deleteJob(ctx *echo.Context) error {
 }
 
 func (h *Handler) logout(ctx *echo.Context) error {
-	_, sessionToken, ok := h.authorizePost(ctx)
+	_, sessionToken, ok := h.authorizeSessionPost(ctx, maxFormBytes)
 	if !ok {
 		return nil
 	}
@@ -540,6 +601,23 @@ func (h *Handler) requireAdmin(ctx *echo.Context) (tracker.User, string, bool) {
 	return user, sessionToken, true
 }
 
+func (h *Handler) requireWorker(ctx *echo.Context) (tracker.User, string, bool) {
+	user, sessionToken, err := h.currentUser(ctx)
+	if err != nil {
+		if errors.Is(err, tracker.ErrWebSessionNotFound) {
+			_ = ctx.Redirect(http.StatusSeeOther, "/")
+		} else {
+			_ = h.internal(ctx, err)
+		}
+		return tracker.User{}, "", false
+	}
+	if !user.HasRole(tracker.RoleWorker) {
+		_ = h.pageError(ctx, http.StatusForbidden, "Worker role required")
+		return tracker.User{}, "", false
+	}
+	return user, sessionToken, true
+}
+
 func (h *Handler) currentUser(ctx *echo.Context) (tracker.User, string, error) {
 	cookie, err := ctx.Cookie(sessionCookieName)
 	if err != nil || len(cookie.Value) != 43 {
@@ -554,14 +632,43 @@ func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) 
 }
 
 func (h *Handler) authorizePostLimit(ctx *echo.Context, limit int64) (tracker.User, string, bool) {
+	user, sessionToken, ok := h.authorizeSessionPost(ctx, limit)
+	if !ok {
+		return tracker.User{}, "", false
+	}
+	if !user.HasRole(tracker.RoleAdmin) {
+		_ = h.pageError(ctx, http.StatusForbidden, "Administrator role required")
+		return tracker.User{}, "", false
+	}
+	return user, sessionToken, true
+}
+
+func (h *Handler) authorizeWorkerPost(ctx *echo.Context) (tracker.User, string, bool) {
+	user, sessionToken, ok := h.authorizeSessionPost(ctx, maxFormBytes)
+	if !ok {
+		return tracker.User{}, "", false
+	}
+	if !user.HasRole(tracker.RoleWorker) {
+		_ = h.pageError(ctx, http.StatusForbidden, "Worker role required")
+		return tracker.User{}, "", false
+	}
+	return user, sessionToken, true
+}
+
+func (h *Handler) authorizeSessionPost(ctx *echo.Context, limit int64) (tracker.User, string, bool) {
 	h.webHeaders(ctx.Response().Header())
 	ctx.Request().Body = http.MaxBytesReader(ctx.Response(), ctx.Request().Body, limit)
 	if err := ctx.Request().ParseForm(); err != nil {
 		_ = h.pageError(ctx, http.StatusBadRequest, "Invalid form submission")
 		return tracker.User{}, "", false
 	}
-	user, sessionToken, ok := h.requireAdmin(ctx)
-	if !ok {
+	user, sessionToken, err := h.currentUser(ctx)
+	if err != nil {
+		if errors.Is(err, tracker.ErrWebSessionNotFound) {
+			_ = ctx.Redirect(http.StatusSeeOther, "/")
+		} else {
+			_ = h.internal(ctx, err)
+		}
 		return tracker.User{}, "", false
 	}
 	if !hmac.Equal([]byte(h.csrfToken(sessionToken)), []byte(ctx.FormValue("csrf"))) {

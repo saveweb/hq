@@ -71,7 +71,8 @@ separate HttpOnly browser session established through GitHub OAuth; machine
 tokens remain the only authentication accepted by `/api/v1/**` routes.
 OAuth users outside the configured administrator team are registered as
 `pending` workers without a browser session. An administrator must activate the
-user and issue a machine token before it can call worker endpoints.
+user before it can sign in at `/worker` and generate, rotate, or revoke its own
+machine token. The plaintext value is shown only in the generation response.
 
 ## Claim
 
