@@ -1,9 +1,11 @@
 package trackerweb
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"git.saveweb.org/saveweb/hq/internal/sourceformat"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
@@ -359,6 +362,59 @@ func TestActiveWorkerManagesOwnMachineToken(t *testing.T) {
 	logout := postForm(t, server, "/logout", url.Values{"csrf": {csrf}}, sessionCookie)
 	if logout.Code != http.StatusSeeOther {
 		t.Fatalf("worker logout = %d", logout.Code)
+	}
+}
+
+func TestSourceUploadAcceptsMultipartCSRF(t *testing.T) {
+	store := newFakeStore()
+	store.user = tracker.User{ID: "admin", Status: tracker.UserStatusActive, Roles: map[string]bool{tracker.RoleAdmin: true}}
+	store.projects["demo"] = protocol.AdminProjectSummary{
+		ID: "demo", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeUniqueValue,
+		JobCounts: map[string]int64{},
+	}
+	sessionToken := strings.Repeat("s", 43)
+	store.sessions[string(sessionHash(sessionToken))] = true
+	sessionCookie := &http.Cookie{Name: sessionCookieName, Value: sessionToken}
+	server := newTestServer(t, store, &fakeOAuth{member: true})
+
+	detail := request(t, server, http.MethodGet, "/admin/projects/demo", "", sessionCookie)
+	csrf := extractCSRF(t, detail.Body.String())
+
+	var source bytes.Buffer
+	encoder, err := sourceformat.NewEncoder(&source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Write(protocol.JobSpecV1{Value: "123"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	if err := form.WriteField("csrf", csrf); err != nil {
+		t.Fatal(err)
+	}
+	file, err := form.CreateFormFile("source_file", "jobs.jsonl.zst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(source.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/projects/demo/source", &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	req.AddCookie(sessionCookie)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, req)
+	if response.Code != http.StatusSeeOther || len(store.enqueued) != 1 || store.enqueued[0].Value != "123" {
+		t.Fatalf("source upload = %d jobs=%+v body=%q", response.Code, store.enqueued, response.Body.String())
 	}
 }
 

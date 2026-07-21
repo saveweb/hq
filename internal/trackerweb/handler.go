@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -678,7 +679,20 @@ func (h *Handler) authorizeWorkerPost(ctx *echo.Context) (tracker.User, string, 
 func (h *Handler) authorizeSessionPost(ctx *echo.Context, limit int64) (tracker.User, string, bool) {
 	h.webHeaders(ctx.Response().Header())
 	ctx.Request().Body = http.MaxBytesReader(ctx.Response(), ctx.Request().Body, limit)
-	if err := ctx.Request().ParseForm(); err != nil {
+	contentType := ctx.Request().Header.Get("Content-Type")
+	mediaType := ""
+	var formErr error
+	if contentType != "" {
+		mediaType, _, formErr = mime.ParseMediaType(contentType)
+	}
+	if formErr == nil {
+		if mediaType == "multipart/form-data" {
+			formErr = ctx.Request().ParseMultipartForm(maxFormBytes)
+		} else {
+			formErr = ctx.Request().ParseForm()
+		}
+	}
+	if formErr != nil {
 		_ = h.pageError(ctx, http.StatusBadRequest, "Invalid form submission")
 		return tracker.User{}, "", false
 	}
