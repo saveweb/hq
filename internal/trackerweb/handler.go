@@ -437,8 +437,18 @@ func (h *Handler) project(ctx *echo.Context) error {
 		return h.internal(ctx, err)
 	}
 	return render(ctx, http.StatusOK, "project", map[string]any{
-		"User": user, "Project": project, "Jobs": jobs.Jobs, "CSRF": h.csrfToken(sessionToken), "JobExample": jobExample(project.IdentityMode),
+		"User": user, "Project": projectView{
+			AdminProjectSummary: project,
+			CreatedAt:           formatUnixTime(project.CreatedAt),
+			UpdatedAt:           formatUnixTime(project.UpdatedAt),
+		}, "Jobs": jobs.Jobs, "CSRF": h.csrfToken(sessionToken), "JobExample": jobExample(project.IdentityMode),
 	})
+}
+
+type projectView struct {
+	protocol.AdminProjectSummary
+	CreatedAt string
+	UpdatedAt string
 }
 
 func (h *Handler) createProject(ctx *echo.Context) error {
@@ -546,10 +556,33 @@ func (h *Handler) job(ctx *echo.Context) error {
 		return h.pageError(ctx, http.StatusNotFound, "Job not found")
 	}
 	return render(ctx, http.StatusOK, "job", map[string]any{
-		"User": user, "ProjectID": ctx.Param("project_id"), "Job": job, "CSRF": h.csrfToken(sessionToken),
+		"User": user, "ProjectID": ctx.Param("project_id"), "Job": jobView{
+			AdminJob:       job,
+			LeaseExpiresAt: formatOptionalUnixTime(job.LeaseExpiresAt),
+			CreatedAt:      formatUnixTime(job.CreatedAt),
+			UpdatedAt:      formatUnixTime(job.UpdatedAt),
+		}, "CSRF": h.csrfToken(sessionToken),
 		"AttrsJSON": displayJSON(job.Attrs), "OutcomeJSON": displayJSON(job.Outcome),
 		"ErrorJSON": displayJSON(job.ExecutionError), "ReceiptsJSON": displayJSON(job.WARCReceipts),
 	})
+}
+
+type jobView struct {
+	protocol.AdminJob
+	LeaseExpiresAt string
+	CreatedAt      string
+	UpdatedAt      string
+}
+
+func formatUnixTime(timestamp int64) string {
+	return fmt.Sprintf("%d (%s)", timestamp, time.Unix(timestamp, 0).UTC().Format("2006-01-02 15:04:05 UTC"))
+}
+
+func formatOptionalUnixTime(timestamp *int64) string {
+	if timestamp == nil {
+		return "<nil>"
+	}
+	return formatUnixTime(*timestamp)
 }
 
 func displayJSON(value any) string {

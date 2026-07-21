@@ -102,10 +102,10 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 	s.projects[project.ID] = existing
 	return nil
 }
-func (s *fakeStore) EnqueueProjectJobs(_ context.Context, projectID string, jobs []protocol.JobSpecV1, _ int64) (int64, error) {
+func (s *fakeStore) EnqueueProjectJobs(_ context.Context, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
 	s.enqueued = append(s.enqueued, jobs...)
 	for _, spec := range jobs {
-		s.jobs[projectID] = append(s.jobs[projectID], protocol.AdminJob{JobSpecV1: spec, JobID: int64(len(s.jobs[projectID]) + 1), Status: protocol.JobStatusTodo})
+		s.jobs[projectID] = append(s.jobs[projectID], protocol.AdminJob{JobSpecV1: spec, JobID: int64(len(s.jobs[projectID]) + 1), Status: protocol.JobStatusTodo, CreatedAt: now, UpdatedAt: now})
 	}
 	project := s.projects[projectID]
 	project.JobCounts[protocol.JobStatusTodo] += int64(len(jobs))
@@ -245,7 +245,8 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("create = %d %q", create.Code, create.Header().Get("Location"))
 	}
 	detail := request(t, server, http.MethodGet, "/admin/projects/demo", "", sessionCookie)
-	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) {
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) ||
+		!strings.Contains(detail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
 	}
 	jobs := `[ {"value":"https://example.com/","type":"archive"} ]`
@@ -254,7 +255,8 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("enqueue = %d jobs=%+v", enqueue.Code, store.enqueued)
 	}
 	jobDetail := request(t, server, http.MethodGet, "/admin/projects/demo/jobs/1", "", sessionCookie)
-	if jobDetail.Code != http.StatusOK || !strings.Contains(jobDetail.Body.String(), "https://example.com/") {
+	if jobDetail.Code != http.StatusOK || !strings.Contains(jobDetail.Body.String(), "https://example.com/") ||
+		!strings.Contains(jobDetail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("job detail = %d %q", jobDetail.Code, jobDetail.Body.String())
 	}
 	users := request(t, server, http.MethodGet, "/admin/users", "", sessionCookie)
