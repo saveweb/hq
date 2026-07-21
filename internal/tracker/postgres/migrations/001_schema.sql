@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS tracker_projects (
     status text NOT NULL CHECK (status IN ('active', 'draining', 'archived')),
     identity_mode text NOT NULL DEFAULT 'external_id'
         CHECK (identity_mode IN ('none', 'external_id', 'unique_value')),
+    claim_order text NOT NULL DEFAULT 'fifo'
+        CHECK (claim_order IN ('fifo', 'random')),
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
 );
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS tracker_jobs (
     external_id text,
     value text NOT NULL,
     unique_value_digest bytea,
+    random_key integer NOT NULL,
     spec jsonb NOT NULL DEFAULT '{}',
     status text NOT NULL CHECK (status IN ('todo', 'wip', 'done', 'failed', 'reset_exhausted')),
     attempt_id text,
@@ -71,8 +74,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS tracker_jobs_external_id_uidx
     ON tracker_jobs(project_id, external_id) WHERE external_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS tracker_jobs_value_digest_uidx
     ON tracker_jobs(project_id, unique_value_digest) WHERE unique_value_digest IS NOT NULL;
-CREATE INDEX IF NOT EXISTS tracker_jobs_claim_idx
+CREATE INDEX IF NOT EXISTS tracker_jobs_claim_fifo_idx
     ON tracker_jobs(project_id, created_at, job_id) WHERE status = 'todo';
+CREATE INDEX IF NOT EXISTS tracker_jobs_claim_random_idx
+    ON tracker_jobs(project_id, random_key, job_id) WHERE status = 'todo';
 CREATE INDEX IF NOT EXISTS tracker_jobs_expired_idx
     ON tracker_jobs(project_id, lease_expires_at) WHERE status = 'wip';
 

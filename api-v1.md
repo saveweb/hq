@@ -32,12 +32,16 @@ DELETE /api/v1/admin/users/{user_id}/machine-token
 `PUT` creates a project or changes its status to `active`, `draining`, or
 `archived`. Creation may set `identity_mode` to `none`, `external_id`, or
 `unique_value`; omitted mode defaults to `external_id`. The mode is immutable.
-Project responses include the identity mode and `todo`, `wip`, `done`, `failed`,
-and `reset_exhausted` counts.
+`claim_order` is `fifo` or `random`, defaults to `fifo`, and may be changed at
+any time. Project responses include both settings and `todo`, `wip`, `done`,
+`failed`, and `reset_exhausted` counts.
 
 The jobs endpoint accepts one or more JobSpecs within the 8 MiB JSON request
-body limit. `value` is required; `type`, `via`, `hops`, and `attr` are optional.
-`id` is required only by `external_id` projects and rejected by the other modes:
+body limit. `value` is required; `type`, `via`, `hops`, `attr`, and the signed
+32-bit `random_key` are optional. HQ generates `random_key` when it is omitted.
+An explicitly supplied key is stored unchanged and ties are ordered by internal
+job ID. `id` is required only by `external_id` projects and rejected by the
+other modes:
 
 - `none` inserts every submitted job;
 - `external_id` deduplicates by `(project_id, id)`;
@@ -46,6 +50,8 @@ body limit. `value` is required; `type`, `via`, `hops`, and `attr` are optional.
 
 Identical retries in the two deduplicating modes report zero new inserts. A
 matching identity with different immutable job data returns `identity_conflict`.
+`random_key` applies only when a job is first inserted; an idempotent retry does
+not change the stored key.
 
 The source endpoint accepts a `jobs-jsonl-zstd-v1` body as `application/zstd`
 and streams it through the same project identity rules. The compressed body is
@@ -89,7 +95,10 @@ JobSpecs, internal numeric job IDs, unique attempt IDs, lease deadlines, and a
 retry delay. Workers use `job_id`, not an optional source `id`, for mutations.
 
 Claims use one PostgreSQL transaction and `FOR UPDATE SKIP LOCKED`. An expired
-attempt is reset before new rows are selected.
+attempt is reset before new rows are selected. FIFO projects order eligible
+jobs by creation time and internal job ID. Random projects order them by the
+stored random key and internal job ID. Changing the project setting affects
+subsequent claims without changing WIP attempts.
 
 ## Complete
 

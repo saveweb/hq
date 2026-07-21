@@ -28,9 +28,10 @@ must be monitored separately.
 
 1. Create a `0600` machine-token file.
 2. Run `tracker bootstrap-user` with the `worker` role.
-3. Run `tracker put-project --identity-mode MODE`. Use `external_id` for
+3. Run `tracker put-project --identity-mode MODE --claim-order ORDER`. Use `external_id` for
    replayable source imports, `unique_value` when values must be unique, or
-   `none` when every submission must become a job.
+   `none` when every submission must become a job. `ORDER` is `fifo` (the
+   default) or `random` and can be changed while workers are running.
 4. Produce a `jobs-jsonl-zstd-v1` file with `source pack --identity-mode MODE`,
    using the project mode.
 5. Run `tracker enqueue-source`.
@@ -46,10 +47,12 @@ POST /api/v1/admin/projects/{project_id}/jobs
 POST /api/v1/admin/projects/{project_id}/source
 ```
 
-Use `hqctl enqueue` for plain-value or JobSpec JSONL input that should be sent
+Use `hqctl enqueue` for plain-value or enqueue-job JSONL input that should be sent
 in bounded batches. It reads the project identity mode before submitting and
 defaults to 1000 jobs per request. `--batch-size` accepts any positive count;
 the API enforces its 8 MiB JSON request-body limit instead of a job-count cap.
+JSONL jobs may provide a signed 32-bit `random_key`; the Tracker generates one
+when it is absent.
 Use `hqctl enqueue-source` for an existing `jobs-jsonl-zstd-v1` file. Both
 commands require a `0600` administrator machine-token file and print a JSON
 summary.

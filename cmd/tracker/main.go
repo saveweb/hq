@@ -150,6 +150,7 @@ func runPutProject(args []string) error {
 	projectID := flags.String("project-id", "", "project identifier")
 	status := flags.String("status", tracker.ProjectStatusActive, "active, draining, or archived")
 	identityMode := flags.String("identity-mode", "", "creation mode: none, external_id, or unique_value; defaults to external_id")
+	claimOrder := flags.String("claim-order", "", "claim order: fifo or random; defaults to fifo")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -163,7 +164,7 @@ func runPutProject(args []string) error {
 		return err
 	}
 	defer store.Close()
-	return store.PutProject(ctx, tracker.Project{ID: *projectID, Status: *status, IdentityMode: *identityMode}, time.Now().Unix())
+	return store.PutProject(ctx, tracker.Project{ID: *projectID, Status: *status, IdentityMode: *identityMode, ClaimOrder: *claimOrder}, time.Now().Unix())
 }
 
 func runEnqueueSource(args []string) error {
@@ -192,9 +193,9 @@ func runEnqueueSource(args []string) error {
 	defer store.Close()
 	var inserted int64
 	stats, err := sourceformat.Decode(ctx, input, sourceformat.Limits{MaxUncompressedBytes: 1 << 40, MaxJobs: *maxJobs}, func(batch []queue.JobSpec) error {
-		jobs := make([]protocol.JobSpecV1, 0, len(batch))
+		jobs := make([]protocol.AdminEnqueueJob, 0, len(batch))
 		for _, job := range batch {
-			jobs = append(jobs, protocol.JobSpecV1{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
+			jobs = append(jobs, protocol.AdminEnqueueJob{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
 		}
 		count, err := store.EnqueueProjectJobs(ctx, *projectID, jobs, time.Now().Unix())
 		inserted += count

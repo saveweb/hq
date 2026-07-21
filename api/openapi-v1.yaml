@@ -331,14 +331,16 @@ components:
       properties:
         status: {type: string, enum: [active, draining, archived]}
         identity_mode: {type: string, enum: [none, external_id, unique_value]}
+        claim_order: {type: string, enum: [fifo, random]}
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, identity_mode, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, claim_order, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
         identity_mode: {type: string, enum: [none, external_id, unique_value]}
+        claim_order: {type: string, enum: [fifo, random]}
         job_counts: {$ref: '#/components/schemas/JobCounts'}
         created_at: {type: integer, format: int64}
         updated_at: {type: integer, format: int64}
@@ -353,7 +355,19 @@ components:
       additionalProperties: false
       required: [jobs]
       properties:
-        jobs: {type: array, minItems: 1, items: {$ref: '#/components/schemas/JobSpec'}}
+        jobs: {type: array, minItems: 1, items: {$ref: '#/components/schemas/AdminEnqueueJob'}}
+    AdminEnqueueJob:
+      type: object
+      additionalProperties: false
+      required: [value]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        value: {type: string, minLength: 1, maxLength: 8192}
+        type: {type: string, enum: [seed, asset], default: seed}
+        via: {type: [string, 'null'], maxLength: 8192}
+        hops: {type: integer, minimum: 0}
+        attr: {$ref: '#/components/schemas/Attrs'}
+        random_key: {type: integer, format: int32}
     AdminEnqueueJobsResponse:
       type: object
       additionalProperties: false
@@ -374,7 +388,7 @@ components:
     AdminJob:
       type: object
       additionalProperties: false
-      required: [value, job_id, status, attempt_id, worker_id, lease_expires_at, reset_count, outcome, warc_receipts, execution_error, created_at, updated_at, completed_at]
+      required: [value, job_id, random_key, status, attempt_id, worker_id, lease_expires_at, reset_count, outcome, warc_receipts, execution_error, created_at, updated_at, completed_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         value: {type: string, minLength: 1, maxLength: 8192}
@@ -383,6 +397,7 @@ components:
         hops: {type: integer, minimum: 0}
         attr: {$ref: '#/components/schemas/Attrs'}
         job_id: {$ref: '#/components/schemas/JobID'}
+        random_key: {type: integer, format: int32}
         status: {type: string, enum: [todo, wip, done, failed, reset_exhausted]}
         attempt_id: {oneOf: [{$ref: '#/components/schemas/Identifier'}, {type: 'null'}]}
         worker_id: {oneOf: [{$ref: '#/components/schemas/Identifier'}, {type: 'null'}]}

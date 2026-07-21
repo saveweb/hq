@@ -208,7 +208,7 @@ func (s *Store) DeleteProjectJob(ctx context.Context, projectID string, jobID in
 	return nil
 }
 
-const adminJobSelect = `SELECT job_id,external_id,value,spec,status,attempt_id,worker_id,lease_expires_at,reset_count,outcome,warc_receipts,execution_error,created_at,updated_at,completed_at FROM tracker_jobs`
+const adminJobSelect = `SELECT job_id,external_id,value,spec,random_key,status,attempt_id,worker_id,lease_expires_at,reset_count,outcome,warc_receipts,execution_error,created_at,updated_at,completed_at FROM tracker_jobs`
 
 type adminJobScanner interface{ Scan(...any) error }
 
@@ -216,7 +216,7 @@ func scanAdminJob(row adminJobScanner) (protocol.AdminJob, error) {
 	var job protocol.AdminJob
 	var externalID *string
 	var spec, outcome, receipts, executionError []byte
-	if err := row.Scan(&job.JobID, &externalID, &job.Value, &spec, &job.Status, &job.AttemptID, &job.WorkerID, &job.LeaseExpiresAt, &job.ResetCount, &outcome, &receipts, &executionError, &job.CreatedAt, &job.UpdatedAt, &job.CompletedAt); err != nil {
+	if err := row.Scan(&job.JobID, &externalID, &job.Value, &spec, &job.RandomKey, &job.Status, &job.AttemptID, &job.WorkerID, &job.LeaseExpiresAt, &job.ResetCount, &outcome, &receipts, &executionError, &job.CreatedAt, &job.UpdatedAt, &job.CompletedAt); err != nil {
 		return protocol.AdminJob{}, err
 	}
 	if externalID != nil {

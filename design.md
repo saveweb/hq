@@ -55,9 +55,16 @@ todo -> wip -> done
           +  -> reset_exhausted      retry or lease limit exceeded
 ```
 
-`claim` selects `todo` rows with `FOR UPDATE SKIP LOCKED`, assigns a random
-attempt ID, records the worker ID, and sets a lease deadline in one PostgreSQL
-transaction.
+Every job receives a signed 32-bit random key during enqueue. Administrators
+may provide it for deterministic ordering; otherwise HQ generates it. A
+project's live `claim_order` setting chooses FIFO ordering by creation time and
+job ID, or random ordering by random key and job ID. Both paths use partial
+indexes.
+
+`claim` selects `todo` rows in the configured order with `FOR UPDATE SKIP
+LOCKED`, assigns a random attempt ID, records the worker ID, and sets a lease
+deadline in one PostgreSQL transaction. A setting change affects later claims
+but does not alter WIP attempts.
 
 `complete`, `fail`, and `extend-lease` require the current project, internal job ID,
 attempt ID, worker ID, non-expired lease, and `wip` status. A stale mutation is

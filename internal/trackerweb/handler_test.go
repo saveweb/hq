@@ -24,7 +24,7 @@ type fakeStore struct {
 	user         tracker.User
 	sessions     map[string]bool
 	projects     map[string]protocol.AdminProjectSummary
-	enqueued     []protocol.JobSpecV1
+	enqueued     []protocol.AdminEnqueueJob
 	jobs         map[string][]protocol.AdminJob
 	users        map[string]protocol.AdminUserSummary
 	tokens       map[string]string
@@ -96,16 +96,25 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 	if existing.IdentityMode == "" {
 		existing.IdentityMode = project.IdentityMode
 	}
+	if project.ClaimOrder != "" {
+		existing.ClaimOrder = project.ClaimOrder
+	} else if existing.ClaimOrder == "" {
+		existing.ClaimOrder = tracker.ClaimOrderFIFO
+	}
 	if existing.JobCounts == nil {
 		existing.JobCounts = map[string]int64{}
 	}
 	s.projects[project.ID] = existing
 	return nil
 }
-func (s *fakeStore) EnqueueProjectJobs(_ context.Context, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
+func (s *fakeStore) EnqueueProjectJobs(_ context.Context, projectID string, jobs []protocol.AdminEnqueueJob, now int64) (int64, error) {
 	s.enqueued = append(s.enqueued, jobs...)
 	for _, spec := range jobs {
-		s.jobs[projectID] = append(s.jobs[projectID], protocol.AdminJob{JobSpecV1: spec, JobID: int64(len(s.jobs[projectID]) + 1), Status: protocol.JobStatusTodo, CreatedAt: now, UpdatedAt: now})
+		var randomKey int32
+		if spec.RandomKey != nil {
+			randomKey = *spec.RandomKey
+		}
+		s.jobs[projectID] = append(s.jobs[projectID], protocol.AdminJob{JobSpecV1: protocol.JobSpecV1{ID: spec.ID, Value: spec.Value, Type: spec.Type, Via: spec.Via, Hops: spec.Hops, Attrs: spec.Attrs}, JobID: int64(len(s.jobs[projectID]) + 1), RandomKey: randomKey, Status: protocol.JobStatusTodo, CreatedAt: now, UpdatedAt: now})
 	}
 	project := s.projects[projectID]
 	project.JobCounts[protocol.JobStatusTodo] += int64(len(jobs))
@@ -240,18 +249,22 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("dashboard = %d %q", dashboard.Code, dashboard.Body.String())
 	}
 	csrf := extractCSRF(t, dashboard.Body.String())
-	create := postForm(t, server, "/admin/projects", url.Values{"csrf": {csrf}, "project_id": {"demo"}, "status": {tracker.ProjectStatusActive}, "identity_mode": {tracker.IdentityModeUniqueValue}}, sessionCookie)
+	create := postForm(t, server, "/admin/projects", url.Values{"csrf": {csrf}, "project_id": {"demo"}, "status": {tracker.ProjectStatusActive}, "identity_mode": {tracker.IdentityModeUniqueValue}, "claim_order": {tracker.ClaimOrderRandom}}, sessionCookie)
 	if create.Code != http.StatusSeeOther || create.Header().Get("Location") != "/admin/projects/demo" {
 		t.Fatalf("create = %d %q", create.Code, create.Header().Get("Location"))
 	}
 	detail := request(t, server, http.MethodGet, "/admin/projects/demo", "", sessionCookie)
-	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) ||
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) || !strings.Contains(detail.Body.String(), "Claim order random") ||
 		!strings.Contains(detail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
 	}
-	jobs := `[ {"value":"https://example.com/","type":"archive"} ]`
+	settings := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {csrf}, "status": {tracker.ProjectStatusActive}, "claim_order": {tracker.ClaimOrderFIFO}}, sessionCookie)
+	if settings.Code != http.StatusSeeOther || store.projects["demo"].ClaimOrder != tracker.ClaimOrderFIFO {
+		t.Fatalf("settings = %d project=%+v", settings.Code, store.projects["demo"])
+	}
+	jobs := `[ {"value":"https://example.com/","type":"archive","random_key":-9} ]`
 	enqueue := postForm(t, server, "/admin/projects/demo/jobs", url.Values{"csrf": {csrf}, "jobs_json": {jobs}}, sessionCookie)
-	if enqueue.Code != http.StatusSeeOther || len(store.enqueued) != 1 || store.enqueued[0].Value != "https://example.com/" {
+	if enqueue.Code != http.StatusSeeOther || len(store.enqueued) != 1 || store.enqueued[0].Value != "https://example.com/" || store.enqueued[0].RandomKey == nil || *store.enqueued[0].RandomKey != -9 {
 		t.Fatalf("enqueue = %d jobs=%+v", enqueue.Code, store.enqueued)
 	}
 	jobDetail := request(t, server, http.MethodGet, "/admin/projects/demo/jobs/1", "", sessionCookie)

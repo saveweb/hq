@@ -113,12 +113,14 @@ type BatchResultResponse struct {
 type AdminProjectRequest struct {
 	Status       string `json:"status"`
 	IdentityMode string `json:"identity_mode,omitempty"`
+	ClaimOrder   string `json:"claim_order,omitempty"`
 }
 
 type AdminProjectSummary struct {
 	ID           string           `json:"id"`
 	Status       string           `json:"status"`
 	IdentityMode string           `json:"identity_mode"`
+	ClaimOrder   string           `json:"claim_order"`
 	JobCounts    map[string]int64 `json:"job_counts"`
 	CreatedAt    int64            `json:"created_at"`
 	UpdatedAt    int64            `json:"updated_at"`
@@ -129,7 +131,17 @@ type AdminProjectListResponse struct {
 }
 
 type AdminEnqueueJobsRequest struct {
-	Jobs []JobSpecV1 `json:"jobs"`
+	Jobs []AdminEnqueueJob `json:"jobs"`
+}
+
+type AdminEnqueueJob struct {
+	ID        string         `json:"id,omitempty"`
+	Value     string         `json:"value"`
+	Type      string         `json:"type,omitempty"`
+	Via       *string        `json:"via,omitempty"`
+	Hops      int            `json:"hops,omitempty"`
+	Attrs     map[string]any `json:"attr,omitempty"`
+	RandomKey *int32         `json:"random_key,omitempty"`
 }
 
 type AdminEnqueueJobsResponse struct {
@@ -173,6 +185,7 @@ type AdminMachineTokenResponse struct {
 type AdminJob struct {
 	JobSpecV1
 	JobID          int64           `json:"job_id"`
+	RandomKey      int32           `json:"random_key"`
 	Status         string          `json:"status"`
 	AttemptID      *string         `json:"attempt_id"`
 	WorkerID       *string         `json:"worker_id"`

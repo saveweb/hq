@@ -88,13 +88,13 @@ func TestAdminProjectAndEnqueueSourceRequests(t *testing.T) {
 			if request.Method != http.MethodGet || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo" {
 				t.Fatalf("project request = %s %s", request.Method, request.URL)
 			}
-			body = `{"id":"demo","status":"active","identity_mode":"external_id","job_counts":{},"created_at":1,"updated_at":1}`
+			body = `{"id":"demo","status":"active","identity_mode":"external_id","claim_order":"fifo","job_counts":{},"created_at":1,"updated_at":1}`
 		case 2:
 			if request.Method != http.MethodPost || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo/jobs" || request.Header.Get("Content-Type") != "application/json" {
 				t.Fatalf("jobs request = %s %s headers=%v", request.Method, request.URL, request.Header)
 			}
 			raw, err := io.ReadAll(request.Body)
-			if err != nil || !strings.Contains(string(raw), `"value":"one"`) {
+			if err != nil || !strings.Contains(string(raw), `"value":"one"`) || !strings.Contains(string(raw), `"random_key":-7`) {
 				t.Fatalf("jobs body = %q error=%v", raw, err)
 			}
 			body = `{"project_id":"demo","submitted":1,"inserted":1}`
@@ -124,7 +124,8 @@ func TestAdminProjectAndEnqueueSourceRequests(t *testing.T) {
 	if err != nil || project.ID != "demo" || project.IdentityMode != "external_id" {
 		t.Fatalf("project=%+v error=%v", project, err)
 	}
-	jobsResult, err := client.EnqueueAdminProjectJobs(context.Background(), "demo", []protocol.JobSpecV1{{Value: "one"}})
+	randomKey := int32(-7)
+	jobsResult, err := client.EnqueueAdminProjectJobs(context.Background(), "demo", []protocol.AdminEnqueueJob{{Value: "one", RandomKey: &randomKey}})
 	if err != nil || jobsResult.Submitted != 1 || jobsResult.Inserted != 1 {
 		t.Fatalf("jobs result=%+v error=%v", jobsResult, err)
 	}

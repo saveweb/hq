@@ -113,6 +113,14 @@ An identity mode is fixed when the project is created. Reimporting an identical
 job into `external_id` or `unique_value` is idempotent; reusing the identity with
 different immutable job data returns `identity_conflict`.
 
+Each project also has a live `claim_order` setting. `fifo` is the default and
+orders jobs by creation time; `random` uses a stored signed 32-bit random key.
+HQ generates the key during enqueue unless the administrator supplies
+`random_key`. Equal keys are resolved by internal job ID, so custom keys do not
+need to be unique. Switching the setting affects later claims and leaves WIP
+attempts unchanged. For deduplicated jobs, a retry never replaces the stored
+key.
+
 Active members of the configured GitHub organization team can sign in at `/`
 and manage projects, statuses, and bounded job batches. The callback verifies
 team membership on every login; GitHub access tokens are not persisted. Other
@@ -151,7 +159,8 @@ jq -r '.vid' /home/yzqzss/git/sinavideo/records.jsonl |
     --batch-size 5000
 ```
 
-Use `--format jsonl` for one complete JobSpec per line. A missing `id` is filled
+Use `--format jsonl` for one complete enqueue job per line. It may include a
+signed 32-bit `random_key`; HQ generates one when omitted. A missing `id` is filled
 for `external_id` projects; `id` is rejected locally for `unique_value` and
 `none` projects.
 

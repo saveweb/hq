@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
@@ -29,12 +30,14 @@ type storedJobSpec struct {
 }
 
 type preparedEnqueueJob struct {
-	identity string
-	value    string
-	spec     string
+	identity        string
+	value           string
+	spec            string
+	randomKey       int32
+	customRandomKey bool
 }
 
-func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
+func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs []protocol.AdminEnqueueJob, now int64) (int64, error) {
 	if !queue.ValidateIdentifier(projectID) || len(jobs) == 0 {
 		return 0, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid project or job batch"}
 	}
@@ -60,11 +63,11 @@ func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs [
 	return inserted, storeError("enqueue project jobs", err)
 }
 
-func prepareEnqueueJobs(jobs []protocol.JobSpecV1, identityMode string) ([]preparedEnqueueJob, error) {
+func prepareEnqueueJobs(jobs []protocol.AdminEnqueueJob, identityMode string) ([]preparedEnqueueJob, error) {
 	prepared := make([]preparedEnqueueJob, 0, len(jobs))
-	var seen map[string]preparedEnqueueJob
+	var seen map[string]int
 	if identityMode != tracker.IdentityModeNone {
-		seen = make(map[string]preparedEnqueueJob, len(jobs))
+		seen = make(map[string]int, len(jobs))
 	}
 	for _, job := range jobs {
 		normalized, validationError := queue.NormalizeJob(queue.JobSpec{
@@ -86,8 +89,15 @@ func prepareEnqueueJobs(jobs []protocol.JobSpecV1, identityMode string) ([]prepa
 			return nil, err
 		}
 		value := preparedEnqueueJob{value: normalized.Value, spec: string(spec)}
+		if job.RandomKey != nil {
+			value.randomKey = *job.RandomKey
+			value.customRandomKey = true
+		}
 		switch identityMode {
 		case tracker.IdentityModeNone:
+			if !value.customRandomKey {
+				value.randomKey = newRandomKey()
+			}
 			prepared = append(prepared, value)
 			continue
 		case tracker.IdentityModeExternalID:
@@ -98,27 +108,42 @@ func prepareEnqueueJobs(jobs []protocol.JobSpecV1, identityMode string) ([]prepa
 		default:
 			return nil, fmt.Errorf("unknown project identity mode %q", identityMode)
 		}
-		if previous, exists := seen[value.identity]; exists {
+		if previousIndex, exists := seen[value.identity]; exists {
+			previous := &prepared[previousIndex]
 			if identityMode == tracker.IdentityModeUniqueValue && previous.value != value.value {
 				return nil, &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "value digest collision"}
 			}
 			if previous.value != value.value || previous.spec != value.spec {
 				return nil, &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job identity already exists with a different spec"}
 			}
+			if previous.customRandomKey && value.customRandomKey && previous.randomKey != value.randomKey {
+				return nil, &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job identity has conflicting random keys"}
+			}
+			if value.customRandomKey && !previous.customRandomKey {
+				previous.randomKey = value.randomKey
+				previous.customRandomKey = true
+			}
 			continue
 		}
-		seen[value.identity] = value
+		if !value.customRandomKey {
+			value.randomKey = newRandomKey()
+		}
+		seen[value.identity] = len(prepared)
 		prepared = append(prepared, value)
 	}
 	return prepared, nil
 }
 
+func newRandomKey() int32 { return int32(rand.Uint32()) }
+
 func bulkEnqueueJobs(ctx context.Context, tx pgx.Tx, projectID, identityMode string, jobs []preparedEnqueueJob, now int64) (int64, error) {
 	identities := make([]string, len(jobs))
 	values := make([]string, len(jobs))
 	specs := make([]string, len(jobs))
+	randomKeys := make([]int32, len(jobs))
 	for index, job := range jobs {
 		identities[index], values[index], specs[index] = job.identity, job.value, job.spec
+		randomKeys[index] = job.randomKey
 	}
 	var (
 		tag pgconn.CommandTag
@@ -127,27 +152,27 @@ func bulkEnqueueJobs(ctx context.Context, tx pgx.Tx, projectID, identityMode str
 	switch identityMode {
 	case tracker.IdentityModeNone:
 		tag, err = tx.Exec(ctx, `
-			INSERT INTO tracker_jobs(project_id,value,spec,status,created_at,updated_at)
-			SELECT $1,input.value,input.spec_text::jsonb,'todo',$4,$4
-			FROM unnest($2::text[],$3::text[]) WITH ORDINALITY AS input(value,spec_text,ordinal)
+			INSERT INTO tracker_jobs(project_id,value,spec,random_key,status,created_at,updated_at)
+			SELECT $1,input.value,input.spec_text::jsonb,input.random_key,'todo',$5,$5
+			FROM unnest($2::text[],$3::text[],$4::integer[]) WITH ORDINALITY AS input(value,spec_text,random_key,ordinal)
 			ORDER BY input.ordinal
-		`, projectID, values, specs, now)
+		`, projectID, values, specs, randomKeys, now)
 	case tracker.IdentityModeExternalID:
 		tag, err = tx.Exec(ctx, `
-			INSERT INTO tracker_jobs(project_id,external_id,value,spec,status,created_at,updated_at)
-			SELECT $1,input.identity,input.value,input.spec_text::jsonb,'todo',$5,$5
-			FROM unnest($2::text[],$3::text[],$4::text[]) WITH ORDINALITY AS input(identity,value,spec_text,ordinal)
+			INSERT INTO tracker_jobs(project_id,external_id,value,spec,random_key,status,created_at,updated_at)
+			SELECT $1,input.identity,input.value,input.spec_text::jsonb,input.random_key,'todo',$6,$6
+			FROM unnest($2::text[],$3::text[],$4::text[],$5::integer[]) WITH ORDINALITY AS input(identity,value,spec_text,random_key,ordinal)
 			ORDER BY input.ordinal
 			ON CONFLICT (project_id,external_id) WHERE external_id IS NOT NULL DO NOTHING
-		`, projectID, identities, values, specs, now)
+		`, projectID, identities, values, specs, randomKeys, now)
 	case tracker.IdentityModeUniqueValue:
 		tag, err = tx.Exec(ctx, `
-			INSERT INTO tracker_jobs(project_id,value,unique_value_digest,spec,status,created_at,updated_at)
-			SELECT $1,input.value,decode(input.identity,'hex'),input.spec_text::jsonb,'todo',$5,$5
-			FROM unnest($2::text[],$3::text[],$4::text[]) WITH ORDINALITY AS input(identity,value,spec_text,ordinal)
+			INSERT INTO tracker_jobs(project_id,value,unique_value_digest,spec,random_key,status,created_at,updated_at)
+			SELECT $1,input.value,decode(input.identity,'hex'),input.spec_text::jsonb,input.random_key,'todo',$6,$6
+			FROM unnest($2::text[],$3::text[],$4::text[],$5::integer[]) WITH ORDINALITY AS input(identity,value,spec_text,random_key,ordinal)
 			ORDER BY input.ordinal
 			ON CONFLICT (project_id,unique_value_digest) WHERE unique_value_digest IS NOT NULL DO NOTHING
-		`, projectID, identities, values, specs, now)
+		`, projectID, identities, values, specs, randomKeys, now)
 	default:
 		return 0, fmt.Errorf("unknown project identity mode %q", identityMode)
 	}
@@ -212,7 +237,8 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 	leaseExpiresAt := now + request.LeaseSeconds
 	result := make([]protocol.ClaimedJob, 0, request.MaxJobs)
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := authorizeProjectWorker(ctx, tx, userID, projectID); err != nil {
+		claimOrder, err := authorizeProjectWorker(ctx, tx, userID, projectID)
+		if err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -223,13 +249,19 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 		`, projectID, now); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `
+		orderBy := "created_at,job_id"
+		if claimOrder == tracker.ClaimOrderRandom {
+			orderBy = "random_key,job_id"
+		} else if claimOrder != tracker.ClaimOrderFIFO {
+			return fmt.Errorf("unknown project claim order %q", claimOrder)
+		}
+		rows, err := tx.Query(ctx, fmt.Sprintf(`
 			SELECT job_id,external_id,value,spec FROM tracker_jobs
 			WHERE project_id=$1 AND status='todo'
 				AND (COALESCE(cardinality($2::text[]), 0) = 0 OR COALESCE(spec->>'type','seed') = ANY($2::text[]))
-			ORDER BY created_at,job_id
+			ORDER BY %s
 			FOR UPDATE SKIP LOCKED LIMIT $3
-		`, projectID, request.AcceptTypes, request.MaxJobs)
+		`, orderBy), projectID, request.AcceptTypes, request.MaxJobs)
 		if err != nil {
 			return err
 		}
@@ -277,23 +309,23 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 	return result, storeError("claim project jobs", err)
 }
 
-func authorizeProjectWorker(ctx context.Context, tx pgx.Tx, userID, projectID string) error {
-	var userStatus, projectStatus string
+func authorizeProjectWorker(ctx context.Context, tx pgx.Tx, userID, projectID string) (string, error) {
+	var userStatus, projectStatus, claimOrder string
 	var roles []string
-	err := tx.QueryRow(ctx, `SELECT u.status,u.roles,p.status FROM tracker_users u CROSS JOIN tracker_projects p WHERE u.id=$1 AND p.id=$2`, userID, projectID).Scan(&userStatus, &roles, &projectStatus)
+	err := tx.QueryRow(ctx, `SELECT u.status,u.roles,p.status,p.claim_order FROM tracker_users u CROSS JOIN tracker_projects p WHERE u.id=$1 AND p.id=$2`, userID, projectID).Scan(&userStatus, &roles, &projectStatus, &claimOrder)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "user or project not found"}
+		return "", &tracker.Error{Code: protocol.ErrorNotFound, Message: "user or project not found"}
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if userStatus != tracker.UserStatusActive || !roleMap(roles)[tracker.RoleWorker] {
-		return &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "active worker role required"}
+		return "", &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "active worker role required"}
 	}
 	if projectStatus != tracker.ProjectStatusActive {
-		return &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "project is not active"}
+		return "", &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "project is not active"}
 	}
-	return nil
+	return claimOrder, nil
 }
 
 func (s *Store) CompleteProjectJobs(ctx context.Context, userID, projectID string, request protocol.ProjectCompleteRequest, now int64) (protocol.BatchResultResponse, error) {
@@ -394,7 +426,7 @@ func (s *Store) ExtendProjectJobLeases(ctx context.Context, userID, projectID st
 func (s *Store) finishProjectJobs(ctx context.Context, userID, projectID string, now int64, fn func(pgx.Tx) ([]protocol.ItemResult, error)) (protocol.BatchResultResponse, error) {
 	var response protocol.BatchResultResponse
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := authorizeProjectWorker(ctx, tx, userID, projectID); err != nil {
+		if _, err := authorizeProjectWorker(ctx, tx, userID, projectID); err != nil {
 			return err
 		}
 		results, err := fn(tx)

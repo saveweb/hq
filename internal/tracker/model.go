@@ -61,7 +61,13 @@ type Project struct {
 	ID           string
 	Status       string
 	IdentityMode string
+	ClaimOrder   string
 }
+
+const (
+	ClaimOrderFIFO   = "fifo"
+	ClaimOrderRandom = "random"
+)
 
 func InvalidRequest(message string) *Error {
 	return &Error{Code: protocol.ErrorInvalidRequest, Message: message}

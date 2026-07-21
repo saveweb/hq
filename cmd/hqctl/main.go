@@ -30,7 +30,7 @@ const (
 
 type adminAPI interface {
 	AdminProject(context.Context, string) (protocol.AdminProjectSummary, error)
-	EnqueueAdminProjectJobs(context.Context, string, []protocol.JobSpecV1) (protocol.AdminEnqueueJobsResponse, error)
+	EnqueueAdminProjectJobs(context.Context, string, []protocol.AdminEnqueueJob) (protocol.AdminEnqueueJobsResponse, error)
 	EnqueueAdminProjectSource(context.Context, string, io.Reader) (protocol.AdminEnqueueSourceResponse, error)
 }
 
@@ -137,7 +137,7 @@ func enqueueBatches(ctx context.Context, client adminAPI, project protocol.Admin
 	if initialCapacity > defaultBatchSize {
 		initialCapacity = defaultBatchSize
 	}
-	batch := make([]protocol.JobSpecV1, 0, initialCapacity)
+	batch := make([]protocol.AdminEnqueueJob, 0, initialCapacity)
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -201,24 +201,24 @@ func enqueueBatches(ctx context.Context, client adminAPI, project protocol.Admin
 	return result, nil
 }
 
-func decodeInputJob(line []byte, inputFormat, jobType string) (protocol.JobSpecV1, error) {
+func decodeInputJob(line []byte, inputFormat, jobType string) (protocol.AdminEnqueueJob, error) {
 	if inputFormat == "values" {
-		return protocol.JobSpecV1{Value: string(line), Type: jobType}, nil
+		return protocol.AdminEnqueueJob{Value: string(line), Type: jobType}, nil
 	}
 	decoder := json.NewDecoder(bytes.NewReader(line))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
-	var job protocol.JobSpecV1
+	var job protocol.AdminEnqueueJob
 	if err := decoder.Decode(&job); err != nil {
-		return protocol.JobSpecV1{}, err
+		return protocol.AdminEnqueueJob{}, err
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {
-		return protocol.JobSpecV1{}, fmt.Errorf("line must contain one JSON object")
+		return protocol.AdminEnqueueJob{}, fmt.Errorf("line must contain one JSON object")
 	}
 	return job, nil
 }
 
-func applyIdentityMode(job protocol.JobSpecV1, identityMode string) (protocol.JobSpecV1, error) {
+func applyIdentityMode(job protocol.AdminEnqueueJob, identityMode string) (protocol.AdminEnqueueJob, error) {
 	switch identityMode {
 	case tracker.IdentityModeExternalID:
 		if job.ID == "" {
@@ -226,10 +226,10 @@ func applyIdentityMode(job protocol.JobSpecV1, identityMode string) (protocol.Jo
 		}
 	case tracker.IdentityModeUniqueValue, tracker.IdentityModeNone:
 		if job.ID != "" {
-			return protocol.JobSpecV1{}, fmt.Errorf("project identity mode %s rejects job id", identityMode)
+			return protocol.AdminEnqueueJob{}, fmt.Errorf("project identity mode %s rejects job id", identityMode)
 		}
 	default:
-		return protocol.JobSpecV1{}, fmt.Errorf("project has unknown identity mode %q", identityMode)
+		return protocol.AdminEnqueueJob{}, fmt.Errorf("project has unknown identity mode %q", identityMode)
 	}
 	return job, nil
 }

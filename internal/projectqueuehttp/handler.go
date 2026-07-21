@@ -209,7 +209,7 @@ func (h *handler) putProject(ctx *echo.Context) error {
 		return nil
 	}
 	projectID := ctx.Param("project_id")
-	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode}, h.now()); err != nil {
+	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode, ClaimOrder: request.ClaimOrder}, h.now()); err != nil {
 		return h.writeError(ctx, err)
 	}
 	project, err := h.store.ProjectSummary(ctx.Request().Context(), projectID)
@@ -260,9 +260,9 @@ func (h *handler) enqueueSource(ctx *echo.Context) error {
 	var inserted int64
 	var enqueueErr error
 	stats, err := sourceformat.Decode(ctx.Request().Context(), io.LimitReader(ctx.Request().Body, sourceCompressedLimit+1), sourceformat.Limits{MaxUncompressedBytes: sourceExpandedLimit, MaxJobs: sourceJobLimit}, func(batch []queue.JobSpec) error {
-		jobs := make([]protocol.JobSpecV1, 0, len(batch))
+		jobs := make([]protocol.AdminEnqueueJob, 0, len(batch))
 		for _, job := range batch {
-			jobs = append(jobs, protocol.JobSpecV1{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
+			jobs = append(jobs, protocol.AdminEnqueueJob{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
 		}
 		count, err := h.store.EnqueueProjectJobs(ctx.Request().Context(), projectID, jobs, h.now())
 		inserted += count

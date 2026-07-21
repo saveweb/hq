@@ -48,7 +48,7 @@ type Store interface {
 	ListProjectSummaries(context.Context) ([]protocol.AdminProjectSummary, error)
 	ProjectSummary(context.Context, string) (protocol.AdminProjectSummary, error)
 	PutProject(context.Context, tracker.Project, int64) error
-	EnqueueProjectJobs(context.Context, string, []protocol.JobSpecV1, int64) (int64, error)
+	EnqueueProjectJobs(context.Context, string, []protocol.AdminEnqueueJob, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
 	MachineToken(context.Context, string) (string, bool, error)
 	PutUser(context.Context, string, string, []string, int64) error
@@ -456,7 +456,7 @@ func (h *Handler) createProject(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
-	project := tracker.Project{ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"), IdentityMode: ctx.FormValue("identity_mode")}
+	project := tracker.Project{ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"), IdentityMode: ctx.FormValue("identity_mode"), ClaimOrder: ctx.FormValue("claim_order")}
 	if err := h.store.PutProject(ctx.Request().Context(), project, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
@@ -476,7 +476,7 @@ func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
 		return nil
 	}
 	projectID := ctx.Param("project_id")
-	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: ctx.FormValue("status")}, h.clock()); err != nil {
+	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: ctx.FormValue("status"), ClaimOrder: ctx.FormValue("claim_order")}, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
@@ -501,7 +501,7 @@ func (h *Handler) enqueueJobs(ctx *echo.Context) error {
 	decoder := json.NewDecoder(io.LimitReader(strings.NewReader(ctx.FormValue("jobs_json")), maxFormBytes))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
-	var jobs []protocol.JobSpecV1
+	var jobs []protocol.AdminEnqueueJob
 	if err := decoder.Decode(&jobs); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(jobs) == 0 || len(jobs) > 256 {
 		return h.pageError(ctx, http.StatusBadRequest, "Job batch must be one JSON array containing 1-256 valid jobs")
 	}
@@ -525,9 +525,9 @@ func (h *Handler) enqueueSource(ctx *echo.Context) error {
 	projectID := ctx.Param("project_id")
 	var storeErr error
 	_, err = sourceformat.Decode(ctx.Request().Context(), io.LimitReader(file, maxSourceBytes+1), sourceformat.Limits{MaxUncompressedBytes: maxExpandedBytes, MaxJobs: maxSourceJobs}, func(batch []queue.JobSpec) error {
-		jobs := make([]protocol.JobSpecV1, 0, len(batch))
+		jobs := make([]protocol.AdminEnqueueJob, 0, len(batch))
 		for _, job := range batch {
-			jobs = append(jobs, protocol.JobSpecV1{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
+			jobs = append(jobs, protocol.AdminEnqueueJob{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
 		}
 		_, storeErr = h.store.EnqueueProjectJobs(ctx.Request().Context(), projectID, jobs, h.clock())
 		return storeErr

@@ -67,7 +67,7 @@ func (c *Client) AdminProject(ctx context.Context, projectID string) (protocol.A
 	return result, err
 }
 
-func (c *Client) EnqueueAdminProjectJobs(ctx context.Context, projectID string, jobs []protocol.JobSpecV1) (protocol.AdminEnqueueJobsResponse, error) {
+func (c *Client) EnqueueAdminProjectJobs(ctx context.Context, projectID string, jobs []protocol.AdminEnqueueJob) (protocol.AdminEnqueueJobsResponse, error) {
 	encoded, err := json.Marshal(protocol.AdminEnqueueJobsRequest{Jobs: jobs})
 	if err != nil {
 		return protocol.AdminEnqueueJobsResponse{}, err

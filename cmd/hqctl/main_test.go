@@ -43,14 +43,14 @@ func TestEnqueueJSONLRejectsIDForUniqueValueProject(t *testing.T) {
 type fakeAdminAPI struct {
 	calls      int
 	batchSizes []int
-	jobs       []protocol.JobSpecV1
+	jobs       []protocol.AdminEnqueueJob
 }
 
 func (f *fakeAdminAPI) AdminProject(context.Context, string) (protocol.AdminProjectSummary, error) {
 	panic("not used")
 }
 
-func (f *fakeAdminAPI) EnqueueAdminProjectJobs(_ context.Context, _ string, jobs []protocol.JobSpecV1) (protocol.AdminEnqueueJobsResponse, error) {
+func (f *fakeAdminAPI) EnqueueAdminProjectJobs(_ context.Context, _ string, jobs []protocol.AdminEnqueueJob) (protocol.AdminEnqueueJobsResponse, error) {
 	f.calls++
 	f.batchSizes = append(f.batchSizes, len(jobs))
 	f.jobs = append(f.jobs, jobs...)

@@ -117,12 +117,18 @@ func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int
 	if project.IdentityMode != "" && project.IdentityMode != tracker.IdentityModeNone && project.IdentityMode != tracker.IdentityModeExternalID && project.IdentityMode != tracker.IdentityModeUniqueValue {
 		return tracker.InvalidRequest("invalid project identity mode")
 	}
+	if project.ClaimOrder != "" && project.ClaimOrder != tracker.ClaimOrderFIFO && project.ClaimOrder != tracker.ClaimOrderRandom {
+		return tracker.InvalidRequest("invalid project claim order")
+	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO tracker_projects(id,status,identity_mode,created_at,updated_at)
-		VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),$4,$4)
-		ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at
+		INSERT INTO tracker_projects(id,status,identity_mode,claim_order,created_at,updated_at)
+		VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$5)
+		ON CONFLICT(id) DO UPDATE SET
+			status=EXCLUDED.status,
+			claim_order=COALESCE(NULLIF($4,''),tracker_projects.claim_order),
+			updated_at=EXCLUDED.updated_at
 		WHERE $3='' OR tracker_projects.identity_mode=$3
-	`, project.ID, project.Status, project.IdentityMode, now)
+	`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, now)
 	if err == nil && tag.RowsAffected() == 0 {
 		return tracker.InvalidRequest("project identity mode cannot be changed")
 	}
