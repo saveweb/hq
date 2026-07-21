@@ -22,12 +22,14 @@ type fakeStore struct {
 	sessions   map[string]bool
 	projects   map[string]protocol.AdminProjectSummary
 	enqueued   []protocol.JobSpecV1
+	jobs       map[string][]protocol.AdminJob
+	users      map[string]protocol.AdminUserSummary
 	deleted    bool
 	upsertedID int64
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}}
+	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}}
 }
 
 func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
@@ -70,6 +72,9 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 		existing.CreatedAt = now
 	}
 	existing.ID, existing.Status, existing.UpdatedAt = project.ID, project.Status, now
+	if existing.IdentityMode == "" {
+		existing.IdentityMode = project.IdentityMode
+	}
 	if existing.JobCounts == nil {
 		existing.JobCounts = map[string]int64{}
 	}
@@ -78,10 +83,70 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 }
 func (s *fakeStore) EnqueueProjectJobs(_ context.Context, projectID string, jobs []protocol.JobSpecV1, _ int64) (int64, error) {
 	s.enqueued = append(s.enqueued, jobs...)
+	for _, spec := range jobs {
+		s.jobs[projectID] = append(s.jobs[projectID], protocol.AdminJob{JobSpecV1: spec, JobID: int64(len(s.jobs[projectID]) + 1), Status: protocol.JobStatusTodo})
+	}
 	project := s.projects[projectID]
 	project.JobCounts[protocol.JobStatusTodo] += int64(len(jobs))
 	s.projects[projectID] = project
 	return int64(len(jobs)), nil
+}
+func (s *fakeStore) ListUsers(context.Context) ([]protocol.AdminUserSummary, error) {
+	result := []protocol.AdminUserSummary{}
+	for _, user := range s.users {
+		result = append(result, user)
+	}
+	return result, nil
+}
+func (s *fakeStore) PutUser(_ context.Context, id, status string, roles []string, _ int64) error {
+	s.users[id] = protocol.AdminUserSummary{ID: id, Status: status, Roles: roles}
+	return nil
+}
+func (s *fakeStore) RotateMachineToken(_ context.Context, id, _ string, _ int64) error {
+	user := s.users[id]
+	user.ID, user.MachineTokenActive = id, true
+	s.users[id] = user
+	return nil
+}
+func (s *fakeStore) RevokeMachineToken(_ context.Context, id string, _ int64) error {
+	user := s.users[id]
+	user.MachineTokenActive = false
+	s.users[id] = user
+	return nil
+}
+func (s *fakeStore) DeleteProject(_ context.Context, id string) error {
+	delete(s.projects, id)
+	delete(s.jobs, id)
+	return nil
+}
+func (s *fakeStore) ListProjectJobs(_ context.Context, id, _ string, _ int64, _ int) (protocol.AdminJobListResponse, error) {
+	return protocol.AdminJobListResponse{Jobs: s.jobs[id]}, nil
+}
+func (s *fakeStore) ProjectJob(_ context.Context, id string, jobID int64) (protocol.AdminJob, error) {
+	for _, job := range s.jobs[id] {
+		if job.JobID == jobID {
+			return job, nil
+		}
+	}
+	return protocol.AdminJob{}, &tracker.Error{Code: protocol.ErrorNotFound, Message: "missing"}
+}
+func (s *fakeStore) RequeueProjectJob(_ context.Context, id string, jobID, _ int64) error {
+	for index := range s.jobs[id] {
+		if s.jobs[id][index].JobID == jobID {
+			s.jobs[id][index].Status = protocol.JobStatusTodo
+		}
+	}
+	return nil
+}
+func (s *fakeStore) DeleteProjectJob(_ context.Context, id string, jobID int64) error {
+	jobs := s.jobs[id]
+	for index := range jobs {
+		if jobs[index].JobID == jobID {
+			s.jobs[id] = append(jobs[:index], jobs[index+1:]...)
+			break
+		}
+	}
+	return nil
 }
 
 type fakeOAuth struct {
@@ -142,22 +207,46 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("dashboard = %d %q", dashboard.Code, dashboard.Body.String())
 	}
 	csrf := extractCSRF(t, dashboard.Body.String())
-	create := postForm(t, server, "/admin/projects", url.Values{"csrf": {csrf}, "project_id": {"demo"}, "status": {tracker.ProjectStatusActive}}, sessionCookie)
+	create := postForm(t, server, "/admin/projects", url.Values{"csrf": {csrf}, "project_id": {"demo"}, "status": {tracker.ProjectStatusActive}, "identity_mode": {tracker.IdentityModeUniqueValue}}, sessionCookie)
 	if create.Code != http.StatusSeeOther || create.Header().Get("Location") != "/admin/projects/demo" {
 		t.Fatalf("create = %d %q", create.Code, create.Header().Get("Location"))
 	}
 	detail := request(t, server, http.MethodGet, "/admin/projects/demo", "", sessionCookie)
-	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") {
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
 	}
-	jobs := `[ {"id":"job-1","url":"https://example.com/","type":"archive"} ]`
+	jobs := `[ {"value":"https://example.com/","type":"archive"} ]`
 	enqueue := postForm(t, server, "/admin/projects/demo/jobs", url.Values{"csrf": {csrf}, "jobs_json": {jobs}}, sessionCookie)
-	if enqueue.Code != http.StatusSeeOther || len(store.enqueued) != 1 || store.enqueued[0].ID != "job-1" {
+	if enqueue.Code != http.StatusSeeOther || len(store.enqueued) != 1 || store.enqueued[0].Value != "https://example.com/" {
 		t.Fatalf("enqueue = %d jobs=%+v", enqueue.Code, store.enqueued)
+	}
+	jobDetail := request(t, server, http.MethodGet, "/admin/projects/demo/jobs/1", "", sessionCookie)
+	if jobDetail.Code != http.StatusOK || !strings.Contains(jobDetail.Body.String(), "https://example.com/") {
+		t.Fatalf("job detail = %d %q", jobDetail.Code, jobDetail.Body.String())
+	}
+	users := request(t, server, http.MethodGet, "/admin/users", "", sessionCookie)
+	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "Create or update user") {
+		t.Fatalf("users = %d %q", users.Code, users.Body.String())
+	}
+	putUser := postForm(t, server, "/admin/users", url.Values{"csrf": {csrf}, "user_id": {"worker-web"}, "status": {tracker.UserStatusActive}, "roles": {tracker.RoleWorker}}, sessionCookie)
+	if putUser.Code != http.StatusSeeOther || store.users["worker-web"].Status != tracker.UserStatusActive {
+		t.Fatalf("put user = %d user=%+v", putUser.Code, store.users["worker-web"])
+	}
+	token := postForm(t, server, "/admin/users/worker-web/token", url.Values{"csrf": {csrf}}, sessionCookie)
+	if token.Code != http.StatusOK || !strings.Contains(token.Body.String(), "hq_") || !store.users["worker-web"].MachineTokenActive {
+		t.Fatalf("rotate token = %d %q", token.Code, token.Body.String())
+	}
+	deleteJob := postForm(t, server, "/admin/projects/demo/jobs/1/delete", url.Values{"csrf": {csrf}}, sessionCookie)
+	if deleteJob.Code != http.StatusSeeOther || len(store.jobs["demo"]) != 0 {
+		t.Fatalf("delete job = %d jobs=%+v", deleteJob.Code, store.jobs["demo"])
 	}
 	rejected := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {"wrong"}, "status": {tracker.ProjectStatusArchived}}, sessionCookie)
 	if rejected.Code != http.StatusForbidden || store.projects["demo"].Status != tracker.ProjectStatusActive {
 		t.Fatalf("invalid CSRF = %d project=%+v", rejected.Code, store.projects["demo"])
+	}
+	deletedProject := postForm(t, server, "/admin/projects/demo/delete", url.Values{"csrf": {csrf}}, sessionCookie)
+	if deletedProject.Code != http.StatusSeeOther {
+		t.Fatalf("delete project = %d", deletedProject.Code)
 	}
 	logout := postForm(t, server, "/logout", url.Values{"csrf": {csrf}}, sessionCookie)
 	if logout.Code != http.StatusSeeOther || !store.deleted {

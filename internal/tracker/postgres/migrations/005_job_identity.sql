@@ -1,3 +1,20 @@
+ALTER TABLE tracker_projects
+    ADD COLUMN IF NOT EXISTS identity_mode text NOT NULL DEFAULT 'external_id'
+    CHECK (identity_mode IN ('none', 'external_id', 'unique_value'));
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'tracker_jobs'
+          AND column_name = 'id'
+    ) THEN
+        RAISE NOTICE 'dropping pre-release tracker_jobs schema and all queued jobs';
+        DROP TABLE tracker_jobs;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS tracker_jobs (
     job_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     project_id text NOT NULL REFERENCES tracker_projects(id) ON DELETE CASCADE,
@@ -31,5 +48,5 @@ CREATE INDEX IF NOT EXISTS tracker_jobs_expired_idx
     ON tracker_jobs(project_id, lease_expires_at) WHERE status = 'wip';
 
 INSERT INTO tracker_schema_migrations(version, applied_at)
-VALUES (2, EXTRACT(EPOCH FROM clock_timestamp())::bigint)
+VALUES (5, EXTRACT(EPOCH FROM clock_timestamp())::bigint)
 ON CONFLICT (version) DO NOTHING;

@@ -20,16 +20,22 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"git.saveweb.org/saveweb/hq/internal/queue"
+	"git.saveweb.org/saveweb/hq/internal/sourceformat"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
 const (
-	sessionCookieName = "saveweb_hq_session"
-	oauthCookieName   = "saveweb_hq_oauth"
-	oauthTTL          = 10 * time.Minute
-	defaultSessionTTL = 12 * time.Hour
-	maxFormBytes      = int64(1 << 20)
+	sessionCookieName  = "saveweb_hq_session"
+	oauthCookieName    = "saveweb_hq_oauth"
+	oauthTTL           = 10 * time.Minute
+	defaultSessionTTL  = 12 * time.Hour
+	maxFormBytes       = int64(1 << 20)
+	maxSourceFormBytes = int64(257 << 20)
+	maxSourceBytes     = int64(256 << 20)
+	maxExpandedBytes   = int64(4 << 30)
+	maxSourceJobs      = int64(10_000_000)
 )
 
 type Store interface {
@@ -41,6 +47,15 @@ type Store interface {
 	ProjectSummary(context.Context, string) (protocol.AdminProjectSummary, error)
 	PutProject(context.Context, tracker.Project, int64) error
 	EnqueueProjectJobs(context.Context, string, []protocol.JobSpecV1, int64) (int64, error)
+	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
+	PutUser(context.Context, string, string, []string, int64) error
+	RotateMachineToken(context.Context, string, string, int64) error
+	RevokeMachineToken(context.Context, string, int64) error
+	DeleteProject(context.Context, string) error
+	ListProjectJobs(context.Context, string, string, int64, int) (protocol.AdminJobListResponse, error)
+	ProjectJob(context.Context, string, int64) (protocol.AdminJob, error)
+	RequeueProjectJob(context.Context, string, int64, int64) error
+	DeleteProjectJob(context.Context, string, int64) error
 }
 
 type OAuth interface {
@@ -106,10 +121,19 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/auth/github/callback", h.oauthCallback)
 	server.POST("/logout", h.logout)
 	server.GET("/admin", h.dashboard)
+	server.GET("/admin/users", h.users)
+	server.POST("/admin/users", h.putUser)
+	server.POST("/admin/users/:user_id/token", h.rotateUserToken)
+	server.POST("/admin/users/:user_id/token/revoke", h.revokeUserToken)
 	server.POST("/admin/projects", h.createProject)
 	server.GET("/admin/projects/:project_id", h.project)
 	server.POST("/admin/projects/:project_id/status", h.updateProjectStatus)
+	server.POST("/admin/projects/:project_id/delete", h.deleteProject)
 	server.POST("/admin/projects/:project_id/jobs", h.enqueueJobs)
+	server.POST("/admin/projects/:project_id/source", h.enqueueSource)
+	server.GET("/admin/projects/:project_id/jobs/:job_id", h.job)
+	server.POST("/admin/projects/:project_id/jobs/:job_id/requeue", h.requeueJob)
+	server.POST("/admin/projects/:project_id/jobs/:job_id/delete", h.deleteJob)
 }
 
 func (h *Handler) landing(ctx *echo.Context) error {
@@ -217,6 +241,62 @@ func (h *Handler) dashboard(ctx *echo.Context) error {
 	})
 }
 
+func (h *Handler) users(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, sessionToken, ok := h.requireAdmin(ctx)
+	if !ok {
+		return nil
+	}
+	users, err := h.store.ListUsers(ctx.Request().Context())
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	return render(ctx, http.StatusOK, "users", map[string]any{"User": user, "Users": users, "CSRF": h.csrfToken(sessionToken)})
+}
+
+func (h *Handler) putUser(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	if err := ctx.Request().ParseForm(); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Invalid form submission")
+	}
+	if err := h.store.PutUser(ctx.Request().Context(), ctx.FormValue("user_id"), ctx.FormValue("status"), ctx.Request().Form["roles"], h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "User update was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/users")
+}
+
+func (h *Handler) rotateUserToken(ctx *echo.Context) error {
+	user, sessionToken, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	random, err := randomValue()
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	token := "hq_" + random
+	userID := ctx.Param("user_id")
+	if err := h.store.RotateMachineToken(ctx.Request().Context(), userID, token, h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Token rotation was rejected")
+	}
+	h.webHeaders(ctx.Response().Header())
+	return render(ctx, http.StatusOK, "token", map[string]any{"User": user, "UserID": userID, "Token": token, "CSRF": h.csrfToken(sessionToken)})
+}
+
+func (h *Handler) revokeUserToken(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	if err := h.store.RevokeMachineToken(ctx.Request().Context(), ctx.Param("user_id"), h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Token revocation was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/users")
+}
+
 func (h *Handler) project(ctx *echo.Context) error {
 	h.webHeaders(ctx.Response().Header())
 	user, sessionToken, ok := h.requireAdmin(ctx)
@@ -230,8 +310,12 @@ func (h *Handler) project(ctx *echo.Context) error {
 		}
 		return h.internal(ctx, err)
 	}
+	jobs, err := h.store.ListProjectJobs(ctx.Request().Context(), project.ID, "", 0, 100)
+	if err != nil {
+		return h.internal(ctx, err)
+	}
 	return render(ctx, http.StatusOK, "project", map[string]any{
-		"User": user, "Project": project, "CSRF": h.csrfToken(sessionToken),
+		"User": user, "Project": project, "Jobs": jobs.Jobs, "CSRF": h.csrfToken(sessionToken), "JobExample": jobExample(project.IdentityMode),
 	})
 }
 
@@ -240,11 +324,18 @@ func (h *Handler) createProject(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
-	project := tracker.Project{ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status")}
+	project := tracker.Project{ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"), IdentityMode: ctx.FormValue("identity_mode")}
 	if err := h.store.PutProject(ctx.Request().Context(), project, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(project.ID))
+}
+
+func jobExample(identityMode string) string {
+	if identityMode == tracker.IdentityModeExternalID {
+		return "[{\n  \"id\": \"source-1\",\n  \"value\": \"example\"\n}]"
+	}
+	return "[{\n  \"value\": \"example\"\n}]"
 }
 
 func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
@@ -257,6 +348,17 @@ func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
+}
+
+func (h *Handler) deleteProject(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	if err := h.store.DeleteProject(ctx.Request().Context(), ctx.Param("project_id")); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Project deletion was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin")
 }
 
 func (h *Handler) enqueueJobs(ctx *echo.Context) error {
@@ -276,6 +378,97 @@ func (h *Handler) enqueueJobs(ctx *echo.Context) error {
 		return h.pageError(ctx, http.StatusBadRequest, "Job batch was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
+}
+
+func (h *Handler) enqueueSource(ctx *echo.Context) error {
+	_, _, ok := h.authorizePostLimit(ctx, maxSourceFormBytes)
+	if !ok {
+		return nil
+	}
+	file, _, err := ctx.Request().FormFile("source_file")
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Source file is required")
+	}
+	defer file.Close()
+	projectID := ctx.Param("project_id")
+	var storeErr error
+	_, err = sourceformat.Decode(ctx.Request().Context(), io.LimitReader(file, maxSourceBytes+1), sourceformat.Limits{MaxUncompressedBytes: maxExpandedBytes, MaxJobs: maxSourceJobs}, func(batch []queue.JobSpec) error {
+		jobs := make([]protocol.JobSpecV1, 0, len(batch))
+		for _, job := range batch {
+			jobs = append(jobs, protocol.JobSpecV1{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
+		}
+		_, storeErr = h.store.EnqueueProjectJobs(ctx.Request().Context(), projectID, jobs, h.clock())
+		return storeErr
+	})
+	if storeErr != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Source import was rejected")
+	}
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Source file is invalid")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
+}
+
+func (h *Handler) job(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, sessionToken, ok := h.requireAdmin(ctx)
+	if !ok {
+		return nil
+	}
+	jobID, err := strconv.ParseInt(ctx.Param("job_id"), 10, 64)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Invalid job ID")
+	}
+	job, err := h.store.ProjectJob(ctx.Request().Context(), ctx.Param("project_id"), jobID)
+	if err != nil {
+		return h.pageError(ctx, http.StatusNotFound, "Job not found")
+	}
+	return render(ctx, http.StatusOK, "job", map[string]any{
+		"User": user, "ProjectID": ctx.Param("project_id"), "Job": job, "CSRF": h.csrfToken(sessionToken),
+		"AttrsJSON": displayJSON(job.Attrs), "OutcomeJSON": displayJSON(job.Outcome),
+		"ErrorJSON": displayJSON(job.ExecutionError), "ReceiptsJSON": displayJSON(job.WARCReceipts),
+	})
+}
+
+func displayJSON(value any) string {
+	if value == nil {
+		return ""
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func (h *Handler) requeueJob(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	jobID, err := strconv.ParseInt(ctx.Param("job_id"), 10, 64)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Invalid job ID")
+	}
+	if err := h.store.RequeueProjectJob(ctx.Request().Context(), ctx.Param("project_id"), jobID, h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Job requeue was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(ctx.Param("project_id"))+"/jobs/"+strconv.FormatInt(jobID, 10))
+}
+
+func (h *Handler) deleteJob(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	jobID, err := strconv.ParseInt(ctx.Param("job_id"), 10, 64)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Invalid job ID")
+	}
+	if err := h.store.DeleteProjectJob(ctx.Request().Context(), ctx.Param("project_id"), jobID); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Job deletion was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(ctx.Param("project_id")))
 }
 
 func (h *Handler) logout(ctx *echo.Context) error {
@@ -317,8 +510,12 @@ func (h *Handler) currentUser(ctx *echo.Context) (tracker.User, string, error) {
 }
 
 func (h *Handler) authorizePost(ctx *echo.Context) (tracker.User, string, bool) {
+	return h.authorizePostLimit(ctx, maxFormBytes)
+}
+
+func (h *Handler) authorizePostLimit(ctx *echo.Context, limit int64) (tracker.User, string, bool) {
 	h.webHeaders(ctx.Response().Header())
-	ctx.Request().Body = http.MaxBytesReader(ctx.Response(), ctx.Request().Body, maxFormBytes)
+	ctx.Request().Body = http.MaxBytesReader(ctx.Response(), ctx.Request().Body, limit)
 	if err := ctx.Request().ParseForm(); err != nil {
 		_ = h.pageError(ctx, http.StatusBadRequest, "Invalid form submission")
 		return tracker.User{}, "", false

@@ -20,12 +20,12 @@ func TestMergeDeduplicatesInInputOrderAndSplits(t *testing.T) {
 	first := filepath.Join(directory, "input-1.jobs.jsonl.zst")
 	second := filepath.Join(directory, "input-2.jobs.jsonl.zst")
 	writeSource(t, first, []protocol.JobSpecV1{
-		{ID: "job-a", URL: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"stage": 2}},
-		{ID: "job-b", URL: "https://example.test/b", Type: protocol.JobTypeAsset, Via: nil, Attrs: map[string]any{}},
+		{ID: "job-a", Value: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"stage": 2}},
+		{ID: "job-b", Value: "https://example.test/b", Type: protocol.JobTypeAsset, Via: nil, Attrs: map[string]any{}},
 	})
 	writeSource(t, second, []protocol.JobSpecV1{
-		{ID: "job-a", URL: "https://example.test/a", Type: protocol.JobTypeSeed, Via: &via, Hops: 9, Attrs: map[string]any{"stage": 2}},
-		{ID: "job-c", URL: "https://example.test/c", Type: protocol.JobTypeSeed, Via: &via, Hops: 1, Attrs: map[string]any{}},
+		{ID: "job-a", Value: "https://example.test/a", Type: protocol.JobTypeSeed, Via: &via, Hops: 9, Attrs: map[string]any{"stage": 2}},
+		{ID: "job-c", Value: "https://example.test/c", Type: protocol.JobTypeSeed, Via: &via, Hops: 1, Attrs: map[string]any{}},
 	})
 	prefix := filepath.Join(directory, "stage-2")
 	stats, err := mergeSources(context.Background(), mergeConfig{
@@ -55,10 +55,10 @@ func TestMergeRejectsIdentityConflictAndCleansOutputs(t *testing.T) {
 	first := filepath.Join(directory, "first.zst")
 	second := filepath.Join(directory, "second.zst")
 	writeSource(t, first, []protocol.JobSpecV1{{
-		ID: "same-id", URL: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{},
+		ID: "same-id", Value: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{},
 	}})
 	writeSource(t, second, []protocol.JobSpecV1{{
-		ID: "same-id", URL: "https://example.test/different", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{},
+		ID: "same-id", Value: "https://example.test/different", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{},
 	}})
 	prefix := filepath.Join(directory, "conflict")
 	_, err := mergeSources(context.Background(), mergeConfig{
@@ -79,8 +79,8 @@ func TestMergeNeverOverwritesAndRemovesEarlierSplit(t *testing.T) {
 	directory := t.TempDir()
 	input := filepath.Join(directory, "input.zst")
 	writeSource(t, input, []protocol.JobSpecV1{
-		{ID: "job-a", URL: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{}},
-		{ID: "job-b", URL: "https://example.test/b", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{}},
+		{ID: "job-a", Value: "https://example.test/a", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{}},
+		{ID: "job-b", Value: "https://example.test/b", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{}},
 	})
 	prefix := filepath.Join(directory, "reserved")
 	reserved := fmtOutput(prefix, 2)

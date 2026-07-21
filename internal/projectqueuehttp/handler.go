@@ -2,21 +2,33 @@
 package projectqueuehttp
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"io"
 	"log/slog"
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 
 	"git.saveweb.org/saveweb/hq/internal/httpapi"
+	"git.saveweb.org/saveweb/hq/internal/queue"
+	"git.saveweb.org/saveweb/hq/internal/sourceformat"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
-const bodyLimit = int64(8 << 20)
+const (
+	bodyLimit             = int64(8 << 20)
+	sourceCompressedLimit = int64(256 << 20)
+	sourceExpandedLimit   = int64(4 << 30)
+	sourceJobLimit        = int64(10_000_000)
+)
 
 type handler struct {
 	store *postgres.Store
@@ -51,7 +63,7 @@ func New(store *postgres.Store, now func() int64, logger *slog.Logger) *echo.Ech
 	}
 	server.Use(middleware.RequestID())
 	server.Use(middleware.Recover())
-	server.Use(middleware.BodyLimit(bodyLimit))
+	server.Use(middleware.BodyLimit(sourceCompressedLimit))
 	server.Use(middleware.Secure())
 	server.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ctx *echo.Context) error {
@@ -69,13 +81,74 @@ func New(store *postgres.Store, now func() int64, logger *slog.Logger) *echo.Ech
 func Register(server *echo.Echo, store *postgres.Store, now func() int64) {
 	h := &handler{store: store, now: now}
 	server.GET("/api/v1/admin/projects", h.listProjects)
+	server.GET("/api/v1/admin/users", h.listUsers)
+	server.PUT("/api/v1/admin/users/:user_id", h.putUser)
+	server.POST("/api/v1/admin/users/:user_id/machine-token", h.rotateMachineToken)
+	server.DELETE("/api/v1/admin/users/:user_id/machine-token", h.revokeMachineToken)
 	server.GET("/api/v1/admin/projects/:project_id", h.getProject)
 	server.PUT("/api/v1/admin/projects/:project_id", h.putProject)
+	server.DELETE("/api/v1/admin/projects/:project_id", h.deleteProject)
 	server.POST("/api/v1/admin/projects/:project_id/jobs", h.enqueueJobs)
+	server.POST("/api/v1/admin/projects/:project_id/source", h.enqueueSource)
+	server.GET("/api/v1/admin/projects/:project_id/jobs", h.listJobs)
+	server.GET("/api/v1/admin/projects/:project_id/jobs/:job_id", h.getJob)
+	server.POST("/api/v1/admin/projects/:project_id/jobs/:job_id/requeue", h.requeueJob)
+	server.DELETE("/api/v1/admin/projects/:project_id/jobs/:job_id", h.deleteJob)
 	server.POST("/api/v1/projects/:project_id/jobs/claim", h.claim)
 	server.POST("/api/v1/projects/:project_id/jobs/complete", h.complete)
 	server.POST("/api/v1/projects/:project_id/jobs/fail", h.fail)
 	server.POST("/api/v1/projects/:project_id/jobs/extend-lease", h.extendLease)
+}
+
+func (h *handler) listUsers(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	users, err := h.store.ListUsers(ctx.Request().Context())
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, protocol.AdminUserListResponse{Users: users})
+}
+
+func (h *handler) putUser(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	var request protocol.AdminUserRequest
+	if !h.decode(ctx, &request) {
+		return nil
+	}
+	if err := h.store.PutUser(ctx.Request().Context(), ctx.Param("user_id"), request.Status, request.Roles, h.now()); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
+}
+
+func (h *handler) rotateMachineToken(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return h.writeError(ctx, err)
+	}
+	token := "hq_" + base64.RawURLEncoding.EncodeToString(raw[:])
+	userID := ctx.Param("user_id")
+	if err := h.store.RotateMachineToken(ctx.Request().Context(), userID, token, h.now()); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusCreated, protocol.AdminMachineTokenResponse{UserID: userID, Token: token})
+}
+
+func (h *handler) revokeMachineToken(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	if err := h.store.RevokeMachineToken(ctx.Request().Context(), ctx.Param("user_id"), h.now()); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
 }
 
 func (h *handler) listProjects(ctx *echo.Context) error {
@@ -109,7 +182,7 @@ func (h *handler) putProject(ctx *echo.Context) error {
 		return nil
 	}
 	projectID := ctx.Param("project_id")
-	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: request.Status}, h.now()); err != nil {
+	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode}, h.now()); err != nil {
 		return h.writeError(ctx, err)
 	}
 	project, err := h.store.ProjectSummary(ctx.Request().Context(), projectID)
@@ -117,6 +190,16 @@ func (h *handler) putProject(ctx *echo.Context) error {
 		return h.writeError(ctx, err)
 	}
 	return ctx.JSON(http.StatusOK, project)
+}
+
+func (h *handler) deleteProject(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	if err := h.store.DeleteProject(ctx.Request().Context(), ctx.Param("project_id")); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
 }
 
 func (h *handler) enqueueJobs(ctx *echo.Context) error {
@@ -136,6 +219,104 @@ func (h *handler) enqueueJobs(ctx *echo.Context) error {
 		return h.writeError(ctx, err)
 	}
 	return ctx.JSON(http.StatusOK, protocol.AdminEnqueueJobsResponse{ProjectID: projectID, Submitted: len(request.Jobs), Inserted: inserted})
+}
+
+func (h *handler) enqueueSource(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	mediaType, _, err := mime.ParseMediaType(ctx.Request().Header.Get("Content-Type"))
+	if err != nil || (mediaType != "application/zstd" && mediaType != "application/octet-stream") {
+		return h.writeAPIError(ctx, http.StatusUnsupportedMediaType, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "source body must be application/zstd"})
+	}
+	projectID := ctx.Param("project_id")
+	var inserted int64
+	var enqueueErr error
+	stats, err := sourceformat.Decode(ctx.Request().Context(), io.LimitReader(ctx.Request().Body, sourceCompressedLimit+1), sourceformat.Limits{MaxUncompressedBytes: sourceExpandedLimit, MaxJobs: sourceJobLimit}, func(batch []queue.JobSpec) error {
+		jobs := make([]protocol.JobSpecV1, 0, len(batch))
+		for _, job := range batch {
+			jobs = append(jobs, protocol.JobSpecV1{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
+		}
+		count, err := h.store.EnqueueProjectJobs(ctx.Request().Context(), projectID, jobs, h.now())
+		inserted += count
+		enqueueErr = err
+		return err
+	})
+	if enqueueErr != nil {
+		return h.writeError(ctx, enqueueErr)
+	}
+	if err != nil {
+		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidJob, Message: err.Error()})
+	}
+	return ctx.JSON(http.StatusOK, protocol.AdminEnqueueSourceResponse{ProjectID: projectID, Jobs: stats.Jobs, Inserted: inserted, UncompressedBytes: stats.UncompressedBytes})
+}
+
+func (h *handler) listJobs(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	after, limit := int64(0), 50
+	var err error
+	if text := ctx.QueryParam("after_job_id"); text != "" {
+		after, err = strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "invalid after_job_id"})
+		}
+	}
+	if text := ctx.QueryParam("limit"); text != "" {
+		limit, err = strconv.Atoi(text)
+		if err != nil {
+			return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "invalid limit"})
+		}
+	}
+	result, err := h.store.ListProjectJobs(ctx.Request().Context(), ctx.Param("project_id"), ctx.QueryParam("status"), after, limit)
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, result)
+}
+
+func (h *handler) getJob(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	jobID, err := strconv.ParseInt(ctx.Param("job_id"), 10, 64)
+	if err != nil {
+		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "invalid job_id"})
+	}
+	job, err := h.store.ProjectJob(ctx.Request().Context(), ctx.Param("project_id"), jobID)
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, job)
+}
+
+func (h *handler) requeueJob(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	jobID, err := strconv.ParseInt(ctx.Param("job_id"), 10, 64)
+	if err != nil {
+		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "invalid job_id"})
+	}
+	if err := h.store.RequeueProjectJob(ctx.Request().Context(), ctx.Param("project_id"), jobID, h.now()); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
+}
+
+func (h *handler) deleteJob(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	jobID, err := strconv.ParseInt(ctx.Param("job_id"), 10, 64)
+	if err != nil {
+		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "invalid job_id"})
+	}
+	if err := h.store.DeleteProjectJob(ctx.Request().Context(), ctx.Param("project_id"), jobID); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
 }
 
 func (h *handler) claim(ctx *echo.Context) error {

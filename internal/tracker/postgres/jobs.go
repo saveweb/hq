@@ -3,12 +3,14 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"git.saveweb.org/saveweb/hq/internal/queue"
 	"git.saveweb.org/saveweb/hq/internal/tracker"
@@ -19,14 +21,21 @@ const maxProjectBatch = 256
 
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+type storedJobSpec struct {
+	Type  string         `json:"type,omitempty"`
+	Via   *string        `json:"via,omitempty"`
+	Hops  int            `json:"hops,omitempty"`
+	Attrs map[string]any `json:"attr,omitempty"`
+}
+
 func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
 	if !queue.ValidateIdentifier(projectID) || len(jobs) == 0 || len(jobs) > 100_000 {
 		return 0, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid project or job batch"}
 	}
 	var inserted int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var status string
-		if err := tx.QueryRow(ctx, `SELECT status FROM tracker_projects WHERE id=$1`, projectID).Scan(&status); err != nil {
+		var status, identityMode string
+		if err := tx.QueryRow(ctx, `SELECT status,identity_mode FROM tracker_projects WHERE id=$1`, projectID).Scan(&status, &identityMode); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return &tracker.Error{Code: protocol.ErrorNotFound, Message: "project not found"}
 			}
@@ -36,38 +45,68 @@ func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs [
 			return &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "archived project cannot accept jobs"}
 		}
 		for _, job := range jobs {
-			normalized, validationError := queue.NormalizeJob(queue.JobSpec{ID: job.ID, URL: job.URL, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
+			normalized, validationError := queue.NormalizeJob(queue.JobSpec{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
 			if validationError != nil {
 				return &tracker.Error{Code: protocol.ErrorInvalidJob, Message: validationError.Message}
 			}
-			spec, err := json.Marshal(protocol.JobSpecV1{
-				ID: normalized.ID, URL: normalized.URL, Type: normalized.Type,
-				Via: normalized.Via, Hops: normalized.Hops, Attrs: normalized.Attrs,
+			if identityMode == tracker.IdentityModeExternalID && normalized.ID == "" {
+				return &tracker.Error{Code: protocol.ErrorInvalidJob, Message: "id is required for external_id projects"}
+			}
+			if identityMode != tracker.IdentityModeExternalID && normalized.ID != "" {
+				return &tracker.Error{Code: protocol.ErrorInvalidJob, Message: "id is allowed only for external_id projects"}
+			}
+			spec, err := json.Marshal(storedJobSpec{
+				Type: normalized.Type, Via: normalized.Via, Hops: normalized.Hops, Attrs: normalized.Attrs,
 			})
 			if err != nil {
 				return err
 			}
-			tag, err := tx.Exec(ctx, `
-				INSERT INTO tracker_jobs(project_id,id,spec,status,created_at,updated_at)
-				VALUES ($1,$2,$3,'todo',$4,$4)
-				ON CONFLICT (project_id,id) DO NOTHING
-			`, projectID, job.ID, spec, now)
+			var tag pgconn.CommandTag
+			var digest []byte
+			switch identityMode {
+			case tracker.IdentityModeNone:
+				tag, err = tx.Exec(ctx, `INSERT INTO tracker_jobs(project_id,value,spec,status,created_at,updated_at) VALUES ($1,$2,$3,'todo',$4,$4)`, projectID, normalized.Value, spec, now)
+			case tracker.IdentityModeExternalID:
+				tag, err = tx.Exec(ctx, `
+					INSERT INTO tracker_jobs(project_id,external_id,value,spec,status,created_at,updated_at)
+					VALUES ($1,$2,$3,$4,'todo',$5,$5)
+					ON CONFLICT (project_id,external_id) WHERE external_id IS NOT NULL DO NOTHING
+				`, projectID, normalized.ID, normalized.Value, spec, now)
+			case tracker.IdentityModeUniqueValue:
+				sum := sha256.Sum256([]byte(normalized.Value))
+				digest = sum[:]
+				tag, err = tx.Exec(ctx, `
+					INSERT INTO tracker_jobs(project_id,value,unique_value_digest,spec,status,created_at,updated_at)
+					VALUES ($1,$2,$3,$4,'todo',$5,$5)
+					ON CONFLICT (project_id,unique_value_digest) WHERE unique_value_digest IS NOT NULL DO NOTHING
+				`, projectID, normalized.Value, digest, spec, now)
+			default:
+				return fmt.Errorf("unknown project identity mode %q", identityMode)
+			}
 			if err != nil {
 				return err
 			}
 			if tag.RowsAffected() == 0 {
-				var existing []byte
-				if err := tx.QueryRow(ctx, `SELECT spec FROM tracker_jobs WHERE project_id=$1 AND id=$2`, projectID, job.ID).Scan(&existing); err != nil {
+				var existingValue string
+				var existingSpec []byte
+				var row pgx.Row
+				if identityMode == tracker.IdentityModeExternalID {
+					row = tx.QueryRow(ctx, `SELECT value,spec FROM tracker_jobs WHERE project_id=$1 AND external_id=$2`, projectID, normalized.ID)
+				} else {
+					row = tx.QueryRow(ctx, `SELECT value,spec FROM tracker_jobs WHERE project_id=$1 AND unique_value_digest=$2`, projectID, digest)
+				}
+				if err := row.Scan(&existingValue, &existingSpec); err != nil {
 					return err
 				}
-				var existingValue, newValue any
-				if json.Unmarshal(existing, &existingValue) != nil || json.Unmarshal(spec, &newValue) != nil {
-					return fmt.Errorf("decode stored job spec")
+				if identityMode == tracker.IdentityModeUniqueValue && existingValue != normalized.Value {
+					return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "value digest collision"}
 				}
-				existingCanonical, _ := json.Marshal(existingValue)
-				newCanonical, _ := json.Marshal(newValue)
-				if !bytes.Equal(existingCanonical, newCanonical) {
-					return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job ID already exists with a different spec"}
+				equalSpec, err := equalJSON(existingSpec, spec)
+				if err != nil {
+					return err
+				}
+				if existingValue != normalized.Value || !equalSpec {
+					return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job identity already exists with a different spec"}
 				}
 			}
 			inserted += tag.RowsAffected()
@@ -101,10 +140,10 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT id, spec FROM tracker_jobs
+			SELECT job_id,external_id,value,spec FROM tracker_jobs
 			WHERE project_id=$1 AND status='todo'
 				AND (COALESCE(cardinality($2::text[]), 0) = 0 OR COALESCE(spec->>'type','seed') = ANY($2::text[]))
-			ORDER BY created_at,id
+			ORDER BY created_at,job_id
 			FOR UPDATE SKIP LOCKED LIMIT $3
 		`, projectID, request.AcceptTypes, request.MaxJobs)
 		if err != nil {
@@ -112,13 +151,15 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 		}
 		defer rows.Close()
 		type selected struct {
-			id   string
-			spec []byte
+			jobID      int64
+			externalID *string
+			value      string
+			spec       []byte
 		}
 		selectedJobs := make([]selected, 0, request.MaxJobs)
 		for rows.Next() {
 			var item selected
-			if err := rows.Scan(&item.id, &item.spec); err != nil {
+			if err := rows.Scan(&item.jobID, &item.externalID, &item.value, &item.spec); err != nil {
 				return err
 			}
 			selectedJobs = append(selectedJobs, item)
@@ -131,14 +172,21 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE tracker_jobs SET status='wip',attempt_id=$3,worker_id=$4,lease_expires_at=$5,updated_at=$6 WHERE project_id=$1 AND id=$2`, projectID, selectedJob.id, attemptID, request.WorkerID, leaseExpiresAt, now); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE tracker_jobs SET status='wip',attempt_id=$3,worker_id=$4,lease_expires_at=$5,updated_at=$6 WHERE project_id=$1 AND job_id=$2`, projectID, selectedJob.jobID, attemptID, request.WorkerID, leaseExpiresAt, now); err != nil {
 				return err
 			}
-			var spec protocol.JobSpecV1
-			if err := json.Unmarshal(selectedJob.spec, &spec); err != nil {
+			var stored storedJobSpec
+			if err := json.Unmarshal(selectedJob.spec, &stored); err != nil {
 				return err
 			}
-			result = append(result, protocol.ClaimedJob{JobSpecV1: spec, AttemptID: attemptID, LeaseExpiresAt: leaseExpiresAt})
+			spec := protocol.JobSpecV1{Value: selectedJob.value, Type: stored.Type, Via: stored.Via, Hops: stored.Hops, Attrs: stored.Attrs}
+			if spec.Type == "" {
+				spec.Type = protocol.JobTypeSeed
+			}
+			if selectedJob.externalID != nil {
+				spec.ID = *selectedJob.externalID
+			}
+			result = append(result, protocol.ClaimedJob{JobSpecV1: spec, JobID: selectedJob.jobID, AttemptID: attemptID, LeaseExpiresAt: leaseExpiresAt})
 		}
 		return nil
 	})
@@ -171,7 +219,7 @@ func (s *Store) CompleteProjectJobs(ctx context.Context, userID, projectID strin
 	return s.finishProjectJobs(ctx, userID, projectID, now, func(tx pgx.Tx) ([]protocol.ItemResult, error) {
 		results := make([]protocol.ItemResult, 0, len(request.Items))
 		for _, item := range request.Items {
-			if !queue.ValidateIdentifier(item.JobID) || !queue.ValidateIdentifier(item.AttemptID) {
+			if item.JobID < 1 || !queue.ValidateIdentifier(item.AttemptID) {
 				return nil, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid job or attempt ID"}
 			}
 			if _, _, validationError := queue.NormalizeOutcome(queue.Outcome{Kind: item.Outcome.Kind, Code: item.Outcome.Code, URI: item.Outcome.URI, Meta: item.Outcome.Meta}); validationError != nil {
@@ -188,7 +236,7 @@ func (s *Store) CompleteProjectJobs(ctx context.Context, userID, projectID strin
 			if err != nil {
 				return nil, err
 			}
-			tag, err := tx.Exec(ctx, `UPDATE tracker_jobs SET status='done',attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,outcome=$6,warc_receipts=$7,execution_error=NULL,updated_at=$5,completed_at=$5 WHERE project_id=$1 AND id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, outcome, receipts)
+			tag, err := tx.Exec(ctx, `UPDATE tracker_jobs SET status='done',attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,outcome=$6,warc_receipts=$7,execution_error=NULL,updated_at=$5,completed_at=$5 WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, outcome, receipts)
 			if err != nil {
 				return nil, err
 			}
@@ -205,7 +253,7 @@ func (s *Store) FailProjectJobs(ctx context.Context, userID, projectID string, r
 	return s.finishProjectJobs(ctx, userID, projectID, now, func(tx pgx.Tx) ([]protocol.ItemResult, error) {
 		results := make([]protocol.ItemResult, 0, len(request.Items))
 		for _, item := range request.Items {
-			if !queue.ValidateIdentifier(item.JobID) || !queue.ValidateIdentifier(item.AttemptID) {
+			if item.JobID < 1 || !queue.ValidateIdentifier(item.AttemptID) {
 				return nil, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid job or attempt ID"}
 			}
 			if _, _, validationError := queue.NormalizeExecutionError(queue.ExecutionError{Code: item.Error.Code, Message: item.Error.Message, Details: item.Error.Details}); validationError != nil {
@@ -220,7 +268,7 @@ func (s *Store) FailProjectJobs(ctx context.Context, userID, projectID string, r
 				status = protocol.JobStatusTodo
 			}
 			var actualStatus string
-			err = tx.QueryRow(ctx, `UPDATE tracker_jobs SET status=CASE WHEN $8 AND reset_count + 1 > 3 THEN 'reset_exhausted' ELSE $6 END,attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,execution_error=$7,reset_count=reset_count+CASE WHEN $8 THEN 1 ELSE 0 END,updated_at=$5,completed_at=CASE WHEN $8 AND reset_count + 1 <= 3 THEN NULL ELSE $5 END WHERE project_id=$1 AND id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5 RETURNING status`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, status, executionError, item.Retryable).Scan(&actualStatus)
+			err = tx.QueryRow(ctx, `UPDATE tracker_jobs SET status=CASE WHEN $8 AND reset_count + 1 > 3 THEN 'reset_exhausted' ELSE $6 END,attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,execution_error=$7,reset_count=reset_count+CASE WHEN $8 THEN 1 ELSE 0 END,updated_at=$5,completed_at=CASE WHEN $8 AND reset_count + 1 <= 3 THEN NULL ELSE $5 END WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5 RETURNING status`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, status, executionError, item.Retryable).Scan(&actualStatus)
 			if errors.Is(err, pgx.ErrNoRows) {
 				results = append(results, projectItemResult(item.JobID, item.AttemptID, 0, status))
 				continue
@@ -242,10 +290,10 @@ func (s *Store) ExtendProjectJobLeases(ctx context.Context, userID, projectID st
 		results := make([]protocol.ItemResult, 0, len(request.Items))
 		extended := now + request.ExtendSeconds
 		for _, item := range request.Items {
-			if !queue.ValidateIdentifier(item.JobID) || !queue.ValidateIdentifier(item.AttemptID) {
+			if item.JobID < 1 || !queue.ValidateIdentifier(item.AttemptID) {
 				return nil, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid job or attempt ID"}
 			}
-			tag, err := tx.Exec(ctx, `UPDATE tracker_jobs SET lease_expires_at=GREATEST(lease_expires_at,$6),updated_at=$5 WHERE project_id=$1 AND id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, extended)
+			tag, err := tx.Exec(ctx, `UPDATE tracker_jobs SET lease_expires_at=GREATEST(lease_expires_at,$6),updated_at=$5 WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, extended)
 			if err != nil {
 				return nil, err
 			}
@@ -272,11 +320,24 @@ func (s *Store) finishProjectJobs(ctx context.Context, userID, projectID string,
 	return response, storeError("update project jobs", err)
 }
 
-func projectItemResult(jobID, attemptID string, affected int64, status string) protocol.ItemResult {
+func projectItemResult(jobID int64, attemptID string, affected int64, status string) protocol.ItemResult {
 	if affected == 1 {
 		return protocol.ItemResult{JobID: jobID, AttemptID: attemptID, Status: protocol.ItemStatusApplied, JobStatus: &status}
 	}
 	return protocol.ItemResult{JobID: jobID, AttemptID: attemptID, Status: protocol.ItemStatusRejected, Error: &protocol.APIError{Code: protocol.ErrorStaleAttempt, Message: "attempt is stale, expired, or already finalized"}}
+}
+
+func equalJSON(left, right []byte) (bool, error) {
+	var leftValue, rightValue any
+	if err := json.Unmarshal(left, &leftValue); err != nil {
+		return false, fmt.Errorf("decode stored job spec: %w", err)
+	}
+	if err := json.Unmarshal(right, &rightValue); err != nil {
+		return false, fmt.Errorf("decode new job spec: %w", err)
+	}
+	leftCanonical, _ := json.Marshal(leftValue)
+	rightCanonical, _ := json.Marshal(rightValue)
+	return bytes.Equal(leftCanonical, rightCanonical), nil
 }
 
 func validateWARCReceipts(receipts []protocol.WARCReceipt) error {

@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS tracker_machine_tokens (
 CREATE TABLE IF NOT EXISTS tracker_projects (
     id text PRIMARY KEY,
     status text NOT NULL CHECK (status IN ('active', 'draining', 'archived')),
+    identity_mode text NOT NULL DEFAULT 'external_id'
+        CHECK (identity_mode IN ('none', 'external_id', 'unique_value')),
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
 );

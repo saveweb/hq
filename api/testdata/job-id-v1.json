@@ -1,17 +1,17 @@
 [
   {
     "type": "seed",
-    "url": "https://example.org/",
+    "value": "https://example.org/",
     "id": "j1_92f50438a02ab171b6735678275a2f9db233d4c88e301a0243886c2679ce7070"
   },
   {
     "type": "asset",
-    "url": "https://example.org/a.png",
+    "value": "https://example.org/a.png",
     "id": "j1_3415498e0d810218fb682c5192529b4ec15d74dfbaedf293c3b13d5d5c652998"
   },
   {
     "type": "seed",
-    "url": "https://例子.测试/路径",
+    "value": "https://例子.测试/路径",
     "id": "j1_6f244c2352df6cd3f399df55501a1b77c57f98b85a94a2193849f5532e766528"
   }
 ]

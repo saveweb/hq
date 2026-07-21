@@ -10,14 +10,17 @@ import (
 var ErrWebSessionNotFound = errors.New("web session not found")
 
 const (
-	UserStatusPending     = "pending"
-	UserStatusActive      = "active"
-	UserStatusSuspended   = "suspended"
-	RoleAdmin             = "admin"
-	RoleWorker            = "worker"
-	ProjectStatusActive   = "active"
-	ProjectStatusDraining = "draining"
-	ProjectStatusArchived = "archived"
+	UserStatusPending       = "pending"
+	UserStatusActive        = "active"
+	UserStatusSuspended     = "suspended"
+	RoleAdmin               = "admin"
+	RoleWorker              = "worker"
+	ProjectStatusActive     = "active"
+	ProjectStatusDraining   = "draining"
+	ProjectStatusArchived   = "archived"
+	IdentityModeNone        = "none"
+	IdentityModeExternalID  = "external_id"
+	IdentityModeUniqueValue = "unique_value"
 )
 
 type Error struct {
@@ -55,8 +58,9 @@ type GitHubIdentity struct {
 }
 
 type Project struct {
-	ID     string
-	Status string
+	ID           string
+	Status       string
+	IdentityMode string
 }
 
 func InvalidRequest(message string) *Error {

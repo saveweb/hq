@@ -34,6 +34,7 @@ type ErrorEnvelope struct {
 }
 type ClaimedJob struct {
 	JobSpecV1
+	JobID          int64  `json:"job_id"`
 	AttemptID      string `json:"attempt_id"`
 	LeaseExpiresAt int64  `json:"lease_expires_at"`
 }
@@ -64,7 +65,7 @@ type ProjectClaimResponse struct {
 	RetryAfterMS int64        `json:"retry_after_ms"`
 }
 type ProjectCompleteItem struct {
-	JobID        string        `json:"job_id"`
+	JobID        int64         `json:"job_id"`
 	AttemptID    string        `json:"attempt_id"`
 	Outcome      Outcome       `json:"outcome"`
 	WARCReceipts []WARCReceipt `json:"warc_receipts"`
@@ -79,7 +80,7 @@ type ExecutionError struct {
 	Details Attrs  `json:"details"`
 }
 type FailItem struct {
-	JobID     string         `json:"job_id"`
+	JobID     int64          `json:"job_id"`
 	AttemptID string         `json:"attempt_id"`
 	Retryable bool           `json:"retryable"`
 	Error     ExecutionError `json:"error"`
@@ -89,7 +90,7 @@ type ProjectFailRequest struct {
 	Items    []FailItem `json:"items"`
 }
 type AttemptRef struct {
-	JobID     string `json:"job_id"`
+	JobID     int64  `json:"job_id"`
 	AttemptID string `json:"attempt_id"`
 }
 type ProjectExtendLeaseRequest struct {
@@ -98,7 +99,7 @@ type ProjectExtendLeaseRequest struct {
 	Items         []AttemptRef `json:"items"`
 }
 type ItemResult struct {
-	JobID          string    `json:"job_id"`
+	JobID          int64     `json:"job_id"`
 	AttemptID      string    `json:"attempt_id"`
 	Status         string    `json:"status"`
 	JobStatus      *string   `json:"job_status"`
@@ -110,15 +111,17 @@ type BatchResultResponse struct {
 }
 
 type AdminProjectRequest struct {
-	Status string `json:"status"`
+	Status       string `json:"status"`
+	IdentityMode string `json:"identity_mode,omitempty"`
 }
 
 type AdminProjectSummary struct {
-	ID        string           `json:"id"`
-	Status    string           `json:"status"`
-	JobCounts map[string]int64 `json:"job_counts"`
-	CreatedAt int64            `json:"created_at"`
-	UpdatedAt int64            `json:"updated_at"`
+	ID           string           `json:"id"`
+	Status       string           `json:"status"`
+	IdentityMode string           `json:"identity_mode"`
+	JobCounts    map[string]int64 `json:"job_counts"`
+	CreatedAt    int64            `json:"created_at"`
+	UpdatedAt    int64            `json:"updated_at"`
 }
 
 type AdminProjectListResponse struct {
@@ -133,4 +136,56 @@ type AdminEnqueueJobsResponse struct {
 	ProjectID string `json:"project_id"`
 	Submitted int    `json:"submitted"`
 	Inserted  int64  `json:"inserted"`
+}
+
+type AdminEnqueueSourceResponse struct {
+	ProjectID         string `json:"project_id"`
+	Jobs              int64  `json:"jobs"`
+	Inserted          int64  `json:"inserted"`
+	UncompressedBytes int64  `json:"uncompressed_bytes"`
+}
+
+type AdminUserRequest struct {
+	Status string   `json:"status"`
+	Roles  []string `json:"roles"`
+}
+
+type AdminUserSummary struct {
+	ID                 string   `json:"id"`
+	GitHubLogin        string   `json:"github_login,omitempty"`
+	Status             string   `json:"status"`
+	Roles              []string `json:"roles"`
+	MachineTokenActive bool     `json:"machine_token_active"`
+	CreatedAt          int64    `json:"created_at"`
+	UpdatedAt          int64    `json:"updated_at"`
+}
+
+type AdminUserListResponse struct {
+	Users []AdminUserSummary `json:"users"`
+}
+
+type AdminMachineTokenResponse struct {
+	UserID string `json:"user_id"`
+	Token  string `json:"token"`
+}
+
+type AdminJob struct {
+	JobSpecV1
+	JobID          int64           `json:"job_id"`
+	Status         string          `json:"status"`
+	AttemptID      *string         `json:"attempt_id"`
+	WorkerID       *string         `json:"worker_id"`
+	LeaseExpiresAt *int64          `json:"lease_expires_at"`
+	ResetCount     int             `json:"reset_count"`
+	Outcome        *Outcome        `json:"outcome"`
+	WARCReceipts   []WARCReceipt   `json:"warc_receipts"`
+	ExecutionError *ExecutionError `json:"execution_error"`
+	CreatedAt      int64           `json:"created_at"`
+	UpdatedAt      int64           `json:"updated_at"`
+	CompletedAt    *int64          `json:"completed_at"`
+}
+
+type AdminJobListResponse struct {
+	Jobs           []AdminJob `json:"jobs"`
+	NextAfterJobID *int64     `json:"next_after_job_id"`
 }

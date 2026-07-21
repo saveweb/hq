@@ -12,7 +12,7 @@ import (
 
 const (
 	maxIDBytes        = 128
-	maxURLBytes       = 8192
+	maxValueBytes     = 8192
 	maxAttrsBytes     = 8 << 10
 	maxJobSpecBytes   = 32 << 10
 	maxMessageBytes   = 2048
@@ -31,39 +31,41 @@ type NormalizedJob struct {
 }
 
 func NormalizeJob(job JobSpec) (NormalizedJob, *Error) {
-	if !ValidateIdentifier(job.ID) {
+	if job.ID != "" && !ValidateIdentifier(job.ID) {
 		return NormalizedJob{}, invalidJob("id must be 1-128 ASCII bytes matching [A-Za-z0-9._:-]+")
 	}
-	if len(job.URL) == 0 || len(job.URL) > maxURLBytes || !utf8.ValidString(job.URL) {
-		return NormalizedJob{}, invalidJob("url must be valid UTF-8 and at most 8192 bytes")
+	if len(job.Value) == 0 || len(job.Value) > maxValueBytes || !utf8.ValidString(job.Value) {
+		return NormalizedJob{}, invalidJob("value must be valid UTF-8 and at most 8192 bytes")
 	}
-	if job.Type == "" {
-		job.Type = protocol.JobTypeSeed
+	effectiveType := job.Type
+	if effectiveType == "" {
+		effectiveType = protocol.JobTypeSeed
 	}
-	if job.Type != protocol.JobTypeSeed && job.Type != protocol.JobTypeAsset {
+	if effectiveType != protocol.JobTypeSeed && effectiveType != protocol.JobTypeAsset {
 		return NormalizedJob{}, invalidJob("type must be seed or asset")
 	}
-	if job.Via != nil && (len(*job.Via) > maxURLBytes || !utf8.ValidString(*job.Via)) {
+	if job.Via != nil && (len(*job.Via) > maxValueBytes || !utf8.ValidString(*job.Via)) {
 		return NormalizedJob{}, invalidJob("via must be valid UTF-8 and at most 8192 bytes")
 	}
 	if job.Hops < 0 {
 		return NormalizedJob{}, invalidJob("hops must be non-negative")
 	}
-	if job.Attrs == nil {
-		job.Attrs = map[string]any{}
-	}
-	attrs, err := canonicalObject(job.Attrs, maxAttrsBytes)
-	if err != nil {
-		return NormalizedJob{}, invalidJob("invalid attr: " + err.Error())
+	var attrs []byte
+	if len(job.Attrs) > 0 {
+		var err error
+		attrs, err = canonicalObject(job.Attrs, maxAttrsBytes)
+		if err != nil {
+			return NormalizedJob{}, invalidJob("invalid attr: " + err.Error())
+		}
 	}
 	encoded, err := json.Marshal(struct {
 		ID    string          `json:"id"`
-		URL   string          `json:"url"`
-		Type  string          `json:"type"`
-		Via   *string         `json:"via"`
-		Hops  int             `json:"hops"`
-		Attrs json.RawMessage `json:"attr"`
-	}{job.ID, job.URL, job.Type, job.Via, job.Hops, attrs})
+		Value string          `json:"value"`
+		Type  string          `json:"type,omitempty"`
+		Via   *string         `json:"via,omitempty"`
+		Hops  int             `json:"hops,omitempty"`
+		Attrs json.RawMessage `json:"attr,omitempty"`
+	}{job.ID, job.Value, job.Type, job.Via, job.Hops, attrs})
 	if err != nil || len(encoded) > maxJobSpecBytes {
 		return NormalizedJob{}, invalidJob("normalized JobSpec exceeds 32 KiB")
 	}

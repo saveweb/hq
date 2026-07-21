@@ -15,12 +15,52 @@ GET  /api/v1/admin/projects
 GET  /api/v1/admin/projects/{project_id}
 PUT  /api/v1/admin/projects/{project_id}
 POST /api/v1/admin/projects/{project_id}/jobs
+POST /api/v1/admin/projects/{project_id}/source
+GET  /api/v1/admin/projects/{project_id}/jobs
+GET  /api/v1/admin/projects/{project_id}/jobs/{job_id}
+POST /api/v1/admin/projects/{project_id}/jobs/{job_id}/requeue
+DELETE /api/v1/admin/projects/{project_id}/jobs/{job_id}
+DELETE /api/v1/admin/projects/{project_id}
+GET  /api/v1/admin/users
+PUT  /api/v1/admin/users/{user_id}
+POST /api/v1/admin/users/{user_id}/machine-token
+DELETE /api/v1/admin/users/{user_id}/machine-token
 ```
 
 `PUT` creates a project or changes its status to `active`, `draining`, or
-`archived`. Project responses include `todo`, `wip`, `done`, `failed`, and
-`reset_exhausted` counts. The jobs endpoint accepts 1-256 JobSpecs and uses the
-same immutable, idempotent identity rules as source-file import.
+`archived`. Creation may set `identity_mode` to `none`, `external_id`, or
+`unique_value`; omitted mode defaults to `external_id`. The mode is immutable.
+Project responses include the identity mode and `todo`, `wip`, `done`, `failed`,
+and `reset_exhausted` counts.
+
+The jobs endpoint accepts 1-256 JobSpecs. `value` is required; `type`, `via`,
+`hops`, and `attr` are optional. `id` is required only by `external_id` projects
+and rejected by the other modes:
+
+- `none` inserts every submitted job;
+- `external_id` deduplicates by `(project_id, id)`;
+- `unique_value` deduplicates by `(project_id, SHA-256(UTF-8(value)))` and verifies the
+  original value before treating a conflict as an identical job.
+
+Identical retries in the two deduplicating modes report zero new inserts. A
+matching identity with different immutable job data returns `identity_conflict`.
+
+The source endpoint accepts a `jobs-jsonl-zstd-v1` body as `application/zstd`
+and streams it through the same project identity rules. The compressed body is
+limited to 256 MiB, expanded content to 4 GiB, and each import to 10 million
+jobs.
+
+Job listing is cursor-paginated with `after_job_id`, `limit` (1-200), and an
+optional status filter. Job detail includes the immutable spec, current attempt,
+terminal outcome or execution error, WARC receipts, reset count, and timestamps.
+Only `failed` and `reset_exhausted` jobs can be manually requeued. WIP jobs
+cannot be deleted, and projects with WIP jobs cannot be deleted.
+
+User management creates or updates `pending`, `active`, or `suspended` users
+with explicit `admin` and `worker` roles. Token rotation invalidates the old
+machine token and returns the replacement exactly once; revocation removes
+machine API access. The initial administrator must still be bootstrapped from
+the CLI because HTTP administration itself requires an administrator token.
 
 These endpoints also back the same-origin management UI. The UI uses a
 separate HttpOnly browser session established through GitHub OAuth; machine
@@ -34,7 +74,8 @@ POST /api/v1/projects/{project_id}/jobs/claim
 
 Request fields are `worker_id`, `max_jobs` (1-256), `lease_seconds` (1-3600),
 and `accept_types`. A successful response contains the project ID, claimed
-JobSpecs, unique attempt IDs, lease deadlines, and a retry delay.
+JobSpecs, internal numeric job IDs, unique attempt IDs, lease deadlines, and a
+retry delay. Workers use `job_id`, not an optional source `id`, for mutations.
 
 Claims use one PostgreSQL transaction and `FOR UPDATE SKIP LOCKED`. An expired
 attempt is reset before new rows are selected.

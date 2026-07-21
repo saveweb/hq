@@ -119,6 +119,9 @@ func mergeSources(ctx context.Context, config mergeConfig) (mergeStats, error) {
 		}, func(batch []queue.JobSpec) error {
 			for _, job := range batch {
 				stats.InputJobs++
+				if job.ID == "" {
+					return &queue.Error{Code: protocol.ErrorInvalidJob, Message: "source merge requires job IDs"}
+				}
 				normalized, validation := queue.NormalizeJob(job)
 				if validation != nil {
 					return validation
@@ -128,7 +131,7 @@ func mergeSources(ctx context.Context, config mergeConfig) (mergeStats, error) {
 					if existing != identity {
 						return &queue.Error{
 							Code:    protocol.ErrorIdentityConflict,
-							Message: "source merge: job ID has different type, URL, or attributes",
+							Message: "source merge: job ID has different type, value, or attributes",
 							Details: map[string]any{"job_id": job.ID},
 						}
 					}
@@ -137,7 +140,7 @@ func mergeSources(ctx context.Context, config mergeConfig) (mergeStats, error) {
 				}
 				seen[job.ID] = identity
 				if err := outputs.write(protocol.JobSpecV1{
-					ID: normalized.ID, URL: normalized.URL, Type: normalized.Type,
+					ID: normalized.ID, Value: normalized.Value, Type: normalized.Type,
 					Via: normalized.Via, Hops: normalized.Hops, Attrs: normalized.Attrs,
 				}); err != nil {
 					return err
@@ -167,7 +170,7 @@ func mergeSources(ctx context.Context, config mergeConfig) (mergeStats, error) {
 }
 
 func mergeIdentity(job queue.NormalizedJob) [sha256.Size]byte {
-	encoded, _ := json.Marshal([3]string{job.Type, job.URL, job.AttrsJSON})
+	encoded, _ := json.Marshal([3]string{job.Type, job.Value, job.AttrsJSON})
 	return sha256.Sum256(encoded)
 }
 

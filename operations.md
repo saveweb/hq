@@ -28,8 +28,11 @@ must be monitored separately.
 
 1. Create a `0600` machine-token file.
 2. Run `tracker bootstrap-user` with the `worker` role.
-3. Run `tracker put-project`.
-4. Produce a `jobs-jsonl-zstd-v1` file with `source pack`.
+3. Run `tracker put-project --identity-mode MODE`. Use `external_id` for
+   replayable source imports, `unique_value` when values must be unique, or
+   `none` when every submission must become a job.
+4. Produce a `jobs-jsonl-zstd-v1` file with `source pack --identity-mode MODE`,
+   using the project mode.
 5. Run `tracker enqueue-source`.
 6. Start workers with the HQ URL, project ID, worker ID, and machine token.
 
@@ -40,7 +43,17 @@ administrator token:
 GET  /api/v1/admin/projects
 PUT  /api/v1/admin/projects/{project_id}
 POST /api/v1/admin/projects/{project_id}/jobs
+POST /api/v1/admin/projects/{project_id}/source
 ```
+
+Routine remote administration also supports user status and roles, machine
+token rotation or revocation, compressed source import, paginated job
+inspection, terminal-failure requeue, and deletion of non-WIP jobs. Bootstrap,
+migrations, secret generation, and source pack/merge remain local operational
+commands.
+
+The Web Dashboard exposes the same identity-mode selection when creating a
+project and shows the fixed mode on project lists and detail pages.
 
 Worker credentials cannot call these endpoints. Keep administrator tokens out
 of worker deployments and browser storage. The web UI uses an HttpOnly,

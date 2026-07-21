@@ -85,7 +85,8 @@ tracker bootstrap-user \
 
 tracker put-project \
   --database-url "$HQ_DATABASE_URL" \
-  --project-id sinavideo
+  --project-id sinavideo \
+  --identity-mode external_id
 ```
 
 Pack URLs and import them directly into the project queue:
@@ -99,8 +100,16 @@ tracker enqueue-source \
   --input sinavideo.jobs.jsonl.zst
 ```
 
-Import is idempotent for identical `(project_id, job_id, spec)` values and
-rejects an existing job ID with a different spec.
+Every job receives a compact internal PostgreSQL `bigint` ID used by workers.
+Project identity mode controls enqueue deduplication:
+
+- `none` accepts repeated values and requires no external `id`;
+- `external_id` requires `id` and makes it unique within the project;
+- `unique_value` requires no `id` and makes `value` unique within the project.
+
+An identity mode is fixed when the project is created. Reimporting an identical
+job into `external_id` or `unique_value` is idempotent; reusing the identity with
+different immutable job data returns `identity_conflict`.
 
 Active members of the configured GitHub organization team can sign in at `/`
 and manage projects, statuses, and bounded job batches. The callback verifies
@@ -109,6 +118,12 @@ team membership on every login; GitHub access tokens are not persisted.
 An active administrator machine token can perform the same operations through
 `/api/v1/admin/projects`. Project responses include queue counts for all job
 states. Browser sessions are not accepted by machine API routes.
+
+The administration API and Web Dashboard also import packed source files,
+manage users and machine-token rotation, inspect current job state, requeue
+terminal failures, and delete non-WIP jobs or projects without WIP work. New
+machine tokens are displayed only in the rotation response or one-time Web
+page.
 
 ## Worker API
 
@@ -121,8 +136,10 @@ POST /api/v1/projects/{project_id}/jobs/fail
 POST /api/v1/projects/{project_id}/jobs/extend-lease
 ```
 
-Claims and mutations are bounded batches. Every claim creates a unique
-`attempt_id`; late or replayed outcomes cannot finalize a newer attempt.
+Claims and mutations are bounded batches. A claim returns the internal numeric
+`job_id` and a unique `attempt_id`; late or replayed outcomes cannot finalize a
+newer attempt. An optional source `id` is metadata and is never used to finish
+an attempt.
 
 The Go SDK exposes `worker.OpenProjectQueue`; the Python SDK exposes
 `open_project_queue`. Both call the project queue directly and contain no

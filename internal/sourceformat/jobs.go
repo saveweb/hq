@@ -61,12 +61,6 @@ func (e *Encoder) Write(job protocol.JobSpecV1) error {
 	if _, err := normalizeProtocolJob(job); err != nil {
 		return err
 	}
-	if job.Type == "" {
-		job.Type = protocol.JobTypeSeed
-	}
-	if job.Attrs == nil {
-		job.Attrs = map[string]any{}
-	}
 	if err := e.json.Encode(job); err != nil {
 		return fmt.Errorf("source format: encode job: %w", err)
 	}
@@ -183,7 +177,7 @@ func decodeJob(line []byte) (queue.JobSpec, error) {
 	if err := json.Unmarshal(line, &fields); err != nil {
 		return queue.JobSpec{}, err
 	}
-	for _, required := range []string{"id", "url", "via"} {
+	for _, required := range []string{"value"} {
 		if _, ok := fields[required]; !ok {
 			return queue.JobSpec{}, fmt.Errorf("required field %q is missing", required)
 		}
@@ -203,7 +197,7 @@ func decodeJob(line []byte) (queue.JobSpec, error) {
 
 func normalizeProtocolJob(job protocol.JobSpecV1) (queue.JobSpec, error) {
 	value, validation := queue.NormalizeJob(queue.JobSpec{
-		ID: job.ID, URL: job.URL, Type: job.Type, Via: job.Via,
+		ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via,
 		Hops: job.Hops, Attrs: job.Attrs,
 	})
 	if validation != nil {

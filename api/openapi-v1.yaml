@@ -33,6 +33,44 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AdminProjectListResponse'}
         default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/users:
+    get:
+      operationId: listAdminUsers
+      responses:
+        '200':
+          description: Users and token state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminUserListResponse'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/users/{user_id}:
+    parameters: [{$ref: '#/components/parameters/UserID'}]
+    put:
+      operationId: putAdminUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminUserRequest'}
+      responses:
+        '204': {description: User created or updated}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/users/{user_id}/machine-token:
+    parameters: [{$ref: '#/components/parameters/UserID'}]
+    post:
+      operationId: rotateAdminMachineToken
+      responses:
+        '201':
+          description: New token, returned once
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminMachineTokenResponse'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: revokeAdminMachineToken
+      responses:
+        '204': {description: Token revoked}
+        default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/projects/{project_id}:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
     get:
@@ -60,11 +98,30 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AdminProjectSummary'}
         default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteAdminProject
+      description: Deletes a project and its non-WIP jobs; rejected while WIP jobs exist.
+      responses:
+        '204': {description: Project deleted}
+        default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/projects/{project_id}/jobs:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    get:
+      operationId: listAdminProjectJobs
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [todo, wip, done, failed, reset_exhausted]}}
+        - {name: after_job_id, in: query, schema: {$ref: '#/components/schemas/JobID'}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+      responses:
+        '200':
+          description: Project jobs
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminJobListResponse'}
+        default: {$ref: '#/components/responses/Error'}
     post:
       operationId: enqueueAdminProjectJobs
-      description: Idempotently inserts a bounded batch into a non-archived project.
+      description: Inserts a bounded batch into a non-archived project using its identity mode.
       requestBody:
         required: true
         content:
@@ -76,6 +133,52 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AdminEnqueueJobsResponse'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/projects/{project_id}/source:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    post:
+      operationId: enqueueAdminProjectSource
+      description: Streams a jobs-jsonl-zstd-v1 source into a non-archived project using its identity mode.
+      requestBody:
+        required: true
+        content:
+          application/zstd:
+            schema: {type: string, format: binary}
+      responses:
+        '200':
+          description: Source import result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminEnqueueSourceResponse'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/projects/{project_id}/jobs/{job_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectID'}
+      - {$ref: '#/components/parameters/JobID'}
+    get:
+      operationId: getAdminProjectJob
+      responses:
+        '200':
+          description: Complete job state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminJob'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteAdminProjectJob
+      description: Deletes a job unless it is WIP.
+      responses:
+        '204': {description: Job deleted}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/projects/{project_id}/jobs/{job_id}/requeue:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectID'}
+      - {$ref: '#/components/parameters/JobID'}
+    post:
+      operationId: requeueAdminProjectJob
+      description: Resets a failed or reset-exhausted job to todo.
+      responses:
+        '204': {description: Job requeued}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/claim:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
@@ -138,6 +241,16 @@ components:
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    JobID:
+      name: job_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/JobID'}
   responses:
     BatchResult:
       description: Per-item mutation results
@@ -151,6 +264,7 @@ components:
           schema: {$ref: '#/components/schemas/ErrorEnvelope'}
   schemas:
     Identifier: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
+    JobID: {type: integer, format: int64, minimum: 1}
     Attrs: {type: object, additionalProperties: true}
     JobCounts:
       type: object
@@ -162,19 +276,53 @@ components:
         done: {type: integer, format: int64, minimum: 0}
         failed: {type: integer, format: int64, minimum: 0}
         reset_exhausted: {type: integer, format: int64, minimum: 0}
+    AdminUserRequest:
+      type: object
+      additionalProperties: false
+      required: [status, roles]
+      properties:
+        status: {type: string, enum: [pending, active, suspended]}
+        roles: {type: array, uniqueItems: true, items: {type: string, enum: [admin, worker]}}
+    AdminUserSummary:
+      type: object
+      additionalProperties: false
+      required: [id, status, roles, machine_token_active, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        github_login: {type: string}
+        status: {type: string, enum: [pending, active, suspended]}
+        roles: {type: array, items: {type: string, enum: [admin, worker]}}
+        machine_token_active: {type: boolean}
+        created_at: {type: integer, format: int64}
+        updated_at: {type: integer, format: int64}
+    AdminUserListResponse:
+      type: object
+      additionalProperties: false
+      required: [users]
+      properties:
+        users: {type: array, items: {$ref: '#/components/schemas/AdminUserSummary'}}
+    AdminMachineTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [user_id, token]
+      properties:
+        user_id: {$ref: '#/components/schemas/Identifier'}
+        token: {type: string, minLength: 1}
     AdminProjectRequest:
       type: object
       additionalProperties: false
       required: [status]
       properties:
         status: {type: string, enum: [active, draining, archived]}
+        identity_mode: {type: string, enum: [none, external_id, unique_value]}
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
+        identity_mode: {type: string, enum: [none, external_id, unique_value]}
         job_counts: {$ref: '#/components/schemas/JobCounts'}
         created_at: {type: integer, format: int64}
         updated_at: {type: integer, format: int64}
@@ -198,25 +346,70 @@ components:
         project_id: {$ref: '#/components/schemas/Identifier'}
         submitted: {type: integer, minimum: 1, maximum: 256}
         inserted: {type: integer, format: int64, minimum: 0, maximum: 256}
+    AdminEnqueueSourceResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, jobs, inserted, uncompressed_bytes]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        jobs: {type: integer, format: int64, minimum: 0}
+        inserted: {type: integer, format: int64, minimum: 0}
+        uncompressed_bytes: {type: integer, format: int64, minimum: 0}
+    AdminJob:
+      type: object
+      additionalProperties: false
+      required: [value, job_id, status, attempt_id, worker_id, lease_expires_at, reset_count, outcome, warc_receipts, execution_error, created_at, updated_at, completed_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        value: {type: string, minLength: 1, maxLength: 8192}
+        type: {type: string, enum: [seed, asset], default: seed}
+        via: {type: [string, 'null'], maxLength: 8192}
+        hops: {type: integer, minimum: 0}
+        attr: {$ref: '#/components/schemas/Attrs'}
+        job_id: {$ref: '#/components/schemas/JobID'}
+        status: {type: string, enum: [todo, wip, done, failed, reset_exhausted]}
+        attempt_id: {oneOf: [{$ref: '#/components/schemas/Identifier'}, {type: 'null'}]}
+        worker_id: {oneOf: [{$ref: '#/components/schemas/Identifier'}, {type: 'null'}]}
+        lease_expires_at: {type: [integer, 'null'], format: int64}
+        reset_count: {type: integer, minimum: 0}
+        outcome: {oneOf: [{$ref: '#/components/schemas/Outcome'}, {type: 'null'}]}
+        warc_receipts: {type: array, items: {$ref: '#/components/schemas/WARCReceipt'}}
+        execution_error: {oneOf: [{$ref: '#/components/schemas/ExecutionError'}, {type: 'null'}]}
+        created_at: {type: integer, format: int64}
+        updated_at: {type: integer, format: int64}
+        completed_at: {type: [integer, 'null'], format: int64}
+    AdminJobListResponse:
+      type: object
+      additionalProperties: false
+      required: [jobs, next_after_job_id]
+      properties:
+        jobs: {type: array, items: {$ref: '#/components/schemas/AdminJob'}}
+        next_after_job_id: {type: [integer, 'null'], format: int64, minimum: 1}
     JobSpec:
       type: object
       additionalProperties: false
-      required: [id, url, via]
+      required: [value]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
-        url: {type: string, minLength: 1, maxLength: 8192}
+        value: {type: string, minLength: 1, maxLength: 8192}
         type: {type: string, enum: [seed, asset], default: seed}
         via: {type: [string, 'null'], maxLength: 8192}
         hops: {type: integer, minimum: 0}
         attr: {$ref: '#/components/schemas/Attrs'}
     ClaimedJob:
-      allOf:
-        - {$ref: '#/components/schemas/JobSpec'}
-        - type: object
-          required: [attempt_id, lease_expires_at]
-          properties:
-            attempt_id: {$ref: '#/components/schemas/Identifier'}
-            lease_expires_at: {type: integer, format: int64}
+      type: object
+      additionalProperties: false
+      required: [value, job_id, attempt_id, lease_expires_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        value: {type: string, minLength: 1, maxLength: 8192}
+        type: {type: string, enum: [seed, asset], default: seed}
+        via: {type: [string, 'null'], maxLength: 8192}
+        hops: {type: integer, minimum: 0}
+        attr: {$ref: '#/components/schemas/Attrs'}
+        job_id: {$ref: '#/components/schemas/JobID'}
+        attempt_id: {$ref: '#/components/schemas/Identifier'}
+        lease_expires_at: {type: integer, format: int64}
     ProjectClaimRequest:
       type: object
       additionalProperties: false
@@ -260,7 +453,7 @@ components:
       additionalProperties: false
       required: [job_id, attempt_id, outcome, warc_receipts]
       properties:
-        job_id: {$ref: '#/components/schemas/Identifier'}
+        job_id: {$ref: '#/components/schemas/JobID'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
         outcome: {$ref: '#/components/schemas/Outcome'}
         warc_receipts: {type: array, maxItems: 16, items: {$ref: '#/components/schemas/WARCReceipt'}}
@@ -284,7 +477,7 @@ components:
       additionalProperties: false
       required: [job_id, attempt_id, retryable, error]
       properties:
-        job_id: {$ref: '#/components/schemas/Identifier'}
+        job_id: {$ref: '#/components/schemas/JobID'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
         retryable: {type: boolean}
         error: {$ref: '#/components/schemas/ExecutionError'}
@@ -300,7 +493,7 @@ components:
       additionalProperties: false
       required: [job_id, attempt_id]
       properties:
-        job_id: {$ref: '#/components/schemas/Identifier'}
+        job_id: {$ref: '#/components/schemas/JobID'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
     ProjectExtendLeaseRequest:
       type: object
@@ -315,7 +508,7 @@ components:
       additionalProperties: false
       required: [job_id, attempt_id, status]
       properties:
-        job_id: {$ref: '#/components/schemas/Identifier'}
+        job_id: {$ref: '#/components/schemas/JobID'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [applied, rejected]}
         job_status: {type: [string, 'null'], enum: [todo, wip, done, failed, reset_exhausted, null]}

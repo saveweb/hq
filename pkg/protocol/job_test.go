@@ -16,19 +16,19 @@ func TestDefaultJobIDConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	var vectors []struct {
-		Type string `json:"type"`
-		URL  string `json:"url"`
-		ID   string `json:"id"`
+		Type  string `json:"type"`
+		Value string `json:"value"`
+		ID    string `json:"id"`
 	}
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
 	}
 	for _, vector := range vectors {
 		vector := vector
-		t.Run(vector.Type+"/"+vector.URL, func(t *testing.T) {
+		t.Run(vector.Type+"/"+vector.Value, func(t *testing.T) {
 			t.Parallel()
-			if got := protocol.DefaultJobID(vector.Type, vector.URL); got != vector.ID {
-				t.Fatalf("DefaultJobID(%q, %q) = %q, want %q", vector.Type, vector.URL, got, vector.ID)
+			if got := protocol.DefaultJobID(vector.Type, vector.Value); got != vector.ID {
+				t.Fatalf("DefaultJobID(%q, %q) = %q, want %q", vector.Type, vector.Value, got, vector.ID)
 			}
 		})
 	}

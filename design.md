@@ -29,8 +29,24 @@ HQ does not own:
 
 ## 3. Data model
 
-A job is identified by `(project_id, job_id)`. Reimporting the identical spec
-is idempotent. Reusing an ID for a different spec is `identity_conflict`.
+Every job has an internal PostgreSQL-generated `bigint` `job_id`. Worker
+mutations address `(project_id, job_id)` and the current attempt. Source identity
+is separate and selected once when a project is created:
+
+- `none` stores no deduplication key;
+- `external_id` stores an optional-format source ID and enforces
+  `(project_id, external_id)` uniqueness;
+- `unique_value` stores a binary SHA-256 digest of the UTF-8 value and enforces
+  `(project_id, unique_value_digest)` uniqueness.
+
+`external_id` projects require a JobSpec `id`; the other modes reject it. A
+digest conflict is checked against the original value so a hash collision is
+reported rather than silently deduplicated. The project identity mode is
+immutable, which prevents mixed identity rules inside one queue.
+
+`value` is stored in its own column. PostgreSQL JSONB stores only the optional
+`type`, `via`, `hops`, and `attr` fields, so neither internal nor external IDs
+are duplicated inside the work specification.
 
 ```text
 todo -> wip -> done
@@ -43,7 +59,7 @@ todo -> wip -> done
 attempt ID, records the worker ID, and sets a lease deadline in one PostgreSQL
 transaction.
 
-`complete`, `fail`, and `extend-lease` require the current project, job ID,
+`complete`, `fail`, and `extend-lease` require the current project, internal job ID,
 attempt ID, worker ID, non-expired lease, and `wip` status. A stale mutation is
 rejected per item and cannot affect a later attempt.
 
@@ -100,15 +116,21 @@ browser sessions never authorize `/api/v1/**`, and machine tokens are never
 placed in browser storage. Shard-owner roles, agent registration, and session
 heartbeat remain outside the production queue API.
 
+Administrators can manage user status and roles, rotate or revoke machine
+tokens, inspect current job state, requeue terminal failures, and delete jobs or
+projects that have no active attempt. Token rotation returns plaintext exactly
+once; HQ otherwise stores only its hash. HQ does not synthesize attempt history:
+the administration API exposes the current row and its terminal data.
+
 ## 6. Source import
 
-`jobs-jsonl-zstd-v1` remains the immutable interchange format. The operator
+`jobs-jsonl-zstd-v1` is the immutable interchange format. The operator
 streams it directly into PostgreSQL using `tracker enqueue-source`; HQ does not
 download sources from object storage.
 
 Imports are transactional in bounded batches. A large source may be partially
-imported if a later batch is invalid; rerunning it is safe because prior
-identical jobs are idempotent.
+imported if a later batch is invalid. Rerunning is idempotent for `external_id`
+and `unique_value` projects; `none` intentionally inserts another copy.
 
 ## 7. PostgreSQL operations
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"git.saveweb.org/saveweb/hq/internal/sourceformat"
+	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
@@ -40,12 +41,14 @@ func sourceUsage() error {
 
 func runPack(args []string) error {
 	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
-	inputPath := flags.String("input", "", "UTF-8 file with one exact URL per line, or - for stdin")
+	inputPath := flags.String("input", "", "UTF-8 file with one exact value per line, or - for stdin")
 	outputPath := flags.String("output", "", "new jobs-jsonl-zstd-v1 file")
+	identityMode := flags.String("identity-mode", tracker.IdentityModeExternalID, "external_id, unique_value, or none")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *inputPath == "" || *outputPath == "" || *outputPath == "-" {
+	if flags.NArg() != 0 || *inputPath == "" || *outputPath == "" || *outputPath == "-" ||
+		(*identityMode != tracker.IdentityModeExternalID && *identityMode != tracker.IdentityModeUniqueValue && *identityMode != tracker.IdentityModeNone) {
 		return fmt.Errorf("source pack: --input and a file --output are required")
 	}
 	input, closeInput, err := openInput(*inputPath)
@@ -69,7 +72,7 @@ func runPack(args []string) error {
 	jobs := make(chan protocol.JobSpecV1, 256)
 	producerResult := make(chan error, 1)
 	go func() {
-		producerResult <- produceJobs(ctx, input, jobs)
+		producerResult <- produceJobs(ctx, input, jobs, *identityMode)
 		close(jobs)
 	}()
 	encodeError := sourceformat.Encode(ctx, output, jobs)
@@ -91,17 +94,17 @@ func runPack(args []string) error {
 	return nil
 }
 
-func produceJobs(ctx context.Context, input io.Reader, output chan<- protocol.JobSpecV1) error {
+func produceJobs(ctx context.Context, input io.Reader, output chan<- protocol.JobSpecV1, identityMode string) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 8192), 8193)
 	for scanner.Scan() {
-		url := strings.TrimSuffix(scanner.Text(), "\r")
-		if url == "" {
+		value := strings.TrimSuffix(scanner.Text(), "\r")
+		if value == "" {
 			continue
 		}
-		job := protocol.JobSpecV1{
-			ID: protocol.DefaultJobID(protocol.JobTypeSeed, url), URL: url,
-			Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{},
+		job := protocol.JobSpecV1{Value: value}
+		if identityMode == tracker.IdentityModeExternalID {
+			job.ID = protocol.DefaultJobID(protocol.JobTypeSeed, value)
 		}
 		select {
 		case output <- job:

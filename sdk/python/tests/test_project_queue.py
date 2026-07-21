@@ -28,8 +28,8 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
     queue = ProjectQueue(Config("https://hq.test", "machine-token", "worker-1"), "project-1")
 
     assert queue.claim(max_jobs=2, lease_seconds=60, accept_types=["seed"])["jobs"] == []
-    queue.complete([{"job_id": "job-1", "attempt_id": "at-1"}])
-    queue.extend_lease(30, [{"job_id": "job-1", "attempt_id": "at-1"}])
+    queue.complete([{"job_id": 41, "attempt_id": "at-1"}])
+    queue.extend_lease(30, [{"job_id": 41, "attempt_id": "at-1"}])
 
     tracker = queue._tracker
     assert isinstance(tracker, FakeTracker)
@@ -49,7 +49,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
             "complete",
             {
                 "worker_id": "worker-1",
-                "items": [{"job_id": "job-1", "attempt_id": "at-1"}],
+                "items": [{"job_id": 41, "attempt_id": "at-1"}],
             },
         ),
         (
@@ -58,7 +58,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
             {
                 "worker_id": "worker-1",
                 "extend_seconds": 30,
-                "items": [{"job_id": "job-1", "attempt_id": "at-1"}],
+                "items": [{"job_id": 41, "attempt_id": "at-1"}],
             },
         ),
     ]
