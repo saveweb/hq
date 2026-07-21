@@ -251,7 +251,29 @@ func (h *Handler) users(ctx *echo.Context) error {
 	if err != nil {
 		return h.internal(ctx, err)
 	}
-	return render(ctx, http.StatusOK, "users", map[string]any{"User": user, "Users": users, "CSRF": h.csrfToken(sessionToken)})
+	selectedID := ctx.QueryParam("user_id")
+	var editUser protocol.AdminUserSummary
+	editing, editWorker, editAdmin := false, false, false
+	if selectedID != "" {
+		for _, candidate := range users {
+			if candidate.ID != selectedID {
+				continue
+			}
+			editUser, editing = candidate, true
+			for _, role := range candidate.Roles {
+				editWorker = editWorker || role == tracker.RoleWorker
+				editAdmin = editAdmin || role == tracker.RoleAdmin
+			}
+			break
+		}
+		if !editing {
+			return h.pageError(ctx, http.StatusNotFound, "User not found")
+		}
+	}
+	return render(ctx, http.StatusOK, "users", map[string]any{
+		"User": user, "Users": users, "CSRF": h.csrfToken(sessionToken),
+		"Editing": editing, "EditUser": editUser, "EditWorker": editWorker, "EditAdmin": editAdmin,
+	})
 }
 
 func (h *Handler) putUser(ctx *echo.Context) error {

@@ -225,12 +225,20 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("job detail = %d %q", jobDetail.Code, jobDetail.Body.String())
 	}
 	users := request(t, server, http.MethodGet, "/admin/users", "", sessionCookie)
-	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "Create or update user") {
+	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "Create user") {
 		t.Fatalf("users = %d %q", users.Code, users.Body.String())
 	}
 	putUser := postForm(t, server, "/admin/users", url.Values{"csrf": {csrf}, "user_id": {"worker-web"}, "status": {tracker.UserStatusActive}, "roles": {tracker.RoleWorker}}, sessionCookie)
 	if putUser.Code != http.StatusSeeOther || store.users["worker-web"].Status != tracker.UserStatusActive {
 		t.Fatalf("put user = %d user=%+v", putUser.Code, store.users["worker-web"])
+	}
+	editUser := request(t, server, http.MethodGet, "/admin/users?user_id=worker-web", "", sessionCookie)
+	editBody := editUser.Body.String()
+	if editUser.Code != http.StatusOK || !strings.Contains(editBody, "Update user") ||
+		!strings.Contains(editBody, `value="worker-web" readonly`) ||
+		!strings.Contains(editBody, `value="active" selected`) ||
+		!strings.Contains(editBody, `value="worker" checked`) {
+		t.Fatalf("edit user = %d %q", editUser.Code, editBody)
 	}
 	token := postForm(t, server, "/admin/users/worker-web/token", url.Values{"csrf": {csrf}}, sessionCookie)
 	if token.Code != http.StatusOK || !strings.Contains(token.Body.String(), "hq_") || !store.users["worker-web"].MachineTokenActive {
