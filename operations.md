@@ -46,6 +46,18 @@ POST /api/v1/admin/projects/{project_id}/jobs
 POST /api/v1/admin/projects/{project_id}/source
 ```
 
+Use `hqctl enqueue` for plain-value or JobSpec JSONL input that should be sent
+in bounded batches. It reads the project identity mode before submitting and
+defaults to 1000 jobs per request. `--batch-size` accepts any positive count;
+the API enforces its 8 MiB JSON request-body limit instead of a job-count cap.
+Use `hqctl enqueue-source` for an existing `jobs-jsonl-zstd-v1` file. Both
+commands require a `0600` administrator machine-token file and print a JSON
+summary.
+
+Batch requests commit independently. A failure can therefore leave earlier
+batches imported. Retrying is safe for `external_id` and `unique_value`
+projects, but intentionally duplicates work in `none` projects.
+
 Routine remote administration also supports user status and roles, user
 deletion, machine-token rotation or revocation, compressed source import,
 paginated job inspection, terminal-failure requeue, and deletion of non-WIP

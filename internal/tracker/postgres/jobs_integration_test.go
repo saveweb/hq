@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"os"
+	"strconv"
 	"testing"
 
 	"git.saveweb.org/saveweb/hq/internal/tracker"
@@ -130,6 +131,19 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	conflict[0].Value = "https://example.test/different"
 	if _, err := store.EnqueueProjectJobs(ctx, "queue-project", conflict, now+2); !tracker.IsCode(err, protocol.ErrorIdentityConflict) {
 		t.Fatalf("identity conflict = %v", err)
+	}
+	if err := store.PutProject(ctx, tracker.Project{ID: "large-enqueue-project", Status: tracker.ProjectStatusActive}, now); err != nil {
+		t.Fatal(err)
+	}
+	largeBatch := make([]protocol.JobSpecV1, 300)
+	for index := range largeBatch {
+		largeBatch[index] = protocol.JobSpecV1{ID: "large-" + strconv.Itoa(index), Value: strconv.Itoa(index)}
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "large-enqueue-project", largeBatch, now); err != nil || inserted != int64(len(largeBatch)) {
+		t.Fatalf("large enqueue = %d, %v", inserted, err)
+	}
+	if err := store.DeleteProject(ctx, "large-enqueue-project"); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "unique-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeUniqueValue}, now); err != nil {
 		t.Fatal(err)

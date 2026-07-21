@@ -237,8 +237,8 @@ func (h *handler) enqueueJobs(ctx *echo.Context) error {
 	if !h.decode(ctx, &request) {
 		return nil
 	}
-	if len(request.Jobs) == 0 || len(request.Jobs) > 256 {
-		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "jobs must contain 1-256 items"})
+	if len(request.Jobs) == 0 {
+		return h.writeAPIError(ctx, http.StatusBadRequest, protocol.APIError{Code: protocol.ErrorInvalidRequest, Message: "jobs must contain at least one item"})
 	}
 	projectID := ctx.Param("project_id")
 	inserted, err := h.store.EnqueueProjectJobs(ctx.Request().Context(), projectID, request.Jobs, h.now())

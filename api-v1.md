@@ -35,9 +35,9 @@ DELETE /api/v1/admin/users/{user_id}/machine-token
 Project responses include the identity mode and `todo`, `wip`, `done`, `failed`,
 and `reset_exhausted` counts.
 
-The jobs endpoint accepts 1-256 JobSpecs. `value` is required; `type`, `via`,
-`hops`, and `attr` are optional. `id` is required only by `external_id` projects
-and rejected by the other modes:
+The jobs endpoint accepts one or more JobSpecs within the 8 MiB JSON request
+body limit. `value` is required; `type`, `via`, `hops`, and `attr` are optional.
+`id` is required only by `external_id` projects and rejected by the other modes:
 
 - `none` inserts every submitted job;
 - `external_id` deduplicates by `(project_id, id)`;

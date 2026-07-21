@@ -74,3 +74,62 @@ func TestProjectJobsErrorEnvelope(t *testing.T) {
 		t.Fatalf("error = %#v", err)
 	}
 }
+
+func TestAdminProjectAndEnqueueSourceRequests(t *testing.T) {
+	var calls int
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if request.Header.Get("Authorization") != "Bearer admin-token" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		body := ""
+		switch calls {
+		case 1:
+			if request.Method != http.MethodGet || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo" {
+				t.Fatalf("project request = %s %s", request.Method, request.URL)
+			}
+			body = `{"id":"demo","status":"active","identity_mode":"external_id","job_counts":{},"created_at":1,"updated_at":1}`
+		case 2:
+			if request.Method != http.MethodPost || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo/jobs" || request.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("jobs request = %s %s headers=%v", request.Method, request.URL, request.Header)
+			}
+			raw, err := io.ReadAll(request.Body)
+			if err != nil || !strings.Contains(string(raw), `"value":"one"`) {
+				t.Fatalf("jobs body = %q error=%v", raw, err)
+			}
+			body = `{"project_id":"demo","submitted":1,"inserted":1}`
+		case 3:
+			if request.Method != http.MethodPost || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo/source" || request.Header.Get("Content-Type") != "application/zstd" {
+				t.Fatalf("source request = %s %s headers=%v", request.Method, request.URL, request.Header)
+			}
+			raw, err := io.ReadAll(request.Body)
+			if err != nil || string(raw) != "packed-source" {
+				t.Fatalf("source body = %q error=%v", raw, err)
+			}
+			body = `{"project_id":"demo","jobs":10,"inserted":9,"uncompressed_bytes":123}`
+		default:
+			t.Fatalf("unexpected call %d", calls)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "Cache-Control": []string{"no-store"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})
+	client, err := New(Config{BaseURL: "https://hq.test", MachineToken: "admin-token", HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := client.AdminProject(context.Background(), "demo")
+	if err != nil || project.ID != "demo" || project.IdentityMode != "external_id" {
+		t.Fatalf("project=%+v error=%v", project, err)
+	}
+	jobsResult, err := client.EnqueueAdminProjectJobs(context.Background(), "demo", []protocol.JobSpecV1{{Value: "one"}})
+	if err != nil || jobsResult.Submitted != 1 || jobsResult.Inserted != 1 {
+		t.Fatalf("jobs result=%+v error=%v", jobsResult, err)
+	}
+	result, err := client.EnqueueAdminProjectSource(context.Background(), "demo", strings.NewReader("packed-source"))
+	if err != nil || result.Jobs != 10 || result.Inserted != 9 || result.UncompressedBytes != 123 {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+}

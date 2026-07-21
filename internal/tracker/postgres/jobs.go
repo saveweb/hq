@@ -29,7 +29,7 @@ type storedJobSpec struct {
 }
 
 func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
-	if !queue.ValidateIdentifier(projectID) || len(jobs) == 0 || len(jobs) > 100_000 {
+	if !queue.ValidateIdentifier(projectID) || len(jobs) == 0 {
 		return 0, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid project or job batch"}
 	}
 	var inserted int64

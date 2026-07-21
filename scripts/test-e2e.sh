@@ -90,6 +90,19 @@ status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]
   "${base}/api/v1/admin/projects/source-e2e")
 test "${status}" = 204
 
+# Enqueue count is constrained by the JSON body limit, not the worker batch limit.
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
+  -X PUT -d '{"status":"active","identity_mode":"external_id"}' \
+  "${base}/api/v1/admin/projects/large-enqueue-e2e" >"${run_dir}/large-project.json"
+python3 -c 'import json,sys; json.dump({"jobs":[{"id":f"large-{i}","value":str(i)} for i in range(300)]},open(sys.argv[1],"w"))' "${run_dir}/large-enqueue.json"
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
+  --data-binary "@${run_dir}/large-enqueue.json" \
+  "${base}/api/v1/admin/projects/large-enqueue-e2e/jobs" >"${run_dir}/large-enqueue-result.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["submitted"] == 300 and r["inserted"] == 300' "${run_dir}/large-enqueue-result.json"
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \
+  "${base}/api/v1/admin/projects/large-enqueue-e2e")
+test "${status}" = 204
+
 status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" "${json[@]}" \
   -X PUT -d '{"status":"active","roles":["worker"]}' "${base}/api/v1/admin/users/api-worker")
 test "${status}" = 204

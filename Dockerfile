@@ -18,6 +18,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/tracker ./cmd/tracker && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath \
       -ldflags="-s -w -buildid=" \
+      -o /out/hqctl ./cmd/hqctl && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+      -ldflags="-s -w -buildid=" \
       -o /out/source ./cmd/source
 
 FROM alpine:3.23
@@ -29,7 +32,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -g 65532 -S saveweb && \
     adduser -u 65532 -S -D -H -G saveweb saveweb
 
-COPY --from=build /out/source /out/tracker /usr/local/bin/
+COPY --from=build /out/hqctl /out/source /out/tracker /usr/local/bin/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh

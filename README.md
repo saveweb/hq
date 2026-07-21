@@ -28,6 +28,8 @@ The production image contains only:
 
 - `tracker`: migrations, GitHub-authenticated web administration, machine API,
   and source import;
+- `hqctl`: remote administration CLI with bounded batch and packed-source
+  enqueue commands;
 - `source`: tools for producing `jobs-jsonl-zstd-v1` source files.
 
 PostgreSQL is the only HQ state store. There is no shard daemon, queue relay,
@@ -121,6 +123,61 @@ again and generates its own machine token at `/worker`.
 An active administrator machine token can perform the same operations through
 `/api/v1/admin/projects`. Project responses include queue counts for all job
 states. Browser sessions are not accepted by machine API routes.
+
+## Remote enqueue CLI
+
+Build `hqctl`, then store an active administrator's machine token in a private
+file. `HQ_URL` defaults to `https://hq.saveweb.org`, and
+`HQ_MACHINE_TOKEN_FILE` can replace the corresponding flags.
+
+```bash
+install -d ./bin
+go build -o ./bin/hqctl ./cmd/hqctl
+chmod 0600 ./admin.token
+```
+
+Batch enqueue reads one exact value per non-empty line. It fetches the project
+first, generates stable IDs for `external_id` projects, and sends sequential
+requests using the selected batch size (default 1000). There is no job-count
+cap per request; the server's 8 MiB JSON body limit is the effective boundary.
+The final JSON reports submitted and newly inserted totals; progress is written
+to stderr every 100 batches by default.
+
+```bash
+jq -r '.vid' /home/yzqzss/git/sinavideo/records.jsonl |
+  ./bin/hqctl enqueue \
+    --machine-token-file ./admin.token \
+    --project-id sina_bilivideo \
+    --batch-size 5000
+```
+
+Use `--format jsonl` for one complete JobSpec per line. A missing `id` is filled
+for `external_id` projects; `id` is rejected locally for `unique_value` and
+`none` projects.
+
+```bash
+./bin/hqctl enqueue \
+  --machine-token-file ./admin.token \
+  --project-id sina_bilivideo \
+  --format jsonl \
+  --input jobs.jsonl \
+  --batch-size 128
+```
+
+For very large imports, pack once and stream the compressed source through one
+request:
+
+```bash
+./bin/hqctl enqueue-source \
+  --machine-token-file ./admin.token \
+  --project-id sina_bilivideo \
+  --input sina_bilivideo.jobs.jsonl.zst
+```
+
+Batch enqueue is intentionally sequential. If a later batch fails, earlier
+batches remain committed and the error reports how many jobs were submitted.
+Rerunning is idempotent for `external_id` and `unique_value`; a `none` project
+will insert another copy.
 
 The administration API and Web Dashboard also import packed source files,
 manage user creation, deletion, and machine-token rotation, inspect current job
