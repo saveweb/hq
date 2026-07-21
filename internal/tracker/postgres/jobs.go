@@ -1,9 +1,9 @@
 package postgres
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +28,12 @@ type storedJobSpec struct {
 	Attrs map[string]any `json:"attr,omitempty"`
 }
 
+type preparedEnqueueJob struct {
+	identity string
+	value    string
+	spec     string
+}
+
 func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
 	if !queue.ValidateIdentifier(projectID) || len(jobs) == 0 {
 		return 0, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid project or job batch"}
@@ -44,76 +50,154 @@ func (s *Store) EnqueueProjectJobs(ctx context.Context, projectID string, jobs [
 		if status == tracker.ProjectStatusArchived {
 			return &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "archived project cannot accept jobs"}
 		}
-		for _, job := range jobs {
-			normalized, validationError := queue.NormalizeJob(queue.JobSpec{ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs})
-			if validationError != nil {
-				return &tracker.Error{Code: protocol.ErrorInvalidJob, Message: validationError.Message}
-			}
-			if identityMode == tracker.IdentityModeExternalID && normalized.ID == "" {
-				return &tracker.Error{Code: protocol.ErrorInvalidJob, Message: "id is required for external_id projects"}
-			}
-			if identityMode != tracker.IdentityModeExternalID && normalized.ID != "" {
-				return &tracker.Error{Code: protocol.ErrorInvalidJob, Message: "id is allowed only for external_id projects"}
-			}
-			spec, err := json.Marshal(storedJobSpec{
-				Type: normalized.Type, Via: normalized.Via, Hops: normalized.Hops, Attrs: normalized.Attrs,
-			})
-			if err != nil {
-				return err
-			}
-			var tag pgconn.CommandTag
-			var digest []byte
-			switch identityMode {
-			case tracker.IdentityModeNone:
-				tag, err = tx.Exec(ctx, `INSERT INTO tracker_jobs(project_id,value,spec,status,created_at,updated_at) VALUES ($1,$2,$3,'todo',$4,$4)`, projectID, normalized.Value, spec, now)
-			case tracker.IdentityModeExternalID:
-				tag, err = tx.Exec(ctx, `
-					INSERT INTO tracker_jobs(project_id,external_id,value,spec,status,created_at,updated_at)
-					VALUES ($1,$2,$3,$4,'todo',$5,$5)
-					ON CONFLICT (project_id,external_id) WHERE external_id IS NOT NULL DO NOTHING
-				`, projectID, normalized.ID, normalized.Value, spec, now)
-			case tracker.IdentityModeUniqueValue:
-				sum := sha256.Sum256([]byte(normalized.Value))
-				digest = sum[:]
-				tag, err = tx.Exec(ctx, `
-					INSERT INTO tracker_jobs(project_id,value,unique_value_digest,spec,status,created_at,updated_at)
-					VALUES ($1,$2,$3,$4,'todo',$5,$5)
-					ON CONFLICT (project_id,unique_value_digest) WHERE unique_value_digest IS NOT NULL DO NOTHING
-				`, projectID, normalized.Value, digest, spec, now)
-			default:
-				return fmt.Errorf("unknown project identity mode %q", identityMode)
-			}
-			if err != nil {
-				return err
-			}
-			if tag.RowsAffected() == 0 {
-				var existingValue string
-				var existingSpec []byte
-				var row pgx.Row
-				if identityMode == tracker.IdentityModeExternalID {
-					row = tx.QueryRow(ctx, `SELECT value,spec FROM tracker_jobs WHERE project_id=$1 AND external_id=$2`, projectID, normalized.ID)
-				} else {
-					row = tx.QueryRow(ctx, `SELECT value,spec FROM tracker_jobs WHERE project_id=$1 AND unique_value_digest=$2`, projectID, digest)
-				}
-				if err := row.Scan(&existingValue, &existingSpec); err != nil {
-					return err
-				}
-				if identityMode == tracker.IdentityModeUniqueValue && existingValue != normalized.Value {
-					return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "value digest collision"}
-				}
-				equalSpec, err := equalJSON(existingSpec, spec)
-				if err != nil {
-					return err
-				}
-				if existingValue != normalized.Value || !equalSpec {
-					return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job identity already exists with a different spec"}
-				}
-			}
-			inserted += tag.RowsAffected()
+		prepared, err := prepareEnqueueJobs(jobs, identityMode)
+		if err != nil {
+			return err
 		}
-		return nil
+		inserted, err = bulkEnqueueJobs(ctx, tx, projectID, identityMode, prepared, now)
+		return err
 	})
 	return inserted, storeError("enqueue project jobs", err)
+}
+
+func prepareEnqueueJobs(jobs []protocol.JobSpecV1, identityMode string) ([]preparedEnqueueJob, error) {
+	prepared := make([]preparedEnqueueJob, 0, len(jobs))
+	var seen map[string]preparedEnqueueJob
+	if identityMode != tracker.IdentityModeNone {
+		seen = make(map[string]preparedEnqueueJob, len(jobs))
+	}
+	for _, job := range jobs {
+		normalized, validationError := queue.NormalizeJob(queue.JobSpec{
+			ID: job.ID, Value: job.Value, Type: job.Type, Via: job.Via, Hops: job.Hops, Attrs: job.Attrs,
+		})
+		if validationError != nil {
+			return nil, &tracker.Error{Code: protocol.ErrorInvalidJob, Message: validationError.Message}
+		}
+		if identityMode == tracker.IdentityModeExternalID && normalized.ID == "" {
+			return nil, &tracker.Error{Code: protocol.ErrorInvalidJob, Message: "id is required for external_id projects"}
+		}
+		if identityMode != tracker.IdentityModeExternalID && normalized.ID != "" {
+			return nil, &tracker.Error{Code: protocol.ErrorInvalidJob, Message: "id is allowed only for external_id projects"}
+		}
+		spec, err := json.Marshal(storedJobSpec{
+			Type: normalized.Type, Via: normalized.Via, Hops: normalized.Hops, Attrs: normalized.Attrs,
+		})
+		if err != nil {
+			return nil, err
+		}
+		value := preparedEnqueueJob{value: normalized.Value, spec: string(spec)}
+		switch identityMode {
+		case tracker.IdentityModeNone:
+			prepared = append(prepared, value)
+			continue
+		case tracker.IdentityModeExternalID:
+			value.identity = normalized.ID
+		case tracker.IdentityModeUniqueValue:
+			sum := sha256.Sum256([]byte(normalized.Value))
+			value.identity = hex.EncodeToString(sum[:])
+		default:
+			return nil, fmt.Errorf("unknown project identity mode %q", identityMode)
+		}
+		if previous, exists := seen[value.identity]; exists {
+			if identityMode == tracker.IdentityModeUniqueValue && previous.value != value.value {
+				return nil, &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "value digest collision"}
+			}
+			if previous.value != value.value || previous.spec != value.spec {
+				return nil, &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job identity already exists with a different spec"}
+			}
+			continue
+		}
+		seen[value.identity] = value
+		prepared = append(prepared, value)
+	}
+	return prepared, nil
+}
+
+func bulkEnqueueJobs(ctx context.Context, tx pgx.Tx, projectID, identityMode string, jobs []preparedEnqueueJob, now int64) (int64, error) {
+	identities := make([]string, len(jobs))
+	values := make([]string, len(jobs))
+	specs := make([]string, len(jobs))
+	for index, job := range jobs {
+		identities[index], values[index], specs[index] = job.identity, job.value, job.spec
+	}
+	var (
+		tag pgconn.CommandTag
+		err error
+	)
+	switch identityMode {
+	case tracker.IdentityModeNone:
+		tag, err = tx.Exec(ctx, `
+			INSERT INTO tracker_jobs(project_id,value,spec,status,created_at,updated_at)
+			SELECT $1,input.value,input.spec_text::jsonb,'todo',$4,$4
+			FROM unnest($2::text[],$3::text[]) WITH ORDINALITY AS input(value,spec_text,ordinal)
+			ORDER BY input.ordinal
+		`, projectID, values, specs, now)
+	case tracker.IdentityModeExternalID:
+		tag, err = tx.Exec(ctx, `
+			INSERT INTO tracker_jobs(project_id,external_id,value,spec,status,created_at,updated_at)
+			SELECT $1,input.identity,input.value,input.spec_text::jsonb,'todo',$5,$5
+			FROM unnest($2::text[],$3::text[],$4::text[]) WITH ORDINALITY AS input(identity,value,spec_text,ordinal)
+			ORDER BY input.ordinal
+			ON CONFLICT (project_id,external_id) WHERE external_id IS NOT NULL DO NOTHING
+		`, projectID, identities, values, specs, now)
+	case tracker.IdentityModeUniqueValue:
+		tag, err = tx.Exec(ctx, `
+			INSERT INTO tracker_jobs(project_id,value,unique_value_digest,spec,status,created_at,updated_at)
+			SELECT $1,input.value,decode(input.identity,'hex'),input.spec_text::jsonb,'todo',$5,$5
+			FROM unnest($2::text[],$3::text[],$4::text[]) WITH ORDINALITY AS input(identity,value,spec_text,ordinal)
+			ORDER BY input.ordinal
+			ON CONFLICT (project_id,unique_value_digest) WHERE unique_value_digest IS NOT NULL DO NOTHING
+		`, projectID, identities, values, specs, now)
+	default:
+		return 0, fmt.Errorf("unknown project identity mode %q", identityMode)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if identityMode == tracker.IdentityModeNone {
+		return tag.RowsAffected(), nil
+	}
+	if tag.RowsAffected() == int64(len(jobs)) {
+		return tag.RowsAffected(), nil
+	}
+	if err := validateEnqueueIdentities(ctx, tx, projectID, identityMode, identities, values, specs); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func validateEnqueueIdentities(ctx context.Context, tx pgx.Tx, projectID, identityMode string, identities, values, specs []string) error {
+	identityLookup := "stored.external_id=input.identity"
+	if identityMode == tracker.IdentityModeUniqueValue {
+		identityLookup = "stored.unique_value_digest=decode(input.identity,'hex')"
+	}
+	// LIMIT keeps this as a parameterized lookup against the composite unique index.
+	query := fmt.Sprintf(`
+		SELECT count(*),
+			count(*) FILTER (WHERE stored.value=input.value),
+			count(*) FILTER (WHERE stored.value=input.value AND stored.spec=input.spec_text::jsonb)
+		FROM unnest($2::text[],$3::text[],$4::text[]) AS input(identity,value,spec_text)
+		CROSS JOIN LATERAL (
+			SELECT stored.value,stored.spec
+			FROM tracker_jobs AS stored
+			WHERE stored.project_id=$1 AND %s
+			LIMIT 1
+		) AS stored
+	`, identityLookup)
+	var total, matchingValues, matchingSpecs int64
+	if err := tx.QueryRow(ctx, query, projectID, identities, values, specs).Scan(&total, &matchingValues, &matchingSpecs); err != nil {
+		return err
+	}
+	if total != int64(len(identities)) {
+		return fmt.Errorf("bulk enqueue identity verification returned %d of %d jobs", total, len(identities))
+	}
+	if identityMode == tracker.IdentityModeUniqueValue && matchingValues != total {
+		return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "value digest collision"}
+	}
+	if matchingSpecs != total {
+		return &tracker.Error{Code: protocol.ErrorIdentityConflict, Message: "job identity already exists with a different spec"}
+	}
+	return nil
 }
 
 func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, request protocol.ProjectClaimRequest, now int64) ([]protocol.ClaimedJob, error) {
@@ -325,19 +409,6 @@ func projectItemResult(jobID int64, attemptID string, affected int64, status str
 		return protocol.ItemResult{JobID: jobID, AttemptID: attemptID, Status: protocol.ItemStatusApplied, JobStatus: &status}
 	}
 	return protocol.ItemResult{JobID: jobID, AttemptID: attemptID, Status: protocol.ItemStatusRejected, Error: &protocol.APIError{Code: protocol.ErrorStaleAttempt, Message: "attempt is stale, expired, or already finalized"}}
-}
-
-func equalJSON(left, right []byte) (bool, error) {
-	var leftValue, rightValue any
-	if err := json.Unmarshal(left, &leftValue); err != nil {
-		return false, fmt.Errorf("decode stored job spec: %w", err)
-	}
-	if err := json.Unmarshal(right, &rightValue); err != nil {
-		return false, fmt.Errorf("decode new job spec: %w", err)
-	}
-	leftCanonical, _ := json.Marshal(leftValue)
-	rightCanonical, _ := json.Marshal(rightValue)
-	return bytes.Equal(leftCanonical, rightCanonical), nil
 }
 
 func validateWARCReceipts(receipts []protocol.WARCReceipt) error {

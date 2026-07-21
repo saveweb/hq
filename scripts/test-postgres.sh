@@ -29,4 +29,4 @@ fi
 
 port=$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')
 HQ_TEST_POSTGRES_URL="postgres://postgres:test@127.0.0.1:${port}/saveweb_hq_test?sslmode=disable" \
-  go test -count=1 -v ./internal/tracker/postgres
+  go test -count=1 -v "$@" ./internal/tracker/postgres

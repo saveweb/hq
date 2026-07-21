@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"git.saveweb.org/saveweb/hq/internal/tracker"
 	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
@@ -132,6 +134,18 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if _, err := store.EnqueueProjectJobs(ctx, "queue-project", conflict, now+2); !tracker.IsCode(err, protocol.ErrorIdentityConflict) {
 		t.Fatalf("identity conflict = %v", err)
 	}
+	duplicateBatch := []protocol.JobSpecV1{{ID: "batch-duplicate", Value: "same"}, {ID: "batch-duplicate", Value: "same"}}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "queue-project", duplicateBatch, now+2); err != nil || inserted != 1 {
+		t.Fatalf("same-batch duplicate enqueue = %d, %v", inserted, err)
+	}
+	atomicJob := protocol.JobSpecV1{ID: "atomic-new", Value: "new"}
+	atomicConflict := []protocol.JobSpecV1{atomicJob, {ID: "job-1", Value: "conflicting"}}
+	if _, err := store.EnqueueProjectJobs(ctx, "queue-project", atomicConflict, now+2); !tracker.IsCode(err, protocol.ErrorIdentityConflict) {
+		t.Fatalf("atomic identity conflict = %v", err)
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "queue-project", []protocol.JobSpecV1{atomicJob}, now+2); err != nil || inserted != 1 {
+		t.Fatalf("conflicting bulk enqueue did not roll back = %d, %v", inserted, err)
+	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "large-enqueue-project", Status: tracker.ProjectStatusActive}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +165,9 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	valueJobs := []protocol.JobSpecV1{{Value: "same-value"}, {Value: "same-value"}}
 	if inserted, err := store.EnqueueProjectJobs(ctx, "unique-project", valueJobs, now); err != nil || inserted != 1 {
 		t.Fatalf("unique-value enqueue = %d, %v", inserted, err)
+	}
+	if _, err := store.EnqueueProjectJobs(ctx, "unique-project", []protocol.JobSpecV1{{Value: "same-value", Attrs: map[string]any{"changed": true}}}, now); !tracker.IsCode(err, protocol.ErrorIdentityConflict) {
+		t.Fatalf("unique-value identity conflict = %v", err)
 	}
 	if _, err := store.EnqueueProjectJobs(ctx, "unique-project", []protocol.JobSpecV1{{ID: "not-allowed", Value: "other"}}, now); !tracker.IsCode(err, protocol.ErrorInvalidJob) {
 		t.Fatalf("unique-value external ID = %v", err)
@@ -246,4 +263,134 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err := store.DeleteProjectJob(ctx, "queue-project", claimed[0].JobID); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func BenchmarkPostgresEnqueueBatches(b *testing.B) {
+	databaseURL := os.Getenv("HQ_TEST_POSTGRES_URL")
+	if databaseURL == "" {
+		b.Skip("HQ_TEST_POSTGRES_URL is not set")
+	}
+	ctx := context.Background()
+	store, err := postgres.Open(ctx, databaseURL)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		b.Fatal(err)
+	}
+
+	const batchSize = 1000
+	repeated := make([]protocol.JobSpecV1, batchSize)
+	for index := range repeated {
+		repeated[index] = protocol.JobSpecV1{ID: "repeat-" + strconv.Itoa(index), Value: strconv.Itoa(index)}
+	}
+	if err := store.PutProject(ctx, tracker.Project{ID: "benchmark-repeat", Status: tracker.ProjectStatusActive}, 1); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := store.EnqueueProjectJobs(ctx, "benchmark-repeat", repeated, 1); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("repeat-1000", func(b *testing.B) {
+		b.ReportMetric(float64(batchSize), "jobs/op")
+		for range b.N {
+			if inserted, err := store.EnqueueProjectJobs(ctx, "benchmark-repeat", repeated, 2); err != nil || inserted != 0 {
+				b.Fatalf("enqueue = %d, %v", inserted, err)
+			}
+		}
+	})
+
+	if err := store.PutProject(ctx, tracker.Project{ID: "benchmark-fresh", Status: tracker.ProjectStatusActive}, 1); err != nil {
+		b.Fatal(err)
+	}
+	var freshRun int
+	b.Run("fresh-1000", func(b *testing.B) {
+		freshRun++
+		b.ReportMetric(float64(batchSize), "jobs/op")
+		jobs := make([]protocol.JobSpecV1, batchSize)
+		for iteration := range b.N {
+			b.StopTimer()
+			prefix := strconv.Itoa(freshRun) + "-" + strconv.Itoa(iteration) + "-"
+			for index := range jobs {
+				value := prefix + strconv.Itoa(index)
+				jobs[index] = protocol.JobSpecV1{ID: value, Value: value}
+			}
+			b.StartTimer()
+			if inserted, err := store.EnqueueProjectJobs(ctx, "benchmark-fresh", jobs, 2); err != nil || inserted != batchSize {
+				b.Fatalf("enqueue = %d, %v", inserted, err)
+			}
+		}
+	})
+
+	connection, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer connection.Close(ctx)
+	if err := store.PutProject(ctx, tracker.Project{ID: "benchmark-legacy-repeat", Status: tracker.ProjectStatusActive}, 1); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := legacyEnqueueExternalID(ctx, connection, "benchmark-legacy-repeat", repeated, 1); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("legacy-repeat-1000", func(b *testing.B) {
+		b.ReportMetric(float64(batchSize), "jobs/op")
+		for range b.N {
+			if inserted, err := legacyEnqueueExternalID(ctx, connection, "benchmark-legacy-repeat", repeated, 2); err != nil || inserted != 0 {
+				b.Fatalf("enqueue = %d, %v", inserted, err)
+			}
+		}
+	})
+
+	if err := store.PutProject(ctx, tracker.Project{ID: "benchmark-legacy-fresh", Status: tracker.ProjectStatusActive}, 1); err != nil {
+		b.Fatal(err)
+	}
+	var legacyFreshRun int
+	b.Run("legacy-fresh-1000", func(b *testing.B) {
+		legacyFreshRun++
+		b.ReportMetric(float64(batchSize), "jobs/op")
+		jobs := make([]protocol.JobSpecV1, batchSize)
+		for iteration := range b.N {
+			b.StopTimer()
+			prefix := strconv.Itoa(legacyFreshRun) + "-" + strconv.Itoa(iteration) + "-"
+			for index := range jobs {
+				value := prefix + strconv.Itoa(index)
+				jobs[index] = protocol.JobSpecV1{ID: value, Value: value}
+			}
+			b.StartTimer()
+			if inserted, err := legacyEnqueueExternalID(ctx, connection, "benchmark-legacy-fresh", jobs, 2); err != nil || inserted != batchSize {
+				b.Fatalf("enqueue = %d, %v", inserted, err)
+			}
+		}
+	})
+}
+
+func legacyEnqueueExternalID(ctx context.Context, connection *pgx.Conn, projectID string, jobs []protocol.JobSpecV1, now int64) (int64, error) {
+	var inserted int64
+	err := pgx.BeginFunc(ctx, connection, func(tx pgx.Tx) error {
+		var status, identityMode string
+		if err := tx.QueryRow(ctx, `SELECT status,identity_mode FROM tracker_projects WHERE id=$1`, projectID).Scan(&status, &identityMode); err != nil {
+			return err
+		}
+		for _, job := range jobs {
+			tag, err := tx.Exec(ctx, `
+				INSERT INTO tracker_jobs(project_id,external_id,value,spec,status,created_at,updated_at)
+				VALUES ($1,$2,$3,'{}','todo',$4,$4)
+				ON CONFLICT (project_id,external_id) WHERE external_id IS NOT NULL DO NOTHING
+			`, projectID, job.ID, job.Value, now)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				var value string
+				var spec []byte
+				if err := tx.QueryRow(ctx, `SELECT value,spec FROM tracker_jobs WHERE project_id=$1 AND external_id=$2`, projectID, job.ID).Scan(&value, &spec); err != nil {
+					return err
+				}
+			}
+			inserted += tag.RowsAffected()
+		}
+		return nil
+	})
+	return inserted, err
 }
