@@ -36,6 +36,9 @@ type APIError struct {
 type ErrorEnvelope struct {
 	Error APIError `json:"error"`
 }
+type WhoAmIResponse struct {
+	UserID string `json:"user_id"`
+}
 type ClaimedJob struct {
 	JobSpecV1
 	JobID          int64  `json:"job_id"`

@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -33,6 +34,26 @@ func (c Config) normalized() (Config, error) {
 }
 func trackerFor(c Config) (*trackerclient.Client, error) {
 	return trackerclient.New(trackerclient.Config{BaseURL: c.TrackerURL, MachineToken: c.MachineToken, ClientVersion: c.ClientVersion, AllowHTTP: c.AllowHTTPTracker, RequestTimeout: c.RequestTimeout})
+}
+
+// WhoAmI returns the user ID associated with the configured machine token.
+func WhoAmI(ctx context.Context, config Config) (string, error) {
+	config, err := config.normalized()
+	if err != nil {
+		return "", err
+	}
+	client, err := trackerFor(config)
+	if err != nil {
+		return "", err
+	}
+	result, err := client.WhoAmI(ctx)
+	if err != nil {
+		return "", convertTrackerError(err)
+	}
+	if result.UserID == "" {
+		return "", fmt.Errorf("worker: tracker returned an invalid user ID")
+	}
+	return result.UserID, nil
 }
 
 const workerIDAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"

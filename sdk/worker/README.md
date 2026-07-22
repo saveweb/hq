@@ -21,6 +21,12 @@ defer queue.Close()
 Opening a queue generates a fresh seven-character `a-z0-9` worker ID. It stays
 fixed for that queue instance and is available through `queue.WorkerID()`.
 
+To identify the user behind a machine token without opening a project queue:
+
+```go
+userID, err := worker.WhoAmI(ctx, config)
+```
+
 `rootCtx` owns the queue lifetime. Canceling it or calling `Close` stops lease
 renewal and cancels every held job. The context passed to `Claim` controls only
 that claim request; canceling it after `Claim` returns does not cancel the jobs

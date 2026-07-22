@@ -56,6 +56,36 @@ func TestClaimProjectJobsRequest(t *testing.T) {
 	}
 }
 
+func TestWhoAmIRequest(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.String() != "https://hq.test/api/v1/whoami" {
+			t.Fatalf("request = %s %s", request.Method, request.URL)
+		}
+		if request.Header.Get("Authorization") != "Bearer machine-token" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":  []string{"application/json"},
+				"Cache-Control": []string{"no-store"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"user_id":"worker-user"}`)),
+		}, nil
+	})
+	client, err := New(Config{
+		BaseURL: "https://hq.test", MachineToken: "machine-token", ClientVersion: "worker-v2",
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.WhoAmI(context.Background())
+	if err != nil || response.UserID != "worker-user" {
+		t.Fatalf("response = %+v, %v", response, err)
+	}
+}
+
 func TestProjectJobsErrorEnvelope(t *testing.T) {
 	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{

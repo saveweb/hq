@@ -28,7 +28,6 @@ class ProjectQueue:
         self._tracker = TrackerClient(
             config.tracker_url,
             config.machine_token,
-            self.worker_id,
             config.client_version,
             timeout=config.request_timeout,
             allow_http=config.allow_http_tracker,
@@ -183,3 +182,23 @@ def _jittered(delay: float) -> float:
 
 def open_project_queue(config: Config, project_id: str) -> ProjectQueue:
     return ProjectQueue(config, project_id)
+
+
+def whoami(config: Config) -> str:
+    """Return the user ID associated with a machine token."""
+    config.validate()
+    tracker = TrackerClient(
+        config.tracker_url,
+        config.machine_token,
+        config.client_version,
+        timeout=config.request_timeout,
+        allow_http=config.allow_http_tracker,
+    )
+    try:
+        response = tracker.whoami()
+    finally:
+        tracker.close()
+    user_id = response.get("user_id")
+    if not isinstance(user_id, str) or not user_id:
+        raise ValueError("tracker returned an invalid user ID")
+    return user_id

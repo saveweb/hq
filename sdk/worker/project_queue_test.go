@@ -17,6 +17,29 @@ import (
 	"github.com/saveweb/hq/pkg/protocol"
 )
 
+func TestWhoAmI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/whoami" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer token" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(response).Encode(protocol.WhoAmIResponse{UserID: "worker-user"})
+	}))
+	defer server.Close()
+
+	userID, err := WhoAmI(context.Background(), Config{
+		TrackerURL: server.URL, MachineToken: "token", ClientVersion: "worker-v2",
+		AllowHTTPTracker: true, RequestTimeout: time.Second,
+	})
+	if err != nil || userID != "worker-user" {
+		t.Fatalf("user ID = %q, %v", userID, err)
+	}
+}
+
 func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 	var policyCalls, claimCalls int
 	var workerID string

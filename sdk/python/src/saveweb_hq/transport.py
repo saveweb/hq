@@ -25,7 +25,6 @@ class TrackerClient:
         self,
         base_url: str,
         machine_token: str,
-        worker_id: str,
         client_version: str,
         *,
         timeout: float,
@@ -40,8 +39,8 @@ class TrackerClient:
             or (parsed.scheme == "http" and not allow_http)
         ):
             raise TransportError("invalid or disallowed HQ URL")
-        if not machine_token or not worker_id or not client_version:
-            raise ValueError("machine token, worker ID, and client version are required")
+        if not machine_token or not client_version:
+            raise ValueError("machine token and client version are required")
         self._scheme, self._host = parsed.scheme, parsed.hostname
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._base_path = parsed.path.rstrip("/")
@@ -68,6 +67,9 @@ class TrackerClient:
 
     def project_policy(self, project_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/projects/{quote(project_id, safe='')}")
+
+    def whoami(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/whoami")
 
     def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None

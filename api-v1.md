@@ -5,6 +5,16 @@ must be active and have the role required by the route: `admin` for management
 and `worker` for scheduling. JSON requests reject unknown fields. All
 timestamps are signed 64-bit UNIX seconds.
 
+## Identity
+
+```text
+GET /api/v1/whoami
+```
+
+This endpoint returns `{"user_id":"..."}` for the supplied machine token. It
+uses the token's authenticated user directly and does not depend on the
+best-effort worker-to-user mapping.
+
 ## Administration
 
 Administration uses the same machine-token authentication. The token owner

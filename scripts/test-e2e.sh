@@ -123,6 +123,12 @@ python3 -c 'import json,sys; t=json.load(open(sys.argv[1])); assert t["user_id"]
 curl --fail --silent --show-error "${admin[@]}" \
   "${base}/api/v1/admin/users/api-worker/machine-token" >"${run_dir}/api-worker-token-view.json"
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "${run_dir}/api-worker-token.json" "${run_dir}/api-worker-token-view.json"
+worker_token=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "${run_dir}/api-worker-token.json")
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${base}/api/v1/whoami")
+test "${status}" = 401
+curl --fail --silent --show-error -H "Authorization: Bearer ${worker_token}" \
+  "${base}/api/v1/whoami" >"${run_dir}/whoami.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"user_id":"api-worker"}' "${run_dir}/whoami.json"
 curl --fail --silent --show-error "${admin[@]}" "${base}/api/v1/admin/users" >"${run_dir}/users.json"
 python3 -c 'import json,sys; assert any(u["id"] == "api-worker" and u["machine_token_active"] and u["machine_token_viewable"] for u in json.load(open(sys.argv[1]))["users"])' "${run_dir}/users.json"
 status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \

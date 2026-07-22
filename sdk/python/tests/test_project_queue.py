@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import saveweb_hq.project_queue as project_queue_module
-from saveweb_hq import Config, ProjectQueue
+from saveweb_hq import Config, ProjectQueue, whoami
 from saveweb_hq.errors import APIError
 
 
@@ -22,6 +22,9 @@ class FakeTracker:
             "policy_version": 3,
             "refresh_after_ms": 60_000,
         }
+
+    def whoami(self) -> dict[str, Any]:
+        return {"user_id": "worker-user"}
 
     def close(self) -> None:
         self.closed = True
@@ -83,6 +86,12 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
     ]
     queue.close()
     assert tracker.closed
+
+
+def test_whoami_returns_token_user_without_opening_queue(monkeypatch: Any) -> None:
+    monkeypatch.setattr(project_queue_module, "TrackerClient", FakeTracker)
+
+    assert whoami(Config("https://hq.test", "machine-token", "worker-v2")) == "worker-user"
 
 
 def test_project_queue_retries_explicit_rate_limit(monkeypatch: Any) -> None:

@@ -214,6 +214,7 @@ All requests use `Authorization: Bearer <machine-token>`. Workers call:
 
 ```text
 GET  /api/v1/projects/{project_id}
+GET  /api/v1/whoami
 POST /api/v1/projects/{project_id}/jobs/claim
 POST /api/v1/projects/{project_id}/jobs/complete
 POST /api/v1/projects/{project_id}/jobs/fail

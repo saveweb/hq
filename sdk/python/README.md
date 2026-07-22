@@ -23,6 +23,9 @@ with open_project_queue(
 Opening a queue generates a fresh seven-character `a-z0-9` worker ID, exposed
 as `queue.worker_id` and fixed for that queue instance.
 
+Use `saveweb_hq.whoami(config)` to get the user ID associated with a machine
+token without opening a project queue.
+
 `complete`, `fail`, and `extend_lease` accept bounded lists matching the
 Project Queue OpenAPI contract.
 

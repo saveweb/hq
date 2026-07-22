@@ -61,6 +61,12 @@ func New(config Config) (*Client, error) {
 	return &Client{baseURL: strings.TrimSuffix(config.BaseURL, "/"), machineToken: config.MachineToken, clientVersion: config.ClientVersion, httpClient: &copyClient}, nil
 }
 
+func (c *Client) WhoAmI(ctx context.Context) (protocol.WhoAmIResponse, error) {
+	var result protocol.WhoAmIResponse
+	err := c.do(ctx, http.MethodGet, "/api/v1/whoami", "", nil, &result)
+	return result, err
+}
+
 func (c *Client) AdminProject(ctx context.Context, projectID string) (protocol.AdminProjectSummary, error) {
 	var result protocol.AdminProjectSummary
 	err := c.do(ctx, http.MethodGet, adminProjectPath(projectID), "", nil, &result)

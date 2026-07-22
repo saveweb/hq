@@ -22,6 +22,17 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, const: ok}
+  /api/v1/whoami:
+    get:
+      operationId: whoAmI
+      description: Returns the user ID associated with the authenticated machine token.
+      responses:
+        '200':
+          description: Authenticated machine-token identity
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WhoAmIResponse'}
+        default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/projects:
     get:
       operationId: listAdminProjects
@@ -316,6 +327,12 @@ components:
     Identifier: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
     JobID: {type: integer, format: int64, minimum: 1}
     Attrs: {type: object, additionalProperties: true}
+    WhoAmIResponse:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id: {$ref: '#/components/schemas/Identifier'}
     JobCounts:
       type: object
       additionalProperties: false

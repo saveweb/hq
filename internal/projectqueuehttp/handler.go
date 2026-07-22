@@ -81,6 +81,7 @@ func New(store *postgres.Store, now, nowNS func() int64, logger *slog.Logger) *e
 
 func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64) {
 	h := &handler{store: store, now: now, nowNS: nowNS}
+	server.GET("/api/v1/whoami", h.whoAmI)
 	server.GET("/api/v1/admin/projects", h.listProjects)
 	server.GET("/api/v1/admin/users", h.listUsers)
 	server.PUT("/api/v1/admin/users/:user_id", h.putUser)
@@ -102,6 +103,14 @@ func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64)
 	server.POST("/api/v1/projects/:project_id/jobs/complete", h.complete)
 	server.POST("/api/v1/projects/:project_id/jobs/fail", h.fail)
 	server.POST("/api/v1/projects/:project_id/jobs/extend-lease", h.extendLease)
+}
+
+func (h *handler) whoAmI(ctx *echo.Context) error {
+	user, ok := h.authenticate(ctx)
+	if !ok {
+		return nil
+	}
+	return ctx.JSON(http.StatusOK, protocol.WhoAmIResponse{UserID: user.ID})
 }
 
 func (h *handler) listUsers(ctx *echo.Context) error {
