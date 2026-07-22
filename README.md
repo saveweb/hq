@@ -126,7 +126,8 @@ attempts unchanged. For deduplicated jobs, a retry never replaces the stored
 key.
 
 Projects may also set a tracker-enforced `dispatch_qps`, an SDK-enforced
-per-worker `worker_claim_qps`, and `max_jobs_per_claim` (1-256). Omit either QPS
+per-worker `worker_claim_qps`, `max_jobs_per_claim` (1-256), and `max_resets`
+(0-1000, default 3). Omit either QPS
 to leave that limit disabled; this preserves the unlimited fast path. At high
 dispatch rates the tracker permits at most 100 ms of accumulated tokens, while
 lower rates permit no burst larger than one job.

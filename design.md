@@ -66,12 +66,14 @@ LOCKED`, assigns a random attempt ID, records the worker ID, and sets a lease
 deadline in one PostgreSQL transaction. A setting change affects later claims
 but does not alter WIP attempts.
 
-Each project has three live claim-policy values. `dispatch_qps` is a hard,
+Each project has four live execution-policy values. `dispatch_qps` is a hard,
 tracker-owned limit on jobs dispatched across all workers. `worker_claim_qps`
 is a cooperative per-worker request rate applied by official SDKs.
 `max_jobs_per_claim` is enforced by both SDK and tracker. Null QPS values mean
 unlimited; the dispatch fast path then avoids the project row lock entirely.
-`policy_version` increments only when one of these values changes.
+`max_resets` is a tracker-owned 0-1000 limit shared by lease-expiration resets
+and retryable failures; it defaults to three, and zero disables retries.
+`policy_version` increments when one of these values changes.
 
 The hard dispatch limiter is a continuous token bucket, not a fixed time
 window. Capacity is one job through 1000 QPS. Above 1000 QPS it is the smaller
@@ -87,9 +89,9 @@ projects or putting that check on the hot rejection path.
 attempt ID, worker ID, non-expired lease, and `wip` status. A stale mutation is
 rejected per item and cannot affect a later attempt.
 
-Expired WIP rows are reset during a later claim. The first version uses a
-global maximum of three resets. This may become a project setting only after a
-real project demonstrates that need.
+Expired WIP rows are reset during a later claim. Each project's `max_resets`
+setting limits the combined number of lease-expiration resets and retryable
+failures before the job enters `reset_exhausted`.
 
 ## 4. WARC receipt contract
 

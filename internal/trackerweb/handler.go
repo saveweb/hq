@@ -461,7 +461,7 @@ func (h *Handler) createProject(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
-	dispatchQPS, workerClaimQPS, maxJobs, err := projectPolicyForm(ctx)
+	dispatchQPS, workerClaimQPS, maxJobs, maxResets, err := projectPolicyForm(ctx)
 	if err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project policy is invalid")
 	}
@@ -472,7 +472,7 @@ func (h *Handler) createProject(ctx *echo.Context) error {
 	project := tracker.Project{
 		ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"),
 		IdentityMode: ctx.FormValue("identity_mode"), ClaimOrder: ctx.FormValue("claim_order"),
-		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs, ClientVersions: clientVersions,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs, MaxResets: &maxResets, ClientVersions: clientVersions,
 	}
 	if err := h.store.PutProject(ctx.Request().Context(), project, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
@@ -493,7 +493,7 @@ func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
 		return nil
 	}
 	projectID := ctx.Param("project_id")
-	dispatchQPS, workerClaimQPS, maxJobs, err := projectPolicyForm(ctx)
+	dispatchQPS, workerClaimQPS, maxJobs, maxResets, err := projectPolicyForm(ctx)
 	if err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project policy is invalid")
 	}
@@ -503,7 +503,7 @@ func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
 	}
 	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{
 		ID: projectID, Status: ctx.FormValue("status"), ClaimOrder: ctx.FormValue("claim_order"),
-		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs, ClientVersions: clientVersions,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs, MaxResets: &maxResets, ClientVersions: clientVersions,
 	}, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
@@ -534,23 +534,30 @@ func clientVersionsForm(ctx *echo.Context) ([]string, error) {
 	return versions, nil
 }
 
-func projectPolicyForm(ctx *echo.Context) (*float64, *float64, int, error) {
+func projectPolicyForm(ctx *echo.Context) (*float64, *float64, int, int, error) {
 	dispatchQPS, err := optionalPositiveFloat(ctx.FormValue("dispatch_qps"))
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, 0, err
 	}
 	workerClaimQPS, err := optionalPositiveFloat(ctx.FormValue("worker_claim_qps"))
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, 0, err
 	}
 	maxJobs := 256
 	if raw := strings.TrimSpace(ctx.FormValue("max_jobs_per_claim")); raw != "" {
 		maxJobs, err = strconv.Atoi(raw)
 		if err != nil || maxJobs < 1 || maxJobs > 256 {
-			return nil, nil, 0, fmt.Errorf("invalid max jobs per claim")
+			return nil, nil, 0, 0, fmt.Errorf("invalid max jobs per claim")
 		}
 	}
-	return dispatchQPS, workerClaimQPS, maxJobs, nil
+	maxResets := 3
+	if raw := strings.TrimSpace(ctx.FormValue("max_resets")); raw != "" {
+		maxResets, err = strconv.Atoi(raw)
+		if err != nil || maxResets < 0 || maxResets > 1000 {
+			return nil, nil, 0, 0, fmt.Errorf("invalid max resets")
+		}
+	}
+	return dispatchQPS, workerClaimQPS, maxJobs, maxResets, nil
 }
 
 func optionalPositiveFloat(raw string) (*float64, error) {

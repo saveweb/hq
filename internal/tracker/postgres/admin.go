@@ -13,7 +13,7 @@ import (
 
 const projectSummaryQuery = `
 		SELECT p.id,p.status,p.identity_mode,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
-			p.max_jobs_per_claim,p.client_versions,p.policy_version,p.created_at,p.updated_at,
+			p.max_jobs_per_claim,p.max_resets,p.client_versions,p.policy_version,p.created_at,p.updated_at,
 		count(*) FILTER (WHERE j.status='todo'),
 		count(*) FILTER (WHERE j.status='wip'),
 		count(*) FILTER (WHERE j.status='done'),
@@ -26,7 +26,7 @@ const projectSummaryQuery = `
 func (s *Store) ListProjectSummaries(ctx context.Context) ([]protocol.AdminProjectSummary, error) {
 	rows, err := s.pool.Query(ctx, projectSummaryQuery+`
 			GROUP BY p.id,p.status,p.identity_mode,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
-				p.max_jobs_per_claim,p.client_versions,p.policy_version,p.created_at,p.updated_at
+				p.max_jobs_per_claim,p.max_resets,p.client_versions,p.policy_version,p.created_at,p.updated_at
 		ORDER BY p.id
 	`)
 	if err != nil {
@@ -54,7 +54,7 @@ func (s *Store) ProjectSummary(ctx context.Context, projectID string) (protocol.
 	row := s.pool.QueryRow(ctx, projectSummaryQuery+`
 		WHERE p.id=$1
 		GROUP BY p.id,p.status,p.identity_mode,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
-			p.max_jobs_per_claim,p.client_versions,p.policy_version,p.created_at,p.updated_at
+			p.max_jobs_per_claim,p.max_resets,p.client_versions,p.policy_version,p.created_at,p.updated_at
 	`, projectID)
 	project, err := scanProjectSummary(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -75,7 +75,7 @@ func scanProjectSummary(row projectSummaryScanner) (protocol.AdminProjectSummary
 	var todo, wip, done, failed, resetExhausted int64
 	err := row.Scan(
 		&project.ID, &project.Status, &project.IdentityMode, &project.ClaimOrder,
-		&project.DispatchQPS, &project.WorkerClaimQPS, &project.MaxJobsPerClaim, &project.ClientVersions, &project.PolicyVersion,
+		&project.DispatchQPS, &project.WorkerClaimQPS, &project.MaxJobsPerClaim, &project.MaxResets, &project.ClientVersions, &project.PolicyVersion,
 		&project.CreatedAt, &project.UpdatedAt,
 		&todo, &wip, &done, &failed, &resetExhausted,
 	)

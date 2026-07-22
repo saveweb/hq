@@ -34,10 +34,13 @@ DELETE /api/v1/admin/users/{user_id}/machine-token
 `unique_value`; omitted mode defaults to `external_id`. The mode is immutable.
 `claim_order` is `fifo` or `random`, defaults to `fifo`, and may be changed at
 any time. `dispatch_qps` and `worker_claim_qps` are either `null` or any positive
-finite number. `max_jobs_per_claim` is 1-256 and defaults to 256. A server-owned
+finite number. `max_jobs_per_claim` is 1-256 and defaults to 256. `max_resets`
+is 0-1000 and defaults to 3; it limits the combined number of lease-expiration
+resets and retryable failures before a job enters `reset_exhausted`. A server-owned
 `client_versions` is an exact-match allowlist of up to 64 worker client version
 strings. It may be empty to stop all worker access. `policy_version` starts at 1
-and increases when a claim policy or the client allowlist changes. Project responses include these settings and `todo`, `wip`,
+and increases when a claim policy, reset limit, or client allowlist changes.
+Project responses include these settings and `todo`, `wip`,
 `done`, `failed`, and `reset_exhausted` counts.
 
 The jobs endpoint accepts one or more JobSpecs within the 8 MiB JSON request
@@ -109,7 +112,9 @@ a retry delay, and the current policy version. Workers use `job_id`, not an
 optional source `id`, for mutations.
 
 Claims use one PostgreSQL transaction and `FOR UPDATE SKIP LOCKED`. An expired
-attempt is reset before new rows are selected. FIFO projects order eligible
+attempt is reset before new rows are selected. The project's `max_resets`
+applies to both lease expirations and retryable failures; zero disables retries.
+FIFO projects order eligible
 jobs by creation time and internal job ID. Random projects order them by the
 stored random key and internal job ID. Changing the project setting affects
 subsequent claims without changing WIP attempts.

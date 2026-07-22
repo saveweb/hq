@@ -71,9 +71,9 @@ python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"
 
 # Create a project and enqueue a mixed workload entirely through the admin API.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
-  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"client_versions":["e2e-v1"]}' \
+  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/project.json"
-python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and p["identity_mode"] == "external_id" and p["client_versions"] == ["e2e-v1"] and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and p["identity_mode"] == "external_id" and p["max_resets"] == 3 and p["client_versions"] == ["e2e-v1"] and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
 
 # Every worker route requires an explicitly allowed client version.
 status=$(curl --silent --output "${run_dir}/upgrade.json" --write-out '%{http_code}' \
@@ -84,7 +84,7 @@ python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["error"]; assert e["
 
 # Upload the packed source format through a separate project.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
-  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"client_versions":["e2e-v1"]}' \
+  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/source-e2e" >"${run_dir}/source-project.json"
 printf 'https://example.test/source\n' >"${run_dir}/source-values.txt"
 "${run_dir}/source" pack --identity-mode external_id \
@@ -99,7 +99,7 @@ test "${status}" = 204
 
 # Enqueue count is constrained by the JSON body limit, not the worker batch limit.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
-  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"client_versions":["e2e-v1"]}' \
+  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/large-enqueue-e2e" >"${run_dir}/large-project.json"
 python3 -c 'import json,sys; json.dump({"jobs":[{"id":f"large-{i}","value":str(i)} for i in range(300)]},open(sys.argv[1],"w"))' "${run_dir}/large-enqueue.json"
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
@@ -213,7 +213,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${
   "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-retry-result.json"
 
 # Draining stops scheduling, and archived projects reject new jobs.
-curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"draining","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"client_versions":["e2e-v1"]}' \
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"draining","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/draining.json"
 status=$(curl --silent --output "${run_dir}/draining-claim.json" --write-out '%{http_code}' \
   "${worker[@]}" "${json[@]}" -d '{"worker_id":"worker-e2e","max_jobs":1,"lease_seconds":30,"accept_types":[],"policy_version":1}' \
@@ -221,7 +221,7 @@ status=$(curl --silent --output "${run_dir}/draining-claim.json" --write-out '%{
 test "${status}" = 409
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"] == "project_not_active"' "${run_dir}/draining-claim.json"
 
-curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"archived","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"client_versions":["e2e-v1"]}' \
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"archived","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/archived.json"
 status=$(curl --silent --output "${run_dir}/archived-enqueue.json" --write-out '%{http_code}' \
   "${admin[@]}" "${json[@]}" -d '{"jobs":[{"id":"late-job","value":"https://example.test/late","type":"seed","via":null,"attr":{}}]}' \

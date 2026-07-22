@@ -132,6 +132,7 @@ type AdminProjectRequest struct {
 	DispatchQPS     *float64 `json:"dispatch_qps"`
 	WorkerClaimQPS  *float64 `json:"worker_claim_qps"`
 	MaxJobsPerClaim int      `json:"max_jobs_per_claim"`
+	MaxResets       *int     `json:"max_resets"`
 	ClientVersions  []string `json:"client_versions"`
 }
 
@@ -143,6 +144,7 @@ type AdminProjectSummary struct {
 	DispatchQPS     *float64         `json:"dispatch_qps"`
 	WorkerClaimQPS  *float64         `json:"worker_claim_qps"`
 	MaxJobsPerClaim int              `json:"max_jobs_per_claim"`
+	MaxResets       int              `json:"max_resets"`
 	ClientVersions  []string         `json:"client_versions"`
 	PolicyVersion   int64            `json:"policy_version"`
 	JobCounts       map[string]int64 `json:"job_counts"`

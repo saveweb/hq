@@ -26,6 +26,11 @@ var migrations embed.FS
 
 type Store struct{ pool *pgxpool.Pool }
 
+const (
+	defaultProjectMaxResets = 3
+	maxProjectMaxResets     = 1000
+)
+
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -130,6 +135,13 @@ func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int
 	if project.MaxJobsPerClaim < 1 || project.MaxJobsPerClaim > maxProjectBatch {
 		return tracker.InvalidRequest("max jobs per claim must be between 1 and 256")
 	}
+	maxResets := defaultProjectMaxResets
+	if project.MaxResets != nil {
+		maxResets = *project.MaxResets
+	}
+	if maxResets < 0 || maxResets > maxProjectMaxResets {
+		return tracker.InvalidRequest("max resets must be between 0 and 1000")
+	}
 	if err := validateClientVersions(project.ClientVersions); err != nil {
 		return err
 	}
@@ -138,27 +150,29 @@ func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int
 	return storeError("put project", pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO tracker_projects(
-				id,status,identity_mode,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,client_versions,policy_version,created_at,updated_at
+				id,status,identity_mode,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,max_resets,client_versions,policy_version,created_at,updated_at
 			)
-			VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$6,$7,$8,1,$9,$9)
+			VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$6,$7,$8,$9,1,$10,$10)
 			ON CONFLICT(id) DO UPDATE SET
 				status=EXCLUDED.status,
 				claim_order=COALESCE(NULLIF($4,''),tracker_projects.claim_order),
 				dispatch_qps=EXCLUDED.dispatch_qps,
 				worker_claim_qps=EXCLUDED.worker_claim_qps,
 				max_jobs_per_claim=EXCLUDED.max_jobs_per_claim,
+				max_resets=EXCLUDED.max_resets,
 				client_versions=EXCLUDED.client_versions,
 				policy_version=tracker_projects.policy_version + CASE WHEN
 					tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps OR
 					tracker_projects.worker_claim_qps IS DISTINCT FROM EXCLUDED.worker_claim_qps OR
 					tracker_projects.max_jobs_per_claim IS DISTINCT FROM EXCLUDED.max_jobs_per_claim OR
+					tracker_projects.max_resets IS DISTINCT FROM EXCLUDED.max_resets OR
 					tracker_projects.client_versions IS DISTINCT FROM EXCLUDED.client_versions
 				THEN 1 ELSE 0 END,
 				dispatch_tokens=CASE WHEN tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps THEN NULL ELSE tracker_projects.dispatch_tokens END,
 				dispatch_refilled_at_ns=CASE WHEN tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps THEN NULL ELSE tracker_projects.dispatch_refilled_at_ns END,
 				updated_at=EXCLUDED.updated_at
 			WHERE $3='' OR tracker_projects.identity_mode=$3
-		`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, project.DispatchQPS, project.WorkerClaimQPS, project.MaxJobsPerClaim, project.ClientVersions, now)
+		`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, project.DispatchQPS, project.WorkerClaimQPS, project.MaxJobsPerClaim, maxResets, project.ClientVersions, now)
 		if err == nil && tag.RowsAffected() == 0 {
 			return tracker.InvalidRequest("project identity mode cannot be changed")
 		}

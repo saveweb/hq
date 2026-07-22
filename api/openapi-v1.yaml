@@ -370,11 +370,12 @@ components:
         dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        max_resets: {type: integer, minimum: 0, maximum: 1000, default: 3}
         client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, client_versions, policy_version, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, max_resets, client_versions, policy_version, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
@@ -383,6 +384,7 @@ components:
         dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        max_resets: {type: integer, minimum: 0, maximum: 1000}
         client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
         policy_version: {type: integer, format: int64, minimum: 1}
         job_counts: {$ref: '#/components/schemas/JobCounts'}

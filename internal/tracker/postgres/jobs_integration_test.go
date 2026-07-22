@@ -118,7 +118,7 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	projects, err := store.ListProjectSummaries(ctx)
-	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
+	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || projects[0].MaxResets != 3 || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
 		t.Fatalf("initial project summaries = %+v, %v", projects, err)
 	}
 	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", "worker-v2"); err != nil {
@@ -135,6 +135,10 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "invalid-versions", Status: tracker.ProjectStatusActive, ClientVersions: []string{"v1", "v1"}}, now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
 		t.Fatalf("duplicate client versions = %v", err)
+	}
+	invalidMaxResets := 1001
+	if err := store.PutProject(ctx, tracker.Project{ID: "invalid-resets", Status: tracker.ProjectStatusActive, MaxResets: &invalidMaxResets}, now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+		t.Fatalf("invalid max resets = %v", err)
 	}
 	jobs := []protocol.AdminEnqueueJob{{ID: "job-1", Value: "https://example.test/1", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"source": "test"}}, {ID: "job-2", Value: "https://example.test/2", Via: nil}}
 	inserted, err := store.EnqueueProjectJobs(ctx, "queue-project", jobs, now)
@@ -283,6 +287,42 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	}
 	if err := store.DeleteProjectJob(ctx, "queue-project", claimed.Jobs[0].JobID); err != nil {
 		t.Fatal(err)
+	}
+
+	zeroResets := 0
+	if err := store.PutProject(ctx, tracker.Project{ID: "no-reset-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone, MaxResets: &zeroResets}, now+17); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "no-reset-project", []protocol.AdminEnqueueJob{{Value: "retryable"}, {Value: "expires"}}, now+17); err != nil || inserted != 2 {
+		t.Fatalf("no-reset enqueue = %d, %v", inserted, err)
+	}
+	noResetClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "no-reset-project", protocol.ProjectClaimRequest{WorkerID: "no-reset-worker", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1}, (now+18)*1_000_000_000)
+	if err != nil || len(noResetClaim.Jobs) != 1 {
+		t.Fatalf("no-reset claim = %+v, %v", noResetClaim, err)
+	}
+	noResetFailure, err := store.FailProjectJobs(ctx, "queue-worker", "no-reset-project", protocol.ProjectFailRequest{WorkerID: "no-reset-worker", Items: []protocol.FailItem{{JobID: noResetClaim.Jobs[0].JobID, AttemptID: noResetClaim.Jobs[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "retry", Details: protocol.Attrs{}}}}}, now+19)
+	if err != nil || *noResetFailure.Results[0].JobStatus != protocol.JobStatusResetExhausted {
+		t.Fatalf("disabled retry = %+v, %v", noResetFailure, err)
+	}
+	noResetClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "no-reset-project", protocol.ProjectClaimRequest{WorkerID: "no-reset-worker", MaxJobs: 1, LeaseSeconds: 1, PolicyVersion: 1}, (now+20)*1_000_000_000)
+	if err != nil || len(noResetClaim.Jobs) != 1 {
+		t.Fatalf("expiring no-reset claim = %+v, %v", noResetClaim, err)
+	}
+	noResetClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "no-reset-project", protocol.ProjectClaimRequest{WorkerID: "no-reset-worker", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1}, (now+22)*1_000_000_000)
+	if err != nil || len(noResetClaim.Jobs) != 0 {
+		t.Fatalf("disabled lease reset = %+v, %v", noResetClaim, err)
+	}
+	noResetCounts, err := store.ProjectJobCounts(ctx, "no-reset-project")
+	if err != nil || noResetCounts[protocol.JobStatusResetExhausted] != 2 {
+		t.Fatalf("no-reset counts = %+v, %v", noResetCounts, err)
+	}
+	oneReset := 1
+	if err := store.PutProject(ctx, tracker.Project{ID: "no-reset-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone, MaxResets: &oneReset}, now+23); err != nil {
+		t.Fatal(err)
+	}
+	updatedResetProject, err := store.ProjectSummary(ctx, "no-reset-project")
+	if err != nil || updatedResetProject.MaxResets != 1 || updatedResetProject.PolicyVersion != 2 {
+		t.Fatalf("updated reset policy = %+v, %v", updatedResetProject, err)
 	}
 
 	low, high := int32(-100), int32(100)
