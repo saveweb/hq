@@ -234,6 +234,20 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err != nil || len(completed.Results) != 1 || completed.Results[0].Status != protocol.ItemStatusApplied {
 		t.Fatalf("complete = %+v, %v", completed, err)
 	}
+	workerUserID, found, err := store.WorkerUserID(ctx, "worker-process-1")
+	if err != nil || !found || workerUserID != "queue-worker" {
+		t.Fatalf("worker user = %q, %t, %v", workerUserID, found, err)
+	}
+	workers, err := store.ListWorkers(ctx, "worker-process-1", 200)
+	if err != nil || len(workers) != 1 || workers[0].UserID != "queue-worker" {
+		t.Fatalf("workers = %+v, %v", workers, err)
+	}
+	if err := store.DeleteWorker(ctx, "worker-process-1"); err != nil {
+		t.Fatal(err)
+	}
+	if workerUserID, found, err = store.WorkerUserID(ctx, "worker-process-1"); err != nil || found || workerUserID != "" {
+		t.Fatalf("deleted worker user = %q, %t, %v", workerUserID, found, err)
+	}
 	replayed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: "success", Meta: protocol.Attrs{}}, WARCReceipts: []protocol.WARCReceipt{receipt}}}}, now+6)
 	if err != nil || replayed.Results[0].Status != protocol.ItemStatusRejected || replayed.Results[0].Error.Code != protocol.ErrorStaleAttempt {
 		t.Fatalf("replayed complete = %+v, %v", replayed, err)

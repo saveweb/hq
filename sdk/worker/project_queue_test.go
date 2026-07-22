@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 
 func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 	var policyCalls, claimCalls int
+	var workerID string
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		response.Header().Set("Cache-Control", "no-store")
@@ -36,6 +38,11 @@ func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 			if input.MaxJobs != 2 || input.PolicyVersion != 4 {
 				t.Fatalf("claim input = %+v", input)
 			}
+			if workerID == "" {
+				workerID = input.WorkerID
+			} else if input.WorkerID != workerID {
+				t.Fatalf("worker ID changed from %q to %q", workerID, input.WorkerID)
+			}
 			if claimCalls == 1 {
 				response.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(response).Encode(protocol.ErrorEnvelope{Error: protocol.APIError{
@@ -53,7 +60,7 @@ func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 	defer server.Close()
 
 	queue, err := OpenProjectQueue(context.Background(), Config{
-		TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1",
+		TrackerURL: server.URL, MachineToken: "token",
 		ClientVersion:    "worker-v2",
 		AllowHTTPTracker: true, RequestTimeout: time.Second,
 	}, "demo")
@@ -61,6 +68,9 @@ func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queue.Close()
+	if !regexp.MustCompile(`^[a-z0-9]{7}$`).MatchString(queue.WorkerID()) {
+		t.Fatalf("worker ID = %q", queue.WorkerID())
+	}
 	result, err := queue.Claim(context.Background(), ClaimOptions{MaxJobs: 10})
 	if err != nil || len(result.Jobs) != 0 || policyCalls != 1 || claimCalls != 2 {
 		t.Fatalf("result=%+v error=%v policy_calls=%d claim_calls=%d", result, err, policyCalls, claimCalls)
@@ -95,7 +105,7 @@ func TestProjectQueueRetriesTransientPolicyAndClaimFailures(t *testing.T) {
 	}))
 	defer server.Close()
 
-	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +129,7 @@ func TestProjectQueueDoesNotRetryPermanentClientError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "old", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", ClientVersion: "old", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +161,7 @@ func TestJobAutoRenewsAndCompletes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +204,7 @@ func TestJobContextCanceledWhenRenewalCannotReachTracker(t *testing.T) {
 	}))
 	defer server.Close()
 
-	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +267,7 @@ func TestRenewalSplitsBatchesAtProtocolLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +316,7 @@ func TestQueueRootContextCancelsHeldJobs(t *testing.T) {
 	defer server.Close()
 
 	rootCtx, cancelRoot := context.WithCancel(context.Background())
-	queue, err := OpenProjectQueue(rootCtx, Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	queue, err := OpenProjectQueue(rootCtx, Config{TrackerURL: server.URL, MachineToken: "token", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}

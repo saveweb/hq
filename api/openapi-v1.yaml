@@ -494,7 +494,9 @@ components:
       additionalProperties: false
       required: [worker_id, max_jobs, lease_seconds, accept_types, policy_version]
       properties:
-        worker_id: {$ref: '#/components/schemas/Identifier'}
+        worker_id:
+          allOf: [{$ref: '#/components/schemas/Identifier'}]
+          description: Official SDKs generate a fresh seven-character a-z0-9 value per queue instance.
         max_jobs: {type: integer, minimum: 1, maximum: 256}
         lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
         accept_types: {type: array, maxItems: 16, items: {type: string, enum: [seed, asset]}}
@@ -555,7 +557,9 @@ components:
       additionalProperties: false
       required: [worker_id, items]
       properties:
-        worker_id: {$ref: '#/components/schemas/Identifier'}
+        worker_id:
+          allOf: [{$ref: '#/components/schemas/Identifier'}]
+          description: Official SDKs reuse the queue instance's generated worker ID.
         items: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/ProjectCompleteItem'}}
     ExecutionError:
       type: object
@@ -579,7 +583,9 @@ components:
       additionalProperties: false
       required: [worker_id, items]
       properties:
-        worker_id: {$ref: '#/components/schemas/Identifier'}
+        worker_id:
+          allOf: [{$ref: '#/components/schemas/Identifier'}]
+          description: Official SDKs reuse the queue instance's generated worker ID.
         items: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/FailItem'}}
     AttemptRef:
       type: object
@@ -593,7 +599,9 @@ components:
       additionalProperties: false
       required: [worker_id, extend_seconds, items]
       properties:
-        worker_id: {$ref: '#/components/schemas/Identifier'}
+        worker_id:
+          allOf: [{$ref: '#/components/schemas/Identifier'}]
+          description: Official SDKs reuse the queue instance's generated worker ID.
         extend_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
         items: {type: array, minItems: 1, maxItems: 256, items: {$ref: '#/components/schemas/AttemptRef'}}
     ItemResult:

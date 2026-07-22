@@ -60,9 +60,13 @@ func OpenProjectQueue(ctx context.Context, config Config, projectID string) (*Pr
 	if err != nil {
 		return nil, err
 	}
+	workerID, err := newWorkerID()
+	if err != nil {
+		return nil, err
+	}
 	queueCtx, cancelQueue := context.WithCancelCause(ctx)
 	q := &ProjectQueue{
-		projectID: projectID, workerID: config.WorkerID, client: client,
+		projectID: projectID, workerID: workerID, client: client,
 		jobs: make(map[string]*Job), wakeRenewal: make(chan struct{}, 1), done: make(chan struct{}), stopped: make(chan struct{}),
 		queueCtx: queueCtx, cancelQueue: cancelQueue,
 	}
@@ -76,6 +80,9 @@ func OpenProjectQueue(ctx context.Context, config Config, projectID string) (*Pr
 	}()
 	return q, nil
 }
+
+// WorkerID returns the identifier generated for this queue instance.
+func (q *ProjectQueue) WorkerID() string { return q.workerID }
 
 func (q *ProjectQueue) Claim(ctx context.Context, options ClaimOptions) (ClaimBatch, error) {
 	if options.MaxJobs < 1 {

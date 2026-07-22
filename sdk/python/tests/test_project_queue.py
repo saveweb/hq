@@ -42,9 +42,8 @@ class FakeTracker:
 
 def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
     monkeypatch.setattr(project_queue_module, "TrackerClient", FakeTracker)
-    queue = ProjectQueue(
-        Config("https://hq.test", "machine-token", "worker-1", "worker-v2"), "project-1"
-    )
+    monkeypatch.setattr(project_queue_module.secrets, "choice", lambda _: "a")
+    queue = ProjectQueue(Config("https://hq.test", "machine-token", "worker-v2"), "project-1")
 
     assert queue.claim(max_jobs=2, accept_types=["seed"])["jobs"] == []
     queue.complete([{"job_id": 41, "attempt_id": "at-1"}])
@@ -57,7 +56,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
             "project-1",
             "claim",
             {
-                "worker_id": "worker-1",
+                "worker_id": "aaaaaaa",
                 "max_jobs": 1,
                 "lease_seconds": 300,
                 "accept_types": ["seed"],
@@ -68,7 +67,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
             "project-1",
             "complete",
             {
-                "worker_id": "worker-1",
+                "worker_id": "aaaaaaa",
                 "items": [{"job_id": 41, "attempt_id": "at-1"}],
             },
         ),
@@ -76,7 +75,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
             "project-1",
             "extend-lease",
             {
-                "worker_id": "worker-1",
+                "worker_id": "aaaaaaa",
                 "extend_seconds": 30,
                 "items": [{"job_id": 41, "attempt_id": "at-1"}],
             },
@@ -111,11 +110,10 @@ def test_project_queue_retries_explicit_rate_limit(monkeypatch: Any) -> None:
 
     sleeps: list[float] = []
     monkeypatch.setattr(project_queue_module, "TrackerClient", RateLimitedTracker)
+    monkeypatch.setattr(project_queue_module.secrets, "choice", lambda _: "b")
     monkeypatch.setattr(project_queue_module.time, "sleep", sleeps.append)
     monkeypatch.setattr(project_queue_module.random, "random", lambda: 0.0)
-    queue = ProjectQueue(
-        Config("https://hq.test", "machine-token", "worker-1", "worker-v2"), "project-1"
-    )
+    queue = ProjectQueue(Config("https://hq.test", "machine-token", "worker-v2"), "project-1")
 
     assert queue.claim()["jobs"] == []
     assert sleeps == [0.025]

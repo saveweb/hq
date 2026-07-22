@@ -10,7 +10,6 @@ with open_project_queue(
     Config(
         tracker_url="https://hq.example",
         machine_token=machine_token,
-        worker_id="sinavideo-1",
         client_version="sinavideo/2.4.0",
     ),
     "sinavideo",
@@ -20,6 +19,9 @@ with open_project_queue(
         # Upload WARC to WARC Core, then include its receipt in complete().
         ...
 ```
+
+Opening a queue generates a fresh seven-character `a-z0-9` worker ID, exposed
+as `queue.worker_id` and fixed for that queue instance.
 
 `complete`, `fail`, and `extend_lease` accept bounded lists matching the
 Project Queue OpenAPI contract.

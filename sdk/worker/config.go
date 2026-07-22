@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"time"
@@ -13,15 +14,14 @@ import (
 type Config struct {
 	TrackerURL       string
 	MachineToken     string
-	WorkerID         string
 	ClientVersion    string
 	AllowHTTPTracker bool
 	RequestTimeout   time.Duration
 }
 
 func (c Config) normalized() (Config, error) {
-	if c.TrackerURL == "" || c.MachineToken == "" || c.WorkerID == "" || c.ClientVersion == "" {
-		return Config{}, fmt.Errorf("worker: tracker URL, machine token, worker ID, and client version are required")
+	if c.TrackerURL == "" || c.MachineToken == "" || c.ClientVersion == "" {
+		return Config{}, fmt.Errorf("worker: tracker URL, machine token, and client version are required")
 	}
 	if c.RequestTimeout == 0 {
 		c.RequestTimeout = 45 * time.Second
@@ -32,7 +32,26 @@ func (c Config) normalized() (Config, error) {
 	return c, nil
 }
 func trackerFor(c Config) (*trackerclient.Client, error) {
-	return trackerclient.New(trackerclient.Config{BaseURL: c.TrackerURL, MachineToken: c.MachineToken, WorkerID: c.WorkerID, ClientVersion: c.ClientVersion, AllowHTTP: c.AllowHTTPTracker, RequestTimeout: c.RequestTimeout})
+	return trackerclient.New(trackerclient.Config{BaseURL: c.TrackerURL, MachineToken: c.MachineToken, ClientVersion: c.ClientVersion, AllowHTTP: c.AllowHTTPTracker, RequestTimeout: c.RequestTimeout})
+}
+
+const workerIDAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+func newWorkerID() (string, error) {
+	result := make([]byte, 7)
+	random := make([]byte, 7)
+	for index := range result {
+		for {
+			if _, err := rand.Read(random[index : index+1]); err != nil {
+				return "", fmt.Errorf("worker: generate worker ID: %w", err)
+			}
+			if random[index] < 252 {
+				result[index] = workerIDAlphabet[int(random[index])%len(workerIDAlphabet)]
+				break
+			}
+		}
+	}
+	return string(result), nil
 }
 
 type APIError struct {

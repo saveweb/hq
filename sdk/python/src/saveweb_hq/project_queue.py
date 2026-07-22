@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import math
 import random
+import secrets
+import string
 import threading
 import time
 from typing import Any
@@ -20,11 +22,13 @@ class ProjectQueue:
         if not project_id:
             raise ValueError("project_id is required")
         self.project_id = project_id
-        self.worker_id = config.worker_id
+        self.worker_id = "".join(
+            secrets.choice(string.ascii_lowercase + string.digits) for _ in range(7)
+        )
         self._tracker = TrackerClient(
             config.tracker_url,
             config.machine_token,
-            config.worker_id,
+            self.worker_id,
             config.client_version,
             timeout=config.request_timeout,
             allow_http=config.allow_http_tracker,
@@ -55,9 +59,7 @@ class ProjectQueue:
         while True:
             policy = self._current_policy()
             effective_lease_seconds = (
-                policy["recommended_lease_seconds"]
-                if lease_seconds is None
-                else lease_seconds
+                policy["recommended_lease_seconds"] if lease_seconds is None else lease_seconds
             )
             self._wait_for_claim(policy["worker_claim_qps"])
             try:

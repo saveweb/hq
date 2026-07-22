@@ -20,10 +20,10 @@ import (
 const maxResponseBytes = int64(8 << 20)
 
 type Config struct {
-	BaseURL, MachineToken, WorkerID, ClientVersion string
-	AllowHTTP                                      bool
-	RequestTimeout                                 time.Duration
-	HTTPClient                                     *http.Client
+	BaseURL, MachineToken, ClientVersion string
+	AllowHTTP                            bool
+	RequestTimeout                       time.Duration
+	HTTPClient                           *http.Client
 }
 type Client struct {
 	baseURL, machineToken, clientVersion string

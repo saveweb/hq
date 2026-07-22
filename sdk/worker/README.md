@@ -10,7 +10,6 @@ canceled when the attempt can no longer be processed safely.
 queue, err := worker.OpenProjectQueue(rootCtx, worker.Config{
 	TrackerURL:    "https://hq.saveweb.org",
 	MachineToken:  machineToken,
-	WorkerID:      "sinavideo-1",
 	ClientVersion: "sinavideo/2.5.0",
 }, "sinavideo")
 if err != nil {
@@ -18,6 +17,9 @@ if err != nil {
 }
 defer queue.Close()
 ```
+
+Opening a queue generates a fresh seven-character `a-z0-9` worker ID. It stays
+fixed for that queue instance and is available through `queue.WorkerID()`.
 
 `rootCtx` owns the queue lifetime. Canceling it or calling `Close` stops lease
 renewal and cancels every held job. The context passed to `Claim` controls only

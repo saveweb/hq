@@ -114,6 +114,11 @@ claimed JobSpecs, internal numeric job IDs, unique attempt IDs, lease deadlines,
 a retry delay, and the current policy version. Workers use `job_id`, not an
 optional source `id`, for mutations.
 
+The official SDKs generate a fresh seven-character `a-z0-9` `worker_id` when a
+project queue is opened and reuse it for that queue instance. The tracker keeps
+a best-effort worker-to-user mapping. Mapping rows may be deleted independently
+for privacy or storage reclamation, after which reverse lookup is unavailable.
+
 Claims use one PostgreSQL transaction and `FOR UPDATE SKIP LOCKED`. An expired
 attempt is reset before new rows are selected. The project's `max_resets`
 applies to both lease expirations and retryable failures; zero disables retries.

@@ -27,6 +27,7 @@ type fakeStore struct {
 	enqueued     []protocol.AdminEnqueueJob
 	jobs         map[string][]protocol.AdminJob
 	users        map[string]protocol.AdminUserSummary
+	workers      []tracker.WorkerUserMapping
 	tokens       map[string]string
 	deleted      bool
 	upsertedID   int64
@@ -135,6 +136,18 @@ func (s *fakeStore) ListUsers(context.Context) ([]protocol.AdminUserSummary, err
 	result := []protocol.AdminUserSummary{}
 	for _, user := range s.users {
 		result = append(result, user)
+	}
+	return result, nil
+}
+func (s *fakeStore) ListWorkers(_ context.Context, workerID string, limit int) ([]tracker.WorkerUserMapping, error) {
+	result := []tracker.WorkerUserMapping{}
+	for _, worker := range s.workers {
+		if workerID == "" || worker.WorkerID == workerID {
+			result = append(result, worker)
+		}
+		if len(result) == limit {
+			break
+		}
 	}
 	return result, nil
 }
@@ -278,19 +291,32 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("enqueue = %d jobs=%+v", enqueue.Code, store.enqueued)
 	}
 	attemptID := "attempt-web-1"
+	workerID := "abc1234"
 	completedAt := int64(1700000060)
 	job := store.jobs["demo"][0]
 	job.Hops = 2
 	job.AttemptID = &attemptID
+	job.WorkerID = &workerID
 	job.CompletedAt = &completedAt
 	store.jobs["demo"][0] = job
+	store.workers = []tracker.WorkerUserMapping{{WorkerID: workerID, UserID: "gh_42"}}
 	jobDetail := request(t, server, http.MethodGet, "/admin/projects/demo/jobs/1", "", sessionCookie)
 	if jobDetail.Code != http.StatusOK || !strings.Contains(jobDetail.Body.String(), "https://example.com/") ||
 		!strings.Contains(jobDetail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") ||
 		!strings.Contains(jobDetail.Body.String(), "<th>Hops</th><td>2</td>") ||
 		!strings.Contains(jobDetail.Body.String(), "attempt-web-1") ||
+		!strings.Contains(jobDetail.Body.String(), `/admin/workers?worker_id=abc1234`) ||
 		!strings.Contains(jobDetail.Body.String(), "1700000060 (2023-11-14 22:14:20 UTC)") {
 		t.Fatalf("job detail = %d %q", jobDetail.Code, jobDetail.Body.String())
+	}
+	workers := request(t, server, http.MethodGet, "/admin/workers?worker_id=abc1234", "", sessionCookie)
+	if workers.Code != http.StatusOK || !strings.Contains(workers.Body.String(), "Exact match for") ||
+		!strings.Contains(workers.Body.String(), "abc1234") || !strings.Contains(workers.Body.String(), "gh_42") {
+		t.Fatalf("workers = %d %q", workers.Code, workers.Body.String())
+	}
+	missingWorker := request(t, server, http.MethodGet, "/admin/workers?worker_id=missing", "", sessionCookie)
+	if missingWorker.Code != http.StatusOK || !strings.Contains(missingWorker.Body.String(), "No worker mapping found") {
+		t.Fatalf("missing worker = %d %q", missingWorker.Code, missingWorker.Body.String())
 	}
 	users := request(t, server, http.MethodGet, "/admin/users", "", sessionCookie)
 	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "Create user") {

@@ -264,6 +264,9 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 		if err != nil {
 			return err
 		}
+		if err := associateWorker(ctx, tx, request.WorkerID, userID); err != nil {
+			return err
+		}
 		if project.dispatchQPS != nil {
 			if err := tx.QueryRow(ctx, `
 				SELECT status,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,policy_version,
@@ -493,7 +496,7 @@ func (s *Store) CompleteProjectJobs(ctx context.Context, userID, projectID strin
 	if !queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(request.WorkerID) || len(request.Items) == 0 || len(request.Items) > maxProjectBatch {
 		return protocol.BatchResultResponse{}, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid completion batch"}
 	}
-	return s.finishProjectJobs(ctx, userID, projectID, now, func(tx pgx.Tx, _ workerProject) ([]protocol.ItemResult, error) {
+	return s.finishProjectJobs(ctx, userID, projectID, request.WorkerID, func(tx pgx.Tx, _ workerProject) ([]protocol.ItemResult, error) {
 		results := make([]protocol.ItemResult, 0, len(request.Items))
 		for _, item := range request.Items {
 			if item.JobID < 1 || !queue.ValidateIdentifier(item.AttemptID) {
@@ -527,7 +530,7 @@ func (s *Store) FailProjectJobs(ctx context.Context, userID, projectID string, r
 	if !queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(request.WorkerID) || len(request.Items) == 0 || len(request.Items) > maxProjectBatch {
 		return protocol.BatchResultResponse{}, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid failure batch"}
 	}
-	return s.finishProjectJobs(ctx, userID, projectID, now, func(tx pgx.Tx, project workerProject) ([]protocol.ItemResult, error) {
+	return s.finishProjectJobs(ctx, userID, projectID, request.WorkerID, func(tx pgx.Tx, project workerProject) ([]protocol.ItemResult, error) {
 		results := make([]protocol.ItemResult, 0, len(request.Items))
 		for _, item := range request.Items {
 			if item.JobID < 1 || !queue.ValidateIdentifier(item.AttemptID) {
@@ -563,7 +566,7 @@ func (s *Store) ExtendProjectJobLeases(ctx context.Context, userID, projectID st
 	if !queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(request.WorkerID) || len(request.Items) == 0 || len(request.Items) > maxProjectBatch || request.ExtendSeconds < 1 || request.ExtendSeconds > 3600 {
 		return protocol.BatchResultResponse{}, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid lease extension batch"}
 	}
-	return s.finishProjectJobs(ctx, userID, projectID, now, func(tx pgx.Tx, _ workerProject) ([]protocol.ItemResult, error) {
+	return s.finishProjectJobs(ctx, userID, projectID, request.WorkerID, func(tx pgx.Tx, _ workerProject) ([]protocol.ItemResult, error) {
 		results := make([]protocol.ItemResult, 0, len(request.Items))
 		extended := now + request.ExtendSeconds
 		for _, item := range request.Items {
@@ -584,11 +587,14 @@ func (s *Store) ExtendProjectJobLeases(ctx context.Context, userID, projectID st
 	})
 }
 
-func (s *Store) finishProjectJobs(ctx context.Context, userID, projectID string, now int64, fn func(pgx.Tx, workerProject) ([]protocol.ItemResult, error)) (protocol.BatchResultResponse, error) {
+func (s *Store) finishProjectJobs(ctx context.Context, userID, projectID, workerID string, fn func(pgx.Tx, workerProject) ([]protocol.ItemResult, error)) (protocol.BatchResultResponse, error) {
 	var response protocol.BatchResultResponse
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		project, err := authorizeProjectWorker(ctx, tx, userID, projectID)
 		if err != nil {
+			return err
+		}
+		if err := associateWorker(ctx, tx, workerID, userID); err != nil {
 			return err
 		}
 		results, err := fn(tx, project)

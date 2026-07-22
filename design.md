@@ -134,9 +134,14 @@ its durable retry queue and operator-visible delivery state.
 ## 5. Authentication
 
 Workers and automation use administrator-created machine tokens. A token maps
-to an active user with an explicit `worker` or `admin` role. `worker_id`
-identifies a process for attempt ownership and logs; it is not a separately
-leased agent or routing identity.
+to an active user with an explicit `worker` or `admin` role. Each SDK queue
+initialization generates a random seven-character `a-z0-9` `worker_id` for
+attempt ownership and logs; it is not a separately leased agent or routing
+identity. The tracker keeps a best-effort many-workers-to-one-user mapping.
+Operators may delete mapping rows for privacy or storage reclamation; doing so
+only makes reverse lookup unavailable and does not affect queue correctness.
+The admin Web UI can search these mappings, and WIP job details link their
+worker ID to the matching relation when it is still available.
 
 Human administrators use GitHub OAuth with state and PKCE. HQ requests
 `read:org`, fetches the GitHub identity, and verifies active membership in one

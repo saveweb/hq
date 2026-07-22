@@ -51,6 +51,7 @@ type Store interface {
 	PutProject(context.Context, tracker.Project, int64) error
 	EnqueueProjectJobs(context.Context, string, []protocol.AdminEnqueueJob, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
+	ListWorkers(context.Context, string, int) ([]tracker.WorkerUserMapping, error)
 	MachineToken(context.Context, string) (string, bool, error)
 	PutUser(context.Context, string, string, []string, int64) error
 	DeleteUser(context.Context, string) error
@@ -130,6 +131,7 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.POST("/worker/token/revoke", h.revokeOwnToken)
 	server.GET("/admin", h.dashboard)
 	server.GET("/admin/users", h.users)
+	server.GET("/admin/workers", h.workers)
 	server.POST("/admin/users", h.putUser)
 	server.POST("/admin/users/:user_id/delete", h.deleteUser)
 	server.GET("/admin/users/:user_id/token", h.viewUserToken)
@@ -359,6 +361,25 @@ func (h *Handler) putUser(ctx *echo.Context) error {
 		return h.pageError(ctx, http.StatusBadRequest, "User update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/users")
+}
+
+func (h *Handler) workers(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, _, ok := h.requireAdmin(ctx)
+	if !ok {
+		return nil
+	}
+	workerID := ctx.QueryParam("worker_id")
+	workers, err := h.store.ListWorkers(ctx.Request().Context(), workerID, 200)
+	if err != nil {
+		if tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+			return h.pageError(ctx, http.StatusBadRequest, "Invalid worker ID")
+		}
+		return h.internal(ctx, err)
+	}
+	return render(ctx, http.StatusOK, "workers", map[string]any{
+		"User": user, "Workers": workers, "WorkerID": workerID,
+	})
 }
 
 func (h *Handler) deleteUser(ctx *echo.Context) error {

@@ -44,7 +44,7 @@ func TestClaimProjectJobsRequest(t *testing.T) {
 		}, nil
 	})
 	client, err := New(Config{
-		BaseURL: "https://hq.test", MachineToken: "machine-token", WorkerID: "worker-1", ClientVersion: "worker-v2",
+		BaseURL: "https://hq.test", MachineToken: "machine-token", ClientVersion: "worker-v2",
 		HTTPClient: &http.Client{Transport: transport},
 	})
 	if err != nil {
@@ -67,7 +67,7 @@ func TestProjectJobsErrorEnvelope(t *testing.T) {
 			Body: io.NopCloser(strings.NewReader(`{"error":{"code":"project_not_active","message":"project is not active","retryable":false,"retry_after_ms":0,"details":{}}}`)),
 		}, nil
 	})
-	client, err := New(Config{BaseURL: "https://hq.test", MachineToken: "token", WorkerID: "worker-1", HTTPClient: &http.Client{Transport: transport}})
+	client, err := New(Config{BaseURL: "https://hq.test", MachineToken: "token", HTTPClient: &http.Client{Transport: transport}})
 	if err != nil {
 		t.Fatal(err)
 	}
