@@ -47,13 +47,18 @@ class ProjectQueue:
     def claim(
         self,
         max_jobs: int = 64,
-        lease_seconds: int = 300,
+        lease_seconds: int | None = None,
         accept_types: list[str] | None = None,
     ) -> dict[str, Any]:
         if max_jobs < 1:
             raise ValueError("max_jobs must be positive")
         while True:
             policy = self._current_policy()
+            effective_lease_seconds = (
+                policy["recommended_lease_seconds"]
+                if lease_seconds is None
+                else lease_seconds
+            )
             self._wait_for_claim(policy["worker_claim_qps"])
             try:
                 response = self._tracker.project_jobs(
@@ -62,7 +67,7 @@ class ProjectQueue:
                     {
                         "worker_id": self.worker_id,
                         "max_jobs": min(max_jobs, policy["max_jobs_per_claim"]),
-                        "lease_seconds": lease_seconds,
+                        "lease_seconds": effective_lease_seconds,
                         "accept_types": [] if accept_types is None else list(accept_types),
                         "policy_version": policy["policy_version"],
                     },
@@ -149,6 +154,9 @@ def _valid_policy(policy: dict[str, Any], project_id: str) -> bool:
         policy.get("project_id") == project_id
         and isinstance(policy.get("max_jobs_per_claim"), int)
         and 1 <= policy["max_jobs_per_claim"] <= 256
+        and isinstance(policy.get("recommended_lease_seconds"), int)
+        and not isinstance(policy.get("recommended_lease_seconds"), bool)
+        and 1 <= policy["recommended_lease_seconds"] <= 3600
         and isinstance(policy.get("policy_version"), int)
         and policy["policy_version"] >= 1
         and isinstance(policy.get("refresh_after_ms"), int)

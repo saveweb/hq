@@ -73,7 +73,7 @@ python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
   -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/project.json"
-python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and p["identity_mode"] == "external_id" and p["max_resets"] == 3 and p["client_versions"] == ["e2e-v1"] and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and p["identity_mode"] == "external_id" and p["max_resets"] == 3 and p["recommended_lease_seconds"] == 300 and p["client_versions"] == ["e2e-v1"] and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
 
 # Every worker route requires an explicitly allowed client version.
 status=$(curl --silent --output "${run_dir}/upgrade.json" --write-out '%{http_code}' \
@@ -81,6 +81,10 @@ status=$(curl --silent --output "${run_dir}/upgrade.json" --write-out '%{http_co
   "${base}/api/v1/projects/project-e2e")
 test "${status}" = 426
 python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["error"]; assert e["code"] == "client_upgrade_required" and e["details"]["client_versions"] == ["e2e-v1"]' "${run_dir}/upgrade.json"
+
+curl --fail --silent --show-error "${worker[@]}" \
+  "${base}/api/v1/projects/project-e2e" >"${run_dir}/policy.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["recommended_lease_seconds"] == 300 and p["policy_version"] == 1' "${run_dir}/policy.json"
 
 # Upload the packed source format through a separate project.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \

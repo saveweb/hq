@@ -18,6 +18,7 @@ class FakeTracker:
             "dispatch_qps": None,
             "worker_claim_qps": None,
             "max_jobs_per_claim": 1,
+            "recommended_lease_seconds": 300,
             "policy_version": 3,
             "refresh_after_ms": 60_000,
         }
@@ -45,7 +46,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
         Config("https://hq.test", "machine-token", "worker-1", "worker-v2"), "project-1"
     )
 
-    assert queue.claim(max_jobs=2, lease_seconds=60, accept_types=["seed"])["jobs"] == []
+    assert queue.claim(max_jobs=2, accept_types=["seed"])["jobs"] == []
     queue.complete([{"job_id": 41, "attempt_id": "at-1"}])
     queue.extend_lease(30, [{"job_id": 41, "attempt_id": "at-1"}])
 
@@ -58,7 +59,7 @@ def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
             {
                 "worker_id": "worker-1",
                 "max_jobs": 1,
-                "lease_seconds": 60,
+                "lease_seconds": 300,
                 "accept_types": ["seed"],
                 "policy_version": 3,
             },

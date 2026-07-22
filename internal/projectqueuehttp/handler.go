@@ -214,7 +214,7 @@ func (h *handler) putProject(ctx *echo.Context) error {
 	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{
 		ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode, ClaimOrder: request.ClaimOrder,
 		DispatchQPS: request.DispatchQPS, WorkerClaimQPS: request.WorkerClaimQPS, MaxJobsPerClaim: request.MaxJobsPerClaim,
-		MaxResets: request.MaxResets, ClientVersions: request.ClientVersions,
+		MaxResets: request.MaxResets, RecommendedLeaseSeconds: request.RecommendedLeaseSeconds, ClientVersions: request.ClientVersions,
 	}, h.now()); err != nil {
 		return h.writeError(ctx, err)
 	}

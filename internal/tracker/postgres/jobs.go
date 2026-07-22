@@ -238,7 +238,8 @@ func (s *Store) ProjectPolicy(ctx context.Context, userID, projectID string) (pr
 		}
 		result = protocol.ProjectPolicy{
 			ProjectID: projectID, DispatchQPS: project.dispatchQPS, WorkerClaimQPS: project.workerClaimQPS,
-			MaxJobsPerClaim: project.maxJobsPerClaim, PolicyVersion: project.policyVersion, RefreshAfterMS: 60_000,
+			MaxJobsPerClaim: project.maxJobsPerClaim, RecommendedLeaseSeconds: project.recommendedLeaseSeconds,
+			PolicyVersion: project.policyVersion, RefreshAfterMS: 60_000,
 		}
 		return nil
 	})
@@ -399,15 +400,16 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 }
 
 type workerProject struct {
-	status               string
-	claimOrder           string
-	dispatchQPS          *float64
-	workerClaimQPS       *float64
-	maxJobsPerClaim      int
-	maxResets            int
-	policyVersion        int64
-	dispatchTokens       *float64
-	dispatchRefilledAtNS *int64
+	status                  string
+	claimOrder              string
+	dispatchQPS             *float64
+	workerClaimQPS          *float64
+	maxJobsPerClaim         int
+	maxResets               int
+	recommendedLeaseSeconds int64
+	policyVersion           int64
+	dispatchTokens          *float64
+	dispatchRefilledAtNS    *int64
 }
 
 func authorizeProjectWorker(ctx context.Context, tx pgx.Tx, userID, projectID string) (workerProject, error) {
@@ -416,11 +418,11 @@ func authorizeProjectWorker(ctx context.Context, tx pgx.Tx, userID, projectID st
 	var project workerProject
 	err := tx.QueryRow(ctx, `
 		SELECT u.status,u.roles,p.status,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
-			p.max_jobs_per_claim,p.max_resets,p.policy_version,p.dispatch_tokens,p.dispatch_refilled_at_ns
+			p.max_jobs_per_claim,p.max_resets,p.recommended_lease_seconds,p.policy_version,p.dispatch_tokens,p.dispatch_refilled_at_ns
 		FROM tracker_users u CROSS JOIN tracker_projects p WHERE u.id=$1 AND p.id=$2
 	`, userID, projectID).Scan(
 		&userStatus, &roles, &project.status, &project.claimOrder, &project.dispatchQPS,
-		&project.workerClaimQPS, &project.maxJobsPerClaim, &project.maxResets, &project.policyVersion,
+		&project.workerClaimQPS, &project.maxJobsPerClaim, &project.maxResets, &project.recommendedLeaseSeconds, &project.policyVersion,
 		&project.dispatchTokens, &project.dispatchRefilledAtNS,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

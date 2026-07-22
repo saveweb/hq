@@ -371,11 +371,12 @@ components:
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
         max_resets: {type: integer, minimum: 0, maximum: 1000, default: 3}
+        recommended_lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600, default: 300}
         client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, max_resets, client_versions, policy_version, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, max_resets, recommended_lease_seconds, client_versions, policy_version, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
@@ -385,6 +386,7 @@ components:
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
         max_resets: {type: integer, minimum: 0, maximum: 1000}
+        recommended_lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
         client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
         policy_version: {type: integer, format: int64, minimum: 1}
         job_counts: {$ref: '#/components/schemas/JobCounts'}
@@ -509,12 +511,13 @@ components:
     ProjectPolicy:
       type: object
       additionalProperties: false
-      required: [project_id, dispatch_qps, worker_claim_qps, max_jobs_per_claim, policy_version, refresh_after_ms]
+      required: [project_id, dispatch_qps, worker_claim_qps, max_jobs_per_claim, recommended_lease_seconds, policy_version, refresh_after_ms]
       properties:
         project_id: {$ref: '#/components/schemas/Identifier'}
         dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        recommended_lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
         policy_version: {type: integer, format: int64, minimum: 1}
         refresh_after_ms: {type: integer, format: int64, minimum: 1}
     Outcome:

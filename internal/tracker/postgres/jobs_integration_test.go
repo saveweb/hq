@@ -118,7 +118,7 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	projects, err := store.ListProjectSummaries(ctx)
-	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || projects[0].MaxResets != 3 || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
+	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || projects[0].MaxResets != 3 || projects[0].RecommendedLeaseSeconds != 300 || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
 		t.Fatalf("initial project summaries = %+v, %v", projects, err)
 	}
 	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", "worker-v2"); err != nil {
@@ -139,6 +139,10 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	invalidMaxResets := 1001
 	if err := store.PutProject(ctx, tracker.Project{ID: "invalid-resets", Status: tracker.ProjectStatusActive, MaxResets: &invalidMaxResets}, now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
 		t.Fatalf("invalid max resets = %v", err)
+	}
+	invalidLease := int64(3601)
+	if err := store.PutProject(ctx, tracker.Project{ID: "invalid-lease", Status: tracker.ProjectStatusActive, RecommendedLeaseSeconds: &invalidLease}, now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+		t.Fatalf("invalid recommended lease = %v", err)
 	}
 	jobs := []protocol.AdminEnqueueJob{{ID: "job-1", Value: "https://example.test/1", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"source": "test"}}, {ID: "job-2", Value: "https://example.test/2", Via: nil}}
 	inserted, err := store.EnqueueProjectJobs(ctx, "queue-project", jobs, now)
@@ -317,11 +321,12 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatalf("no-reset counts = %+v, %v", noResetCounts, err)
 	}
 	oneReset := 1
-	if err := store.PutProject(ctx, tracker.Project{ID: "no-reset-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone, MaxResets: &oneReset}, now+23); err != nil {
+	recommendedLease := int64(120)
+	if err := store.PutProject(ctx, tracker.Project{ID: "no-reset-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone, MaxResets: &oneReset, RecommendedLeaseSeconds: &recommendedLease}, now+23); err != nil {
 		t.Fatal(err)
 	}
 	updatedResetProject, err := store.ProjectSummary(ctx, "no-reset-project")
-	if err != nil || updatedResetProject.MaxResets != 1 || updatedResetProject.PolicyVersion != 2 {
+	if err != nil || updatedResetProject.MaxResets != 1 || updatedResetProject.RecommendedLeaseSeconds != 120 || updatedResetProject.PolicyVersion != 2 {
 		t.Fatalf("updated reset policy = %+v, %v", updatedResetProject, err)
 	}
 
@@ -359,7 +364,7 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	limitedPolicy, err := store.ProjectPolicy(ctx, "queue-worker", "limited-project")
 	if err != nil || limitedPolicy.DispatchQPS == nil || *limitedPolicy.DispatchQPS != dispatchQPS ||
 		limitedPolicy.WorkerClaimQPS == nil || *limitedPolicy.WorkerClaimQPS != workerClaimQPS ||
-		limitedPolicy.MaxJobsPerClaim != 8 || limitedPolicy.PolicyVersion != 1 {
+		limitedPolicy.MaxJobsPerClaim != 8 || limitedPolicy.RecommendedLeaseSeconds != 300 || limitedPolicy.PolicyVersion != 1 {
 		t.Fatalf("limited policy = %+v, %v", limitedPolicy, err)
 	}
 	limitedJobs := []protocol.AdminEnqueueJob{{Value: "limited-1"}, {Value: "limited-2"}, {Value: "limited-3"}}

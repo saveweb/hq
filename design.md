@@ -18,6 +18,11 @@ HQ owns:
 - claims, attempt IDs, leases, retry counts, and terminal outcomes;
 - WARC receipts supplied by workers.
 
+Each project publishes a recommended lease from one second through one hour.
+It is a worker policy rather than a server-enforced fixed lease: raw clients may
+request another valid duration, while official SDKs use the recommendation by
+default. Changing it increments the project policy version.
+
 HQ does not own:
 
 - WARC bytes or upload sessions;
@@ -66,13 +71,15 @@ LOCKED`, assigns a random attempt ID, records the worker ID, and sets a lease
 deadline in one PostgreSQL transaction. A setting change affects later claims
 but does not alter WIP attempts.
 
-Each project has four live execution-policy values. `dispatch_qps` is a hard,
+Each project has five live execution-policy values. `dispatch_qps` is a hard,
 tracker-owned limit on jobs dispatched across all workers. `worker_claim_qps`
 is a cooperative per-worker request rate applied by official SDKs.
 `max_jobs_per_claim` is enforced by both SDK and tracker. Null QPS values mean
 unlimited; the dispatch fast path then avoids the project row lock entirely.
 `max_resets` is a tracker-owned 0-1000 limit shared by lease-expiration resets
 and retryable failures; it defaults to three, and zero disables retries.
+`recommended_lease_seconds` is the default claim and renewal duration used by
+official SDKs; it defaults to 300 seconds.
 `policy_version` increments when one of these values changes.
 
 The hard dispatch limiter is a continuous token bucket, not a fixed time

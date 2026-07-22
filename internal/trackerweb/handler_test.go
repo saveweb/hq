@@ -94,6 +94,15 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 	}
 	existing.ID, existing.Status, existing.UpdatedAt = project.ID, project.Status, now
 	existing.ClientVersions = append([]string(nil), project.ClientVersions...)
+	existing.DispatchQPS = project.DispatchQPS
+	existing.WorkerClaimQPS = project.WorkerClaimQPS
+	existing.MaxJobsPerClaim = project.MaxJobsPerClaim
+	if project.MaxResets != nil {
+		existing.MaxResets = *project.MaxResets
+	}
+	if project.RecommendedLeaseSeconds != nil {
+		existing.RecommendedLeaseSeconds = *project.RecommendedLeaseSeconds
+	}
 	if existing.IdentityMode == "" {
 		existing.IdentityMode = project.IdentityMode
 	}
@@ -255,12 +264,12 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("create = %d %q", create.Code, create.Header().Get("Location"))
 	}
 	detail := request(t, server, http.MethodGet, "/admin/projects/demo", "", sessionCookie)
-	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) || !strings.Contains(detail.Body.String(), "Claim order random") ||
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) || !strings.Contains(detail.Body.String(), "Claim order random") || !strings.Contains(detail.Body.String(), "Recommended lease (seconds)") ||
 		!strings.Contains(detail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
 	}
-	settings := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {csrf}, "status": {tracker.ProjectStatusActive}, "claim_order": {tracker.ClaimOrderFIFO}, "client_versions": {"worker-v2\nworker-v1"}}, sessionCookie)
-	if settings.Code != http.StatusSeeOther || store.projects["demo"].ClaimOrder != tracker.ClaimOrderFIFO || len(store.projects["demo"].ClientVersions) != 2 {
+	settings := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {csrf}, "status": {tracker.ProjectStatusActive}, "claim_order": {tracker.ClaimOrderFIFO}, "recommended_lease_seconds": {"120"}, "client_versions": {"worker-v2\nworker-v1"}}, sessionCookie)
+	if settings.Code != http.StatusSeeOther || store.projects["demo"].ClaimOrder != tracker.ClaimOrderFIFO || store.projects["demo"].RecommendedLeaseSeconds != 120 || len(store.projects["demo"].ClientVersions) != 2 {
 		t.Fatalf("settings = %d project=%+v", settings.Code, store.projects["demo"])
 	}
 	jobs := `[ {"value":"https://example.com/","type":"archive","random_key":-9} ]`

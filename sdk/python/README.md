@@ -15,7 +15,7 @@ with open_project_queue(
     ),
     "sinavideo",
 ) as queue:
-    response = queue.claim(max_jobs=64, lease_seconds=300)
+    response = queue.claim(max_jobs=64)
     for job in response["jobs"]:
         # Upload WARC to WARC Core, then include its receipt in complete().
         ...
@@ -23,6 +23,10 @@ with open_project_queue(
 
 `complete`, `fail`, and `extend_lease` accept bounded lists matching the
 Project Queue OpenAPI contract.
+
+With no `lease_seconds` argument, `claim` uses the project's
+`recommended_lease_seconds` policy. The Python SDK does not renew leases in the
+background; long-running Python workers must still call `extend_lease`.
 
 Before claiming, the SDK periodically fetches project policy, clamps the batch
 size, and applies the cooperative per-worker claim rate with monotonic timing

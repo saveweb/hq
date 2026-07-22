@@ -157,6 +157,7 @@ func runPutProject(args []string) error {
 	workerClaimQPSRaw := flags.String("worker-claim-qps", "", "per-worker claim QPS; empty means unlimited")
 	maxJobsPerClaim := flags.Int("max-jobs-per-claim", 256, "maximum jobs returned by one claim")
 	maxResets := flags.Int("max-resets", 3, "maximum retryable failures and lease-expiration resets per job")
+	recommendedLeaseSeconds := flags.Int64("recommended-lease-seconds", 300, "recommended worker claim and renewal lease in seconds")
 	clientVersionsRaw := flags.String("client-versions", "", "comma-separated allowed worker client versions")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -187,7 +188,8 @@ func runPutProject(args []string) error {
 	}
 	return store.PutProject(ctx, tracker.Project{
 		ID: *projectID, Status: *status, IdentityMode: *identityMode, ClaimOrder: *claimOrder,
-		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: *maxJobsPerClaim, MaxResets: maxResets, ClientVersions: clientVersions,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: *maxJobsPerClaim, MaxResets: maxResets,
+		RecommendedLeaseSeconds: recommendedLeaseSeconds, ClientVersions: clientVersions,
 	}, time.Now().Unix())
 }
 

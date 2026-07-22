@@ -91,7 +91,7 @@ func TestAdminProjectAndEnqueueSourceRequests(t *testing.T) {
 			if request.Method != http.MethodGet || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo" {
 				t.Fatalf("project request = %s %s", request.Method, request.URL)
 			}
-			body = `{"id":"demo","status":"active","identity_mode":"external_id","claim_order":"fifo","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"policy_version":1,"job_counts":{},"created_at":1,"updated_at":1}`
+			body = `{"id":"demo","status":"active","identity_mode":"external_id","claim_order":"fifo","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"recommended_lease_seconds":300,"policy_version":1,"job_counts":{},"created_at":1,"updated_at":1}`
 		case 2:
 			if request.Method != http.MethodPost || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo/jobs" || request.Header.Get("Content-Type") != "application/json" {
 				t.Fatalf("jobs request = %s %s headers=%v", request.Method, request.URL, request.Header)

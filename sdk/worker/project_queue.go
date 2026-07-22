@@ -13,8 +13,7 @@ import (
 	"git.saveweb.org/saveweb/hq/pkg/protocol"
 )
 
-// ProjectQueue is the direct client for the single-site PostgreSQL queue. It
-// has no route discovery, shard lease, or background heartbeat.
+// ProjectQueue is the direct client for the single-site PostgreSQL queue.
 type ProjectQueue struct {
 	projectID string
 	workerID  string
@@ -24,9 +23,31 @@ type ProjectQueue struct {
 	policy          protocol.ProjectPolicy
 	policyFetchedAt time.Time
 	nextClaimAt     time.Time
+	jobs            map[string]*Job
+	wakeRenewal     chan struct{}
+	done            chan struct{}
+	stopped         chan struct{}
+	queueCtx        context.Context
+	cancelQueue     context.CancelCauseFunc
+	closeOnce       sync.Once
+	closed          bool
 }
 
-func OpenProjectQueue(config Config, projectID string) (*ProjectQueue, error) {
+type ClaimOptions struct {
+	MaxJobs     int
+	AcceptTypes []string
+	Lease       time.Duration
+}
+
+type ClaimBatch struct {
+	Jobs       []*Job
+	RetryAfter time.Duration
+}
+
+func OpenProjectQueue(ctx context.Context, config Config, projectID string) (*ProjectQueue, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	config, err := config.normalized()
 	if err != nil {
 		return nil, err
@@ -38,43 +59,93 @@ func OpenProjectQueue(config Config, projectID string) (*ProjectQueue, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ProjectQueue{projectID: projectID, workerID: config.WorkerID, client: client}, nil
+	queueCtx, cancelQueue := context.WithCancelCause(ctx)
+	q := &ProjectQueue{
+		projectID: projectID, workerID: config.WorkerID, client: client,
+		jobs: make(map[string]*Job), wakeRenewal: make(chan struct{}, 1), done: make(chan struct{}), stopped: make(chan struct{}),
+		queueCtx: queueCtx, cancelQueue: cancelQueue,
+	}
+	go q.renewLeases()
+	go func() {
+		select {
+		case <-ctx.Done():
+			q.Close()
+		case <-q.done:
+		}
+	}()
+	return q, nil
 }
 
-func (q *ProjectQueue) Claim(ctx context.Context, maxJobs int, leaseSeconds int64, acceptTypes []string) (protocol.ProjectClaimResponse, error) {
-	if maxJobs < 1 {
-		return protocol.ProjectClaimResponse{}, fmt.Errorf("worker: max jobs must be positive")
+func (q *ProjectQueue) Claim(ctx context.Context, options ClaimOptions) (ClaimBatch, error) {
+	if options.MaxJobs < 1 {
+		return ClaimBatch{}, fmt.Errorf("worker: max jobs must be positive")
 	}
+	ctx, cancel := q.requestContext(ctx)
+	defer cancel()
 	for {
 		policy, err := q.currentPolicy(ctx)
 		if err != nil {
-			return protocol.ProjectClaimResponse{}, err
+			return ClaimBatch{}, err
+		}
+		leaseSeconds, err := claimLeaseSeconds(options.Lease, policy.RecommendedLeaseSeconds)
+		if err != nil {
+			return ClaimBatch{}, err
 		}
 		if err := q.waitForClaim(ctx, policy.WorkerClaimQPS); err != nil {
-			return protocol.ProjectClaimResponse{}, err
+			return ClaimBatch{}, err
 		}
+		q.mu.Lock()
+		closed := q.closed
+		q.mu.Unlock()
+		if closed {
+			return ClaimBatch{}, ErrQueueClosed
+		}
+		requestStarted := time.Now()
 		result, err := q.client.ClaimProjectJobs(ctx, q.projectID, protocol.ProjectClaimRequest{
-			WorkerID: q.workerID, MaxJobs: min(maxJobs, policy.MaxJobsPerClaim), LeaseSeconds: leaseSeconds,
-			AcceptTypes: append([]string(nil), acceptTypes...), PolicyVersion: policy.PolicyVersion,
+			WorkerID: q.workerID, MaxJobs: min(options.MaxJobs, policy.MaxJobsPerClaim), LeaseSeconds: leaseSeconds,
+			AcceptTypes: append([]string(nil), options.AcceptTypes...), PolicyVersion: policy.PolicyVersion,
 		})
 		if err != nil {
 			var apiError *trackerclient.Error
 			if errors.As(err, &apiError) && apiError.Status == 429 && apiError.API.Retryable && apiError.API.RetryAfterMS > 0 {
 				if err := waitContext(ctx, jittered(millisecondsDuration(apiError.API.RetryAfterMS))); err != nil {
-					return protocol.ProjectClaimResponse{}, err
+					return ClaimBatch{}, err
 				}
 				continue
 			}
-			return protocol.ProjectClaimResponse{}, convertTrackerError(err)
+			return ClaimBatch{}, convertTrackerError(err)
 		}
 		if result.ProjectID != q.projectID {
-			return protocol.ProjectClaimResponse{}, fmt.Errorf("worker: tracker returned a mismatched project")
+			return ClaimBatch{}, fmt.Errorf("worker: tracker returned a mismatched project")
 		}
 		if result.PolicyVersion != policy.PolicyVersion {
 			q.invalidatePolicy()
 		}
-		return result, nil
+		jobs, err := q.holdClaimedJobs(result.Jobs, time.Duration(leaseSeconds)*time.Second, requestStarted)
+		if err != nil {
+			return ClaimBatch{}, err
+		}
+		return ClaimBatch{Jobs: jobs, RetryAfter: millisecondsDuration(result.RetryAfterMS)}, nil
 	}
+}
+
+func (q *ProjectQueue) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(q.queueCtx, cancel)
+	return requestCtx, func() {
+		stop()
+		cancel()
+	}
+}
+
+func claimLeaseSeconds(override time.Duration, recommended int64) (int64, error) {
+	if override == 0 {
+		return recommended, nil
+	}
+	if override%time.Second != 0 || override < time.Second || override > time.Hour {
+		return 0, fmt.Errorf("worker: lease must be a whole number of seconds between 1s and 1h")
+	}
+	return int64(override / time.Second), nil
 }
 
 func (q *ProjectQueue) currentPolicy(ctx context.Context) (protocol.ProjectPolicy, error) {
@@ -90,7 +161,7 @@ func (q *ProjectQueue) currentPolicy(ctx context.Context) (protocol.ProjectPolic
 	if err != nil {
 		return protocol.ProjectPolicy{}, convertTrackerError(err)
 	}
-	if policy.ProjectID != q.projectID || policy.MaxJobsPerClaim < 1 || policy.MaxJobsPerClaim > 256 || policy.PolicyVersion < 1 || policy.RefreshAfterMS < 1 || !validQPS(policy.WorkerClaimQPS) || !validQPS(policy.DispatchQPS) {
+	if policy.ProjectID != q.projectID || policy.MaxJobsPerClaim < 1 || policy.MaxJobsPerClaim > 256 || policy.RecommendedLeaseSeconds < 1 || policy.RecommendedLeaseSeconds > 3600 || policy.PolicyVersion < 1 || policy.RefreshAfterMS < 1 || !validQPS(policy.WorkerClaimQPS) || !validQPS(policy.DispatchQPS) {
 		return protocol.ProjectPolicy{}, fmt.Errorf("worker: tracker returned an invalid project policy")
 	}
 	q.mu.Lock()
@@ -188,19 +259,4 @@ func waitContext(ctx context.Context, delay time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-func (q *ProjectQueue) Complete(ctx context.Context, items []protocol.ProjectCompleteItem) (protocol.BatchResultResponse, error) {
-	result, err := q.client.CompleteProjectJobs(ctx, q.projectID, protocol.ProjectCompleteRequest{WorkerID: q.workerID, Items: items})
-	return result, convertTrackerError(err)
-}
-
-func (q *ProjectQueue) Fail(ctx context.Context, items []protocol.FailItem) (protocol.BatchResultResponse, error) {
-	result, err := q.client.FailProjectJobs(ctx, q.projectID, protocol.ProjectFailRequest{WorkerID: q.workerID, Items: items})
-	return result, convertTrackerError(err)
-}
-
-func (q *ProjectQueue) ExtendLease(ctx context.Context, extendSeconds int64, items []protocol.AttemptRef) (protocol.BatchResultResponse, error) {
-	result, err := q.client.ExtendProjectJobLeases(ctx, q.projectID, protocol.ProjectExtendLeaseRequest{WorkerID: q.workerID, ExtendSeconds: extendSeconds, Items: items})
-	return result, convertTrackerError(err)
 }

@@ -92,6 +92,7 @@ tracker put-project \
   --dispatch-qps 250 \
   --worker-claim-qps 0.2 \
   --max-jobs-per-claim 64 \
+  --recommended-lease-seconds 300 \
   --client-versions sinavideo/2.4.0
 ```
 
@@ -127,7 +128,8 @@ key.
 
 Projects may also set a tracker-enforced `dispatch_qps`, an SDK-enforced
 per-worker `worker_claim_qps`, `max_jobs_per_claim` (1-256), and `max_resets`
-(0-1000, default 3). Omit either QPS
+(0-1000, default 3). `recommended_lease_seconds` (1-3600, default 300) controls
+the default lease and Go SDK renewal cadence. Omit either QPS
 to leave that limit disabled; this preserves the unlimited fast path. At high
 dispatch rates the tracker permits at most 100 ms of accumulated tokens, while
 lower rates permit no burst larger than one job.
@@ -224,9 +226,14 @@ newer attempt. An optional source `id` is metadata and is never used to finish
 an attempt.
 
 The Go SDK exposes `worker.OpenProjectQueue`; the Python SDK exposes
-`open_project_queue`. Both call the project queue directly and contain no
-routing or inbound-server lifecycle. They refresh project policy, clamp claim
-batches, pace each worker's claims, and retry explicit retryable 429 responses.
+`open_project_queue`. Both refresh project policy, use the project's recommended
+lease by default, clamp claim batches, pace each worker's claims, and retry
+explicit retryable 429 responses. The Go SDK additionally returns lifecycle
+aware job handles, renews all held attempts every quarter lease in batches, and
+cancels a job context when its lease is lost. See the
+[Go SDK guide](./sdk/worker/README.md) and
+[Python SDK guide](./sdk/python/README.md).
+
 Worker configuration includes a required client version. HQ returns HTTP 426
 `client_upgrade_required` unless that exact version is allowed by the project.
 

@@ -36,10 +36,12 @@ DELETE /api/v1/admin/users/{user_id}/machine-token
 any time. `dispatch_qps` and `worker_claim_qps` are either `null` or any positive
 finite number. `max_jobs_per_claim` is 1-256 and defaults to 256. `max_resets`
 is 0-1000 and defaults to 3; it limits the combined number of lease-expiration
-resets and retryable failures before a job enters `reset_exhausted`. A server-owned
+resets and retryable failures before a job enters `reset_exhausted`.
+`recommended_lease_seconds` is 1-3600 and defaults to 300. A server-owned
 `client_versions` is an exact-match allowlist of up to 64 worker client version
 strings. It may be empty to stop all worker access. `policy_version` starts at 1
-and increases when a claim policy, reset limit, or client allowlist changes.
+and increases when a claim policy, reset limit, lease recommendation, or client
+allowlist changes.
 Project responses include these settings and `todo`, `wip`,
 `done`, `failed`, and `reset_exhausted` counts.
 
@@ -103,8 +105,9 @@ GET  /api/v1/projects/{project_id}
 POST /api/v1/projects/{project_id}/jobs/claim
 ```
 
-The GET returns the current claim policy and a refresh interval. Claim request
-fields are `worker_id`, `max_jobs` (1-256), `lease_seconds` (1-3600),
+The GET returns the current claim policy, `recommended_lease_seconds` (1-3600),
+and a refresh interval. Claim request fields are `worker_id`, `max_jobs`
+(1-256), `lease_seconds` (1-3600),
 `accept_types`, and the fetched `policy_version`. The tracker clamps `max_jobs`
 again to the project policy. A successful response contains the project ID,
 claimed JobSpecs, internal numeric job IDs, unique attempt IDs, lease deadlines,
@@ -134,6 +137,12 @@ retryable 429 responses. The tracker does not reject excess per-worker request
 rates; when `worker_claim_qps` is configured, it records per-minute worker claim
 buckets for later audit.
 
+The Go SDK claims with the recommended lease unless explicitly overridden. It
+returns job handles with attempt-scoped contexts and renews held attempts every
+quarter lease through bounded `extend-lease` batches. A job context is canceled
+when the last known lease expires, Tracker rejects the attempt, or the owning
+queue closes.
+
 ## Complete
 
 ```text
@@ -162,8 +171,9 @@ limit enters `reset_exhausted`. A non-retryable failure enters `failed`.
 POST /api/v1/projects/{project_id}/jobs/extend-lease
 ```
 
-The request contains `worker_id`, `extend_seconds`, and job/attempt references.
-The deadline never moves backwards.
+The request contains `worker_id`, `extend_seconds`, and 1-256 job/attempt
+references. The deadline never moves backwards and is maintained at
+`now + extend_seconds`, rather than accumulating extensions.
 
 ## Item results
 

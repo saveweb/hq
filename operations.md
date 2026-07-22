@@ -32,9 +32,9 @@ must be monitored separately.
    replayable source imports, `unique_value` when values must be unique, or
    `none` when every submission must become a job. `ORDER` is `fifo` (the
    default) or `random` and can be changed while workers are running. Optional
-   `--dispatch-qps`, `--worker-claim-qps`, `--max-jobs-per-claim`, and
-   `--max-resets` flags set the live execution policy. Omit a QPS flag for
-   unlimited operation.
+   `--dispatch-qps`, `--worker-claim-qps`, `--max-jobs-per-claim`,
+   `--max-resets`, and `--recommended-lease-seconds` flags set the live
+   execution policy. Omit a QPS flag for unlimited operation.
 4. Produce a `jobs-jsonl-zstd-v1` file with `source pack --identity-mode MODE`,
    using the project mode.
 5. Run `tracker enqueue-source`.
