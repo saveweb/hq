@@ -130,33 +130,87 @@ func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int
 	if project.MaxJobsPerClaim < 1 || project.MaxJobsPerClaim > maxProjectBatch {
 		return tracker.InvalidRequest("max jobs per claim must be between 1 and 256")
 	}
+	if err := validateClientVersions(project.ClientVersions); err != nil {
+		return err
+	}
+	project.ClientVersions = append([]string{}, project.ClientVersions...)
+	sort.Strings(project.ClientVersions)
 	return storeError("put project", pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO tracker_projects(
-				id,status,identity_mode,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,policy_version,created_at,updated_at
+				id,status,identity_mode,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,client_versions,policy_version,created_at,updated_at
 			)
-			VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$6,$7,1,$8,$8)
+			VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$6,$7,$8,1,$9,$9)
 			ON CONFLICT(id) DO UPDATE SET
 				status=EXCLUDED.status,
 				claim_order=COALESCE(NULLIF($4,''),tracker_projects.claim_order),
 				dispatch_qps=EXCLUDED.dispatch_qps,
 				worker_claim_qps=EXCLUDED.worker_claim_qps,
 				max_jobs_per_claim=EXCLUDED.max_jobs_per_claim,
+				client_versions=EXCLUDED.client_versions,
 				policy_version=tracker_projects.policy_version + CASE WHEN
 					tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps OR
 					tracker_projects.worker_claim_qps IS DISTINCT FROM EXCLUDED.worker_claim_qps OR
-					tracker_projects.max_jobs_per_claim IS DISTINCT FROM EXCLUDED.max_jobs_per_claim
+					tracker_projects.max_jobs_per_claim IS DISTINCT FROM EXCLUDED.max_jobs_per_claim OR
+					tracker_projects.client_versions IS DISTINCT FROM EXCLUDED.client_versions
 				THEN 1 ELSE 0 END,
 				dispatch_tokens=CASE WHEN tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps THEN NULL ELSE tracker_projects.dispatch_tokens END,
 				dispatch_refilled_at_ns=CASE WHEN tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps THEN NULL ELSE tracker_projects.dispatch_refilled_at_ns END,
 				updated_at=EXCLUDED.updated_at
 			WHERE $3='' OR tracker_projects.identity_mode=$3
-		`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, project.DispatchQPS, project.WorkerClaimQPS, project.MaxJobsPerClaim, now)
+		`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, project.DispatchQPS, project.WorkerClaimQPS, project.MaxJobsPerClaim, project.ClientVersions, now)
 		if err == nil && tag.RowsAffected() == 0 {
 			return tracker.InvalidRequest("project identity mode cannot be changed")
 		}
 		return err
 	}))
+}
+
+func validateClientVersions(versions []string) error {
+	if len(versions) > 64 {
+		return tracker.InvalidRequest("client_versions must contain at most 64 versions")
+	}
+	seen := make(map[string]struct{}, len(versions))
+	for _, version := range versions {
+		if version == "" || len(version) > 128 || strings.TrimSpace(version) != version {
+			return tracker.InvalidRequest("client_versions entries must be non-empty, at most 128 bytes, and have no surrounding whitespace")
+		}
+		if _, exists := seen[version]; exists {
+			return tracker.InvalidRequest("client_versions entries must be unique")
+		}
+		seen[version] = struct{}{}
+	}
+	return nil
+}
+
+func (s *Store) CheckProjectClientVersion(ctx context.Context, userID, projectID, clientVersion string) error {
+	if !queue.ValidateIdentifier(userID) || !queue.ValidateIdentifier(projectID) {
+		return tracker.InvalidRequest("invalid project ID")
+	}
+	var userStatus string
+	var roles []string
+	var allowed []string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT u.status,u.roles,p.client_versions
+		FROM tracker_users u CROSS JOIN tracker_projects p
+		WHERE u.id=$1 AND p.id=$2
+	`, userID, projectID).Scan(&userStatus, &roles, &allowed); errors.Is(err, pgx.ErrNoRows) {
+		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "user or project not found"}
+	} else if err != nil {
+		return storeError("check project client version", err)
+	}
+	if userStatus != tracker.UserStatusActive || !roleMap(roles)[tracker.RoleWorker] {
+		return &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "active worker role required"}
+	}
+	for _, version := range allowed {
+		if clientVersion == version {
+			return nil
+		}
+	}
+	return &tracker.Error{
+		Code: protocol.ErrorClientUpgrade, Message: "client version is not supported; upgrade required",
+		Details: map[string]any{"client_version": clientVersion, "client_versions": allowed},
+	}
 }
 
 func validProjectQPS(value *float64) bool {

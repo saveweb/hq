@@ -65,6 +65,7 @@ type Project struct {
 	DispatchQPS     *float64
 	WorkerClaimQPS  *float64
 	MaxJobsPerClaim int
+	ClientVersions  []string
 	PolicyVersion   int64
 }
 

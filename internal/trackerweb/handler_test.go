@@ -93,6 +93,7 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 		existing.CreatedAt = now
 	}
 	existing.ID, existing.Status, existing.UpdatedAt = project.ID, project.Status, now
+	existing.ClientVersions = append([]string(nil), project.ClientVersions...)
 	if existing.IdentityMode == "" {
 		existing.IdentityMode = project.IdentityMode
 	}
@@ -249,7 +250,7 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("dashboard = %d %q", dashboard.Code, dashboard.Body.String())
 	}
 	csrf := extractCSRF(t, dashboard.Body.String())
-	create := postForm(t, server, "/admin/projects", url.Values{"csrf": {csrf}, "project_id": {"demo"}, "status": {tracker.ProjectStatusActive}, "identity_mode": {tracker.IdentityModeUniqueValue}, "claim_order": {tracker.ClaimOrderRandom}}, sessionCookie)
+	create := postForm(t, server, "/admin/projects", url.Values{"csrf": {csrf}, "project_id": {"demo"}, "status": {tracker.ProjectStatusActive}, "identity_mode": {tracker.IdentityModeUniqueValue}, "claim_order": {tracker.ClaimOrderRandom}, "client_versions": {"worker-v2\nworker-v1"}}, sessionCookie)
 	if create.Code != http.StatusSeeOther || create.Header().Get("Location") != "/admin/projects/demo" {
 		t.Fatalf("create = %d %q", create.Code, create.Header().Get("Location"))
 	}
@@ -258,8 +259,8 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		!strings.Contains(detail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
 	}
-	settings := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {csrf}, "status": {tracker.ProjectStatusActive}, "claim_order": {tracker.ClaimOrderFIFO}}, sessionCookie)
-	if settings.Code != http.StatusSeeOther || store.projects["demo"].ClaimOrder != tracker.ClaimOrderFIFO {
+	settings := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {csrf}, "status": {tracker.ProjectStatusActive}, "claim_order": {tracker.ClaimOrderFIFO}, "client_versions": {"worker-v2\nworker-v1"}}, sessionCookie)
+	if settings.Code != http.StatusSeeOther || store.projects["demo"].ClaimOrder != tracker.ClaimOrderFIFO || len(store.projects["demo"].ClientVersions) != 2 {
 		t.Fatalf("settings = %d project=%+v", settings.Code, store.projects["demo"])
 	}
 	jobs := `[ {"value":"https://example.com/","type":"archive","random_key":-9} ]`

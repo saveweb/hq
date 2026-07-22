@@ -91,7 +91,8 @@ tracker put-project \
   --identity-mode external_id \
   --dispatch-qps 250 \
   --worker-claim-qps 0.2 \
-  --max-jobs-per-claim 64
+  --max-jobs-per-claim 64 \
+  --client-versions sinavideo/2.4.0
 ```
 
 Pack URLs and import them directly into the project queue:
@@ -225,6 +226,8 @@ The Go SDK exposes `worker.OpenProjectQueue`; the Python SDK exposes
 `open_project_queue`. Both call the project queue directly and contain no
 routing or inbound-server lifecycle. They refresh project policy, clamp claim
 batches, pace each worker's claims, and retry explicit retryable 429 responses.
+Worker configuration includes a required client version. HQ returns HTTP 426
+`client_upgrade_required` unless that exact version is allowed by the project.
 
 See [design.md](./design.md) for state semantics and
 [operations.md](./operations.md) for the minimal runbook.

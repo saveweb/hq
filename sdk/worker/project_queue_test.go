@@ -50,6 +50,7 @@ func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 
 	queue, err := OpenProjectQueue(Config{
 		TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1",
+		ClientVersion:    "worker-v2",
 		AllowHTTPTracker: true, RequestTimeout: time.Second,
 	}, "demo")
 	if err != nil {

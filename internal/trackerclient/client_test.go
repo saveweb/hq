@@ -24,6 +24,9 @@ func TestClaimProjectJobsRequest(t *testing.T) {
 		if request.Header.Get("Authorization") != "Bearer machine-token" {
 			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
 		}
+		if request.Header.Get(protocol.ClientVersionHeader) != "worker-v2" {
+			t.Fatalf("client version = %q", request.Header.Get(protocol.ClientVersionHeader))
+		}
 		body, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -41,7 +44,7 @@ func TestClaimProjectJobsRequest(t *testing.T) {
 		}, nil
 	})
 	client, err := New(Config{
-		BaseURL: "https://hq.test", MachineToken: "machine-token", WorkerID: "worker-1",
+		BaseURL: "https://hq.test", MachineToken: "machine-token", WorkerID: "worker-1", ClientVersion: "worker-v2",
 		HTTPClient: &http.Client{Transport: transport},
 	})
 	if err != nil {

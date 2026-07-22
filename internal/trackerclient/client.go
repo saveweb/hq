@@ -20,14 +20,14 @@ import (
 const maxResponseBytes = int64(8 << 20)
 
 type Config struct {
-	BaseURL, MachineToken, WorkerID string
-	AllowHTTP                       bool
-	RequestTimeout                  time.Duration
-	HTTPClient                      *http.Client
+	BaseURL, MachineToken, WorkerID, ClientVersion string
+	AllowHTTP                                      bool
+	RequestTimeout                                 time.Duration
+	HTTPClient                                     *http.Client
 }
 type Client struct {
-	baseURL, machineToken string
-	httpClient            *http.Client
+	baseURL, machineToken, clientVersion string
+	httpClient                           *http.Client
 }
 type Error struct {
 	Status int
@@ -58,7 +58,7 @@ func New(config Config) (*Client, error) {
 	}
 	copyClient := *client
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{baseURL: strings.TrimSuffix(config.BaseURL, "/"), machineToken: config.MachineToken, httpClient: &copyClient}, nil
+	return &Client{baseURL: strings.TrimSuffix(config.BaseURL, "/"), machineToken: config.MachineToken, clientVersion: config.ClientVersion, httpClient: &copyClient}, nil
 }
 
 func (c *Client) AdminProject(ctx context.Context, projectID string) (protocol.AdminProjectSummary, error) {
@@ -131,6 +131,9 @@ func (c *Client) do(ctx context.Context, method, endpoint, contentType string, b
 	}
 	request.Header.Set("Authorization", "Bearer "+c.machineToken)
 	request.Header.Set("Accept", "application/json")
+	if c.clientVersion != "" {
+		request.Header.Set(protocol.ClientVersionHeader, c.clientVersion)
+	}
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}

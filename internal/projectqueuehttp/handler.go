@@ -214,6 +214,7 @@ func (h *handler) putProject(ctx *echo.Context) error {
 	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{
 		ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode, ClaimOrder: request.ClaimOrder,
 		DispatchQPS: request.DispatchQPS, WorkerClaimQPS: request.WorkerClaimQPS, MaxJobsPerClaim: request.MaxJobsPerClaim,
+		ClientVersions: request.ClientVersions,
 	}, h.now()); err != nil {
 		return h.writeError(ctx, err)
 	}
@@ -356,6 +357,9 @@ func (h *handler) claim(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
+	if !h.checkClientVersion(ctx, user.ID) {
+		return nil
+	}
 	var request protocol.ProjectClaimRequest
 	if !h.decode(ctx, &request) {
 		return nil
@@ -375,6 +379,9 @@ func (h *handler) projectPolicy(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
+	if !h.checkClientVersion(ctx, user.ID) {
+		return nil
+	}
 	policy, err := h.store.ProjectPolicy(ctx.Request().Context(), user.ID, ctx.Param("project_id"))
 	if err != nil {
 		return h.writeError(ctx, err)
@@ -385,6 +392,9 @@ func (h *handler) projectPolicy(ctx *echo.Context) error {
 func (h *handler) complete(ctx *echo.Context) error {
 	user, ok := h.authenticate(ctx)
 	if !ok {
+		return nil
+	}
+	if !h.checkClientVersion(ctx, user.ID) {
 		return nil
 	}
 	var request protocol.ProjectCompleteRequest
@@ -403,6 +413,9 @@ func (h *handler) fail(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
+	if !h.checkClientVersion(ctx, user.ID) {
+		return nil
+	}
 	var request protocol.ProjectFailRequest
 	if !h.decode(ctx, &request) {
 		return nil
@@ -419,6 +432,9 @@ func (h *handler) extendLease(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
+	if !h.checkClientVersion(ctx, user.ID) {
+		return nil
+	}
 	var request protocol.ProjectExtendLeaseRequest
 	if !h.decode(ctx, &request) {
 		return nil
@@ -428,6 +444,14 @@ func (h *handler) extendLease(ctx *echo.Context) error {
 		return h.writeError(ctx, err)
 	}
 	return ctx.JSON(http.StatusOK, result)
+}
+
+func (h *handler) checkClientVersion(ctx *echo.Context, userID string) bool {
+	if err := h.store.CheckProjectClientVersion(ctx.Request().Context(), userID, ctx.Param("project_id"), ctx.Request().Header.Get(protocol.ClientVersionHeader)); err != nil {
+		h.writeError(ctx, err)
+		return false
+	}
+	return true
 }
 
 func (h *handler) authenticate(ctx *echo.Context) (tracker.User, bool) {
@@ -481,6 +505,8 @@ func (h *handler) writeError(ctx *echo.Context, err error) error {
 		status = http.StatusBadRequest
 	case protocol.ErrorProjectRateLimited:
 		status = http.StatusTooManyRequests
+	case protocol.ErrorClientUpgrade:
+		status = http.StatusUpgradeRequired
 	}
 	if status == http.StatusTooManyRequests && domainError.RetryAfter > 0 {
 		ctx.Response().Header().Set("Retry-After", strconv.FormatInt((domainError.RetryAfter+999)/1000, 10))

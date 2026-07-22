@@ -22,7 +22,14 @@ def _dumps(value: Any) -> bytes:
 
 class TrackerClient:
     def __init__(
-        self, base_url: str, machine_token: str, worker_id: str, *, timeout: float, allow_http: bool
+        self,
+        base_url: str,
+        machine_token: str,
+        worker_id: str,
+        client_version: str,
+        *,
+        timeout: float,
+        allow_http: bool,
     ) -> None:
         parsed = urlsplit(base_url)
         if (
@@ -33,13 +40,16 @@ class TrackerClient:
             or (parsed.scheme == "http" and not allow_http)
         ):
             raise TransportError("invalid or disallowed HQ URL")
-        if not machine_token or not worker_id:
-            raise ValueError("machine token and worker ID are required")
+        if not machine_token or not worker_id or not client_version:
+            raise ValueError("machine token, worker ID, and client version are required")
         self._scheme, self._host = parsed.scheme, parsed.hostname
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._base_path = parsed.path.rstrip("/")
         self._timeout = timeout
-        self._headers = {"Authorization": f"Bearer {machine_token}"}
+        self._headers = {
+            "Authorization": f"Bearer {machine_token}",
+            "X-SavewebHQ-Client-Version": client_version,
+        }
         self._connection: http.client.HTTPConnection | None = None
         self._lock = threading.Lock()
 

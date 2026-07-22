@@ -150,7 +150,7 @@ paths:
               schema: {$ref: '#/components/schemas/AdminEnqueueJobsResponse'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}:
-    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    parameters: [{$ref: '#/components/parameters/ProjectID'}, {$ref: '#/components/parameters/ClientVersion'}]
     get:
       operationId: getProjectPolicy
       description: Returns the active worker policy used by SDK claim pacing.
@@ -160,6 +160,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ProjectPolicy'}
+        '426': {$ref: '#/components/responses/ClientUpgradeRequired'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/projects/{project_id}/source:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
@@ -208,7 +209,7 @@ paths:
         '204': {description: Job requeued}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/claim:
-    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    parameters: [{$ref: '#/components/parameters/ProjectID'}, {$ref: '#/components/parameters/ClientVersion'}]
     post:
       operationId: claimProjectJobs
       requestBody:
@@ -230,9 +231,10 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '426': {$ref: '#/components/responses/ClientUpgradeRequired'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/complete:
-    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    parameters: [{$ref: '#/components/parameters/ProjectID'}, {$ref: '#/components/parameters/ClientVersion'}]
     post:
       operationId: completeProjectJobs
       requestBody:
@@ -242,9 +244,10 @@ paths:
             schema: {$ref: '#/components/schemas/ProjectCompleteRequest'}
       responses:
         '200': {$ref: '#/components/responses/BatchResult'}
+        '426': {$ref: '#/components/responses/ClientUpgradeRequired'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/fail:
-    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    parameters: [{$ref: '#/components/parameters/ProjectID'}, {$ref: '#/components/parameters/ClientVersion'}]
     post:
       operationId: failProjectJobs
       requestBody:
@@ -254,9 +257,10 @@ paths:
             schema: {$ref: '#/components/schemas/ProjectFailRequest'}
       responses:
         '200': {$ref: '#/components/responses/BatchResult'}
+        '426': {$ref: '#/components/responses/ClientUpgradeRequired'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/extend-lease:
-    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    parameters: [{$ref: '#/components/parameters/ProjectID'}, {$ref: '#/components/parameters/ClientVersion'}]
     post:
       operationId: extendProjectJobLeases
       requestBody:
@@ -266,6 +270,7 @@ paths:
             schema: {$ref: '#/components/schemas/ProjectExtendLeaseRequest'}
       responses:
         '200': {$ref: '#/components/responses/BatchResult'}
+        '426': {$ref: '#/components/responses/ClientUpgradeRequired'}
         default: {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
@@ -276,6 +281,11 @@ components:
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
+    ClientVersion:
+      name: X-SavewebHQ-Client-Version
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
     UserID:
       name: user_id
       in: path
@@ -294,6 +304,11 @@ components:
           schema: {$ref: '#/components/schemas/BatchResultResponse'}
     Error:
       description: Request error
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    ClientUpgradeRequired:
+      description: The declared client version is not in the project's exact-match allowlist.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -347,7 +362,7 @@ components:
     AdminProjectRequest:
       type: object
       additionalProperties: false
-      required: [status, dispatch_qps, worker_claim_qps, max_jobs_per_claim]
+      required: [status, dispatch_qps, worker_claim_qps, max_jobs_per_claim, client_versions]
       properties:
         status: {type: string, enum: [active, draining, archived]}
         identity_mode: {type: string, enum: [none, external_id, unique_value]}
@@ -355,10 +370,11 @@ components:
         dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, policy_version, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, client_versions, policy_version, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
@@ -367,6 +383,7 @@ components:
         dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
         max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
         policy_version: {type: integer, format: int64, minimum: 1}
         job_counts: {$ref: '#/components/schemas/JobCounts'}
         created_at: {type: integer, format: int64}

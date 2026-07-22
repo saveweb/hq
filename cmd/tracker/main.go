@@ -156,6 +156,7 @@ func runPutProject(args []string) error {
 	dispatchQPSRaw := flags.String("dispatch-qps", "", "project job dispatch QPS; empty means unlimited")
 	workerClaimQPSRaw := flags.String("worker-claim-qps", "", "per-worker claim QPS; empty means unlimited")
 	maxJobsPerClaim := flags.Int("max-jobs-per-claim", 256, "maximum jobs returned by one claim")
+	clientVersionsRaw := flags.String("client-versions", "", "comma-separated allowed worker client versions")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -177,9 +178,15 @@ func runPutProject(args []string) error {
 	if err != nil {
 		return fmt.Errorf("put-project: worker-claim-qps: %w", err)
 	}
+	clientVersions := []string{}
+	if *clientVersionsRaw != "" {
+		for _, raw := range strings.Split(*clientVersionsRaw, ",") {
+			clientVersions = append(clientVersions, strings.TrimSpace(raw))
+		}
+	}
 	return store.PutProject(ctx, tracker.Project{
 		ID: *projectID, Status: *status, IdentityMode: *identityMode, ClaimOrder: *claimOrder,
-		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: *maxJobsPerClaim,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: *maxJobsPerClaim, ClientVersions: clientVersions,
 	}, time.Now().Unix())
 }
 

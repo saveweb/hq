@@ -14,13 +14,14 @@ type Config struct {
 	TrackerURL       string
 	MachineToken     string
 	WorkerID         string
+	ClientVersion    string
 	AllowHTTPTracker bool
 	RequestTimeout   time.Duration
 }
 
 func (c Config) normalized() (Config, error) {
-	if c.TrackerURL == "" || c.MachineToken == "" || c.WorkerID == "" {
-		return Config{}, fmt.Errorf("worker: tracker URL, machine token, and worker ID are required")
+	if c.TrackerURL == "" || c.MachineToken == "" || c.WorkerID == "" || c.ClientVersion == "" {
+		return Config{}, fmt.Errorf("worker: tracker URL, machine token, worker ID, and client version are required")
 	}
 	if c.RequestTimeout == 0 {
 		c.RequestTimeout = 45 * time.Second
@@ -31,7 +32,7 @@ func (c Config) normalized() (Config, error) {
 	return c, nil
 }
 func trackerFor(c Config) (*trackerclient.Client, error) {
-	return trackerclient.New(trackerclient.Config{BaseURL: c.TrackerURL, MachineToken: c.MachineToken, WorkerID: c.WorkerID, AllowHTTP: c.AllowHTTPTracker, RequestTimeout: c.RequestTimeout})
+	return trackerclient.New(trackerclient.Config{BaseURL: c.TrackerURL, MachineToken: c.MachineToken, WorkerID: c.WorkerID, ClientVersion: c.ClientVersion, AllowHTTP: c.AllowHTTPTracker, RequestTimeout: c.RequestTimeout})
 }
 
 type APIError struct {

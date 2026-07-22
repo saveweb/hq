@@ -11,6 +11,7 @@ with open_project_queue(
         tracker_url="https://hq.example",
         machine_token=machine_token,
         worker_id="sinavideo-1",
+        client_version="sinavideo/2.4.0",
     ),
     "sinavideo",
 ) as queue:

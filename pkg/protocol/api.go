@@ -3,6 +3,8 @@ package protocol
 
 type Attrs map[string]any
 
+const ClientVersionHeader = "X-SavewebHQ-Client-Version"
+
 const (
 	ItemStatusApplied        = "applied"
 	ItemStatusRejected       = "rejected"
@@ -21,6 +23,7 @@ const (
 	ErrorStaleAttempt        = "stale_attempt"
 	ErrorProjectNotActive    = "project_not_active"
 	ErrorProjectRateLimited  = "project_dispatch_rate_limited"
+	ErrorClientUpgrade       = "client_upgrade_required"
 )
 
 type APIError struct {
@@ -129,6 +132,7 @@ type AdminProjectRequest struct {
 	DispatchQPS     *float64 `json:"dispatch_qps"`
 	WorkerClaimQPS  *float64 `json:"worker_claim_qps"`
 	MaxJobsPerClaim int      `json:"max_jobs_per_claim"`
+	ClientVersions  []string `json:"client_versions"`
 }
 
 type AdminProjectSummary struct {
@@ -139,6 +143,7 @@ type AdminProjectSummary struct {
 	DispatchQPS     *float64         `json:"dispatch_qps"`
 	WorkerClaimQPS  *float64         `json:"worker_claim_qps"`
 	MaxJobsPerClaim int              `json:"max_jobs_per_claim"`
+	ClientVersions  []string         `json:"client_versions"`
 	PolicyVersion   int64            `json:"policy_version"`
 	JobCounts       map[string]int64 `json:"job_counts"`
 	CreatedAt       int64            `json:"created_at"`

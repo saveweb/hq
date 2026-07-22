@@ -465,10 +465,14 @@ func (h *Handler) createProject(ctx *echo.Context) error {
 	if err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project policy is invalid")
 	}
+	clientVersions, err := clientVersionsForm(ctx)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Client versions are invalid")
+	}
 	project := tracker.Project{
 		ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"),
 		IdentityMode: ctx.FormValue("identity_mode"), ClaimOrder: ctx.FormValue("claim_order"),
-		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs, ClientVersions: clientVersions,
 	}
 	if err := h.store.PutProject(ctx.Request().Context(), project, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
@@ -493,13 +497,41 @@ func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
 	if err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project policy is invalid")
 	}
+	clientVersions, err := clientVersionsForm(ctx)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Client versions are invalid")
+	}
 	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{
 		ID: projectID, Status: ctx.FormValue("status"), ClaimOrder: ctx.FormValue("claim_order"),
-		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs, ClientVersions: clientVersions,
 	}, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
+}
+
+func clientVersionsForm(ctx *echo.Context) ([]string, error) {
+	lines := strings.Split(strings.ReplaceAll(ctx.FormValue("client_versions"), "\r\n", "\n"), "\n")
+	versions := make([]string, 0, len(lines))
+	seen := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		version := strings.TrimSpace(line)
+		if version == "" {
+			continue
+		}
+		if len(version) > 128 {
+			return nil, fmt.Errorf("client version is too long")
+		}
+		if _, exists := seen[version]; exists {
+			return nil, fmt.Errorf("duplicate client version")
+		}
+		seen[version] = struct{}{}
+		versions = append(versions, version)
+	}
+	if len(versions) > 64 {
+		return nil, fmt.Errorf("too many client versions")
+	}
+	return versions, nil
 }
 
 func projectPolicyForm(ctx *echo.Context) (*float64, *float64, int, error) {

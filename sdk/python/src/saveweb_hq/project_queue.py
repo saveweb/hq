@@ -25,6 +25,7 @@ class ProjectQueue:
             config.tracker_url,
             config.machine_token,
             config.worker_id,
+            config.client_version,
             timeout=config.request_timeout,
             allow_http=config.allow_http_tracker,
         )

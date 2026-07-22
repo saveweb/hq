@@ -114,12 +114,27 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err := store.DeleteUser(ctx, pending.ID); !tracker.IsCode(err, protocol.ErrorNotFound) {
 		t.Fatalf("delete missing user = %v", err)
 	}
-	if err := store.PutProject(ctx, tracker.Project{ID: "queue-project", Status: tracker.ProjectStatusActive}, now); err != nil {
+	if err := store.PutProject(ctx, tracker.Project{ID: "queue-project", Status: tracker.ProjectStatusActive, ClientVersions: []string{"worker-v2", "worker-v1"}}, now); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := store.ListProjectSummaries(ctx)
-	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
+	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
 		t.Fatalf("initial project summaries = %+v, %v", projects, err)
+	}
+	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", "worker-v2"); err != nil {
+		t.Fatalf("allowed client version = %v", err)
+	}
+	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", "worker-v0"); !tracker.IsCode(err, protocol.ErrorClientUpgrade) {
+		t.Fatalf("obsolete client version = %v", err)
+	}
+	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", ""); !tracker.IsCode(err, protocol.ErrorClientUpgrade) {
+		t.Fatalf("missing client version = %v", err)
+	}
+	if err := store.CheckProjectClientVersion(ctx, admin.ID, "queue-project", "worker-v2"); !tracker.IsCode(err, protocol.ErrorPermissionDenied) {
+		t.Fatalf("non-worker client version check = %v", err)
+	}
+	if err := store.PutProject(ctx, tracker.Project{ID: "invalid-versions", Status: tracker.ProjectStatusActive, ClientVersions: []string{"v1", "v1"}}, now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+		t.Fatalf("duplicate client versions = %v", err)
 	}
 	jobs := []protocol.AdminEnqueueJob{{ID: "job-1", Value: "https://example.test/1", Type: protocol.JobTypeSeed, Via: nil, Attrs: map[string]any{"source": "test"}}, {ID: "job-2", Value: "https://example.test/2", Via: nil}}
 	inserted, err := store.EnqueueProjectJobs(ctx, "queue-project", jobs, now)
@@ -380,6 +395,17 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	changedPolicy, err := store.ProjectPolicy(ctx, "queue-worker", "limited-project")
 	if err != nil || changedPolicy.PolicyVersion != 2 {
 		t.Fatalf("changed policy = %+v, %v", changedPolicy, err)
+	}
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "limited-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		DispatchQPS: &dispatchQPS, WorkerClaimQPS: &changedWorkerClaimQPS, MaxJobsPerClaim: 8,
+		ClientVersions: []string{"worker-v3"},
+	}, now+27); err != nil {
+		t.Fatal(err)
+	}
+	changedVersionsPolicy, err := store.ProjectPolicy(ctx, "queue-worker", "limited-project")
+	if err != nil || changedVersionsPolicy.PolicyVersion != 3 {
+		t.Fatalf("changed client versions policy = %+v, %v", changedVersionsPolicy, err)
 	}
 
 	highQPS := 2000.0

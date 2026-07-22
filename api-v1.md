@@ -35,8 +35,9 @@ DELETE /api/v1/admin/users/{user_id}/machine-token
 `claim_order` is `fifo` or `random`, defaults to `fifo`, and may be changed at
 any time. `dispatch_qps` and `worker_claim_qps` are either `null` or any positive
 finite number. `max_jobs_per_claim` is 1-256 and defaults to 256. A server-owned
-`policy_version` starts at 1 and increases only when one of those three policy
-values changes. Project responses include these settings and `todo`, `wip`,
+`client_versions` is an exact-match allowlist of up to 64 worker client version
+strings. It may be empty to stop all worker access. `policy_version` starts at 1
+and increases when a claim policy or the client allowlist changes. Project responses include these settings and `todo`, `wip`,
 `done`, `failed`, and `reset_exhausted` counts.
 
 The jobs endpoint accepts one or more JobSpecs within the 8 MiB JSON request
@@ -87,6 +88,12 @@ machine token. The worker page keeps the value hidden until the user chooses
 `View token`, and it remains available on later visits.
 
 ## Claim
+
+Every worker project request, including policy reads and job mutations, must
+send `X-SavewebHQ-Client-Version`. A missing version or a value absent from the
+project's `client_versions` returns HTTP 426 with `client_upgrade_required` and
+the current allowlist in `error.details.client_versions`. Matching is exact;
+HQ does not interpret semantic-version ranges.
 
 ```text
 GET  /api/v1/projects/{project_id}
