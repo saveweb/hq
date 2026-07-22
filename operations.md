@@ -31,7 +31,9 @@ must be monitored separately.
 3. Run `tracker put-project --identity-mode MODE --claim-order ORDER`. Use `external_id` for
    replayable source imports, `unique_value` when values must be unique, or
    `none` when every submission must become a job. `ORDER` is `fifo` (the
-   default) or `random` and can be changed while workers are running.
+   default) or `random` and can be changed while workers are running. Optional
+   `--dispatch-qps`, `--worker-claim-qps`, and `--max-jobs-per-claim` flags set
+   the live claim policy. Omit a QPS flag for unlimited operation.
 4. Produce a `jobs-jsonl-zstd-v1` file with `source pack --identity-mode MODE`,
    using the project mode.
 5. Run `tracker enqueue-source`.
@@ -112,8 +114,17 @@ at-least-once execution.
 - expired WIP count;
 - reset-exhausted and permanent-failure rates;
 - claim and mutation latency;
+- project 429 rate and `retry_after_ms` distribution;
+- per-worker claim request rate versus the policy version it reported;
 - receipt-bearing completion rate for archive projects.
 
 Do not add a metrics subsystem until these queries have been exercised during
 a real pilot. Structured logs and direct PostgreSQL queries are sufficient for
 the first controlled run.
+
+For projects with `worker_claim_qps` configured,
+`tracker_worker_claim_buckets` stores one row per project, worker, and minute.
+Compare `claim_requests / 60.0` with the corresponding policy; group by
+`policy_version` when a policy changed during the inspection period. Delete old
+buckets according to the deployment's audit retention policy so this monitoring
+table does not grow without bound. Unlimited projects skip this write entirely.

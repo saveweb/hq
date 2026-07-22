@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"regexp"
 
@@ -225,21 +226,68 @@ func validateEnqueueIdentities(ctx context.Context, tx pgx.Tx, projectID, identi
 	return nil
 }
 
-func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, request protocol.ProjectClaimRequest, now int64) ([]protocol.ClaimedJob, error) {
-	if !queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(request.WorkerID) || request.MaxJobs < 1 || request.MaxJobs > maxProjectBatch || request.LeaseSeconds < 1 || request.LeaseSeconds > 3600 || len(request.AcceptTypes) > 16 {
-		return nil, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid claim request"}
+func (s *Store) ProjectPolicy(ctx context.Context, userID, projectID string) (protocol.ProjectPolicy, error) {
+	if !queue.ValidateIdentifier(projectID) {
+		return protocol.ProjectPolicy{}, tracker.InvalidRequest("invalid project ID")
+	}
+	var result protocol.ProjectPolicy
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		project, err := authorizeProjectWorker(ctx, tx, userID, projectID)
+		if err != nil {
+			return err
+		}
+		result = protocol.ProjectPolicy{
+			ProjectID: projectID, DispatchQPS: project.dispatchQPS, WorkerClaimQPS: project.workerClaimQPS,
+			MaxJobsPerClaim: project.maxJobsPerClaim, PolicyVersion: project.policyVersion, RefreshAfterMS: 60_000,
+		}
+		return nil
+	})
+	return result, storeError("get project policy", err)
+}
+
+func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, request protocol.ProjectClaimRequest, nowNS int64) (tracker.ProjectClaimResult, error) {
+	if !queue.ValidateIdentifier(projectID) || !queue.ValidateIdentifier(request.WorkerID) || request.MaxJobs < 1 || request.MaxJobs > maxProjectBatch || request.LeaseSeconds < 1 || request.LeaseSeconds > 3600 || len(request.AcceptTypes) > 16 || request.PolicyVersion < 1 {
+		return tracker.ProjectClaimResult{}, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid claim request"}
 	}
 	for _, jobType := range request.AcceptTypes {
 		if jobType != protocol.JobTypeSeed && jobType != protocol.JobTypeAsset {
-			return nil, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "accept_types may contain only seed or asset"}
+			return tracker.ProjectClaimResult{}, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "accept_types may contain only seed or asset"}
 		}
 	}
+	now := nowNS / 1_000_000_000
 	leaseExpiresAt := now + request.LeaseSeconds
-	result := make([]protocol.ClaimedJob, 0, request.MaxJobs)
+	result := tracker.ProjectClaimResult{RetryAfterMS: 1000}
+	var rateLimitError *tracker.Error
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		claimOrder, err := authorizeProjectWorker(ctx, tx, userID, projectID)
+		project, err := authorizeProjectWorker(ctx, tx, userID, projectID)
 		if err != nil {
 			return err
+		}
+		if project.dispatchQPS != nil {
+			if err := tx.QueryRow(ctx, `
+				SELECT status,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,policy_version,
+					dispatch_tokens,dispatch_refilled_at_ns
+				FROM tracker_projects WHERE id=$1 FOR UPDATE
+			`, projectID).Scan(
+				&project.status, &project.claimOrder, &project.dispatchQPS, &project.workerClaimQPS,
+				&project.maxJobsPerClaim, &project.policyVersion, &project.dispatchTokens, &project.dispatchRefilledAtNS,
+			); err != nil {
+				return err
+			}
+			if project.status != tracker.ProjectStatusActive {
+				return &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "project is not active"}
+			}
+		}
+		result.PolicyVersion = project.policyVersion
+		claimLimit := min(request.MaxJobs, project.maxJobsPerClaim)
+		if project.dispatchQPS != nil {
+			tokens := refillDispatchTokens(project, nowNS)
+			available := maxProjectBatch
+			if tokens < maxProjectBatch {
+				available = int(math.Floor(tokens))
+			}
+			claimLimit = min(claimLimit, available)
+			project.dispatchTokens = &tokens
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE tracker_jobs SET
@@ -249,11 +297,36 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 		`, projectID, now); err != nil {
 			return err
 		}
+		if claimLimit < 1 {
+			var hasTodo bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM tracker_jobs
+					WHERE project_id=$1 AND status='todo'
+						AND (COALESCE(cardinality($2::text[]), 0) = 0 OR COALESCE(spec->>'type','seed') = ANY($2::text[]))
+				)
+			`, projectID, request.AcceptTypes).Scan(&hasTodo); err != nil {
+				return err
+			}
+			tokens := *project.dispatchTokens
+			if err := updateDispatchBucket(ctx, tx, projectID, tokens, nowNS); err != nil {
+				return err
+			}
+			if hasTodo {
+				retryAfterMS := dispatchRetryAfterMS(tokens, *project.dispatchQPS)
+				rateLimitError = &tracker.Error{
+					Code: protocol.ErrorProjectRateLimited, Message: "project dispatch rate limit exceeded",
+					Retryable: true, RetryAfter: retryAfterMS,
+					Details: map[string]any{"project_id": projectID, "policy_version": project.policyVersion},
+				}
+			}
+			return recordClaimBucket(ctx, tx, project.workerClaimQPS, projectID, request.WorkerID, request.PolicyVersion, nowNS/1_000_000, 0)
+		}
 		orderBy := "created_at,job_id"
-		if claimOrder == tracker.ClaimOrderRandom {
+		if project.claimOrder == tracker.ClaimOrderRandom {
 			orderBy = "random_key,job_id"
-		} else if claimOrder != tracker.ClaimOrderFIFO {
-			return fmt.Errorf("unknown project claim order %q", claimOrder)
+		} else if project.claimOrder != tracker.ClaimOrderFIFO {
+			return fmt.Errorf("unknown project claim order %q", project.claimOrder)
 		}
 		rows, err := tx.Query(ctx, fmt.Sprintf(`
 			SELECT job_id,external_id,value,spec FROM tracker_jobs
@@ -261,7 +334,7 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 				AND (COALESCE(cardinality($2::text[]), 0) = 0 OR COALESCE(spec->>'type','seed') = ANY($2::text[]))
 			ORDER BY %s
 			FOR UPDATE SKIP LOCKED LIMIT $3
-		`, orderBy), projectID, request.AcceptTypes, request.MaxJobs)
+		`, orderBy), projectID, request.AcceptTypes, claimLimit)
 		if err != nil {
 			return err
 		}
@@ -272,7 +345,7 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 			value      string
 			spec       []byte
 		}
-		selectedJobs := make([]selected, 0, request.MaxJobs)
+		selectedJobs := make([]selected, 0, claimLimit)
 		for rows.Next() {
 			var item selected
 			if err := rows.Scan(&item.jobID, &item.externalID, &item.value, &item.spec); err != nil {
@@ -302,30 +375,115 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 			if selectedJob.externalID != nil {
 				spec.ID = *selectedJob.externalID
 			}
-			result = append(result, protocol.ClaimedJob{JobSpecV1: spec, JobID: selectedJob.jobID, AttemptID: attemptID, LeaseExpiresAt: leaseExpiresAt})
+			result.Jobs = append(result.Jobs, protocol.ClaimedJob{JobSpecV1: spec, JobID: selectedJob.jobID, AttemptID: attemptID, LeaseExpiresAt: leaseExpiresAt})
 		}
-		return nil
+		if len(result.Jobs) > 0 && project.dispatchQPS != nil {
+			tokens := *project.dispatchTokens - float64(len(result.Jobs))
+			result.RetryAfterMS = dispatchRetryAfterMS(tokens, *project.dispatchQPS)
+			if err := updateDispatchBucket(ctx, tx, projectID, tokens, nowNS); err != nil {
+				return err
+			}
+		}
+		return recordClaimBucket(ctx, tx, project.workerClaimQPS, projectID, request.WorkerID, request.PolicyVersion, nowNS/1_000_000, len(result.Jobs))
 	})
-	return result, storeError("claim project jobs", err)
+	if err != nil {
+		return tracker.ProjectClaimResult{}, storeError("claim project jobs", err)
+	}
+	if rateLimitError != nil {
+		return tracker.ProjectClaimResult{}, rateLimitError
+	}
+	if result.Jobs == nil {
+		result.Jobs = []protocol.ClaimedJob{}
+	}
+	return result, nil
 }
 
-func authorizeProjectWorker(ctx context.Context, tx pgx.Tx, userID, projectID string) (string, error) {
-	var userStatus, projectStatus, claimOrder string
+type workerProject struct {
+	status               string
+	claimOrder           string
+	dispatchQPS          *float64
+	workerClaimQPS       *float64
+	maxJobsPerClaim      int
+	policyVersion        int64
+	dispatchTokens       *float64
+	dispatchRefilledAtNS *int64
+}
+
+func authorizeProjectWorker(ctx context.Context, tx pgx.Tx, userID, projectID string) (workerProject, error) {
+	var userStatus string
 	var roles []string
-	err := tx.QueryRow(ctx, `SELECT u.status,u.roles,p.status,p.claim_order FROM tracker_users u CROSS JOIN tracker_projects p WHERE u.id=$1 AND p.id=$2`, userID, projectID).Scan(&userStatus, &roles, &projectStatus, &claimOrder)
+	var project workerProject
+	err := tx.QueryRow(ctx, `
+		SELECT u.status,u.roles,p.status,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
+			p.max_jobs_per_claim,p.policy_version,p.dispatch_tokens,p.dispatch_refilled_at_ns
+		FROM tracker_users u CROSS JOIN tracker_projects p WHERE u.id=$1 AND p.id=$2
+	`, userID, projectID).Scan(
+		&userStatus, &roles, &project.status, &project.claimOrder, &project.dispatchQPS,
+		&project.workerClaimQPS, &project.maxJobsPerClaim, &project.policyVersion,
+		&project.dispatchTokens, &project.dispatchRefilledAtNS,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", &tracker.Error{Code: protocol.ErrorNotFound, Message: "user or project not found"}
+		return workerProject{}, &tracker.Error{Code: protocol.ErrorNotFound, Message: "user or project not found"}
 	}
 	if err != nil {
-		return "", err
+		return workerProject{}, err
 	}
 	if userStatus != tracker.UserStatusActive || !roleMap(roles)[tracker.RoleWorker] {
-		return "", &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "active worker role required"}
+		return workerProject{}, &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "active worker role required"}
 	}
-	if projectStatus != tracker.ProjectStatusActive {
-		return "", &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "project is not active"}
+	if project.status != tracker.ProjectStatusActive {
+		return workerProject{}, &tracker.Error{Code: protocol.ErrorProjectNotActive, Message: "project is not active"}
 	}
-	return claimOrder, nil
+	return project, nil
+}
+
+func refillDispatchTokens(project workerProject, nowNS int64) float64 {
+	capacity := 1.0
+	if *project.dispatchQPS > 1000 {
+		// High-throughput projects may accumulate at most 100ms of work so
+		// batch claims remain practical without creating long idle bursts.
+		capacity = math.Min(*project.dispatchQPS/10, maxProjectBatch)
+	}
+	if project.dispatchTokens == nil || project.dispatchRefilledAtNS == nil {
+		return capacity
+	}
+	elapsedNS := max(int64(0), nowNS-*project.dispatchRefilledAtNS)
+	return math.Min(capacity, *project.dispatchTokens+float64(elapsedNS)*(*project.dispatchQPS)/1_000_000_000)
+}
+
+func dispatchRetryAfterMS(tokens, qps float64) int64 {
+	if tokens >= 1 {
+		return 0
+	}
+	milliseconds := math.Ceil((1 - tokens) * 1000 / qps)
+	if milliseconds >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return max(int64(1), int64(milliseconds))
+}
+
+func updateDispatchBucket(ctx context.Context, tx pgx.Tx, projectID string, tokens float64, nowNS int64) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE tracker_projects SET dispatch_tokens=$2,dispatch_refilled_at_ns=$3 WHERE id=$1
+	`, projectID, tokens, nowNS)
+	return err
+}
+
+func recordClaimBucket(ctx context.Context, tx pgx.Tx, workerClaimQPS *float64, projectID, workerID string, policyVersion, nowMS int64, jobs int) error {
+	if workerClaimQPS == nil {
+		return nil
+	}
+	bucketStartedAtMS := nowMS - nowMS%60_000
+	_, err := tx.Exec(ctx, `
+		INSERT INTO tracker_worker_claim_buckets(
+			project_id,worker_id,bucket_started_at_ms,claim_requests,jobs_dispatched,policy_version
+		) VALUES($1,$2,$3,1,$4,$5)
+		ON CONFLICT(project_id,worker_id,bucket_started_at_ms) DO UPDATE SET
+			claim_requests=tracker_worker_claim_buckets.claim_requests+1,
+			jobs_dispatched=tracker_worker_claim_buckets.jobs_dispatched+EXCLUDED.jobs_dispatched,
+			policy_version=EXCLUDED.policy_version
+	`, projectID, workerID, bucketStartedAtMS, jobs, policyVersion)
+	return err
 }
 
 func (s *Store) CompleteProjectJobs(ctx context.Context, userID, projectID string, request protocol.ProjectCompleteRequest, now int64) (protocol.BatchResultResponse, error) {

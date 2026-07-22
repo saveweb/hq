@@ -20,6 +20,7 @@ const (
 	ErrorIdentityConflict    = "identity_conflict"
 	ErrorStaleAttempt        = "stale_attempt"
 	ErrorProjectNotActive    = "project_not_active"
+	ErrorProjectRateLimited  = "project_dispatch_rate_limited"
 )
 
 type APIError struct {
@@ -54,15 +55,26 @@ type WARCReceipt struct {
 	Signature  string `json:"signature"`
 }
 type ProjectClaimRequest struct {
-	WorkerID     string   `json:"worker_id"`
-	MaxJobs      int      `json:"max_jobs"`
-	LeaseSeconds int64    `json:"lease_seconds"`
-	AcceptTypes  []string `json:"accept_types"`
+	WorkerID      string   `json:"worker_id"`
+	MaxJobs       int      `json:"max_jobs"`
+	LeaseSeconds  int64    `json:"lease_seconds"`
+	AcceptTypes   []string `json:"accept_types"`
+	PolicyVersion int64    `json:"policy_version"`
 }
 type ProjectClaimResponse struct {
-	ProjectID    string       `json:"project_id"`
-	Jobs         []ClaimedJob `json:"jobs"`
-	RetryAfterMS int64        `json:"retry_after_ms"`
+	ProjectID     string       `json:"project_id"`
+	Jobs          []ClaimedJob `json:"jobs"`
+	RetryAfterMS  int64        `json:"retry_after_ms"`
+	PolicyVersion int64        `json:"policy_version"`
+}
+
+type ProjectPolicy struct {
+	ProjectID       string   `json:"project_id"`
+	DispatchQPS     *float64 `json:"dispatch_qps"`
+	WorkerClaimQPS  *float64 `json:"worker_claim_qps"`
+	MaxJobsPerClaim int      `json:"max_jobs_per_claim"`
+	PolicyVersion   int64    `json:"policy_version"`
+	RefreshAfterMS  int64    `json:"refresh_after_ms"`
 }
 type ProjectCompleteItem struct {
 	JobID        int64         `json:"job_id"`
@@ -111,19 +123,26 @@ type BatchResultResponse struct {
 }
 
 type AdminProjectRequest struct {
-	Status       string `json:"status"`
-	IdentityMode string `json:"identity_mode,omitempty"`
-	ClaimOrder   string `json:"claim_order,omitempty"`
+	Status          string   `json:"status"`
+	IdentityMode    string   `json:"identity_mode,omitempty"`
+	ClaimOrder      string   `json:"claim_order,omitempty"`
+	DispatchQPS     *float64 `json:"dispatch_qps"`
+	WorkerClaimQPS  *float64 `json:"worker_claim_qps"`
+	MaxJobsPerClaim int      `json:"max_jobs_per_claim"`
 }
 
 type AdminProjectSummary struct {
-	ID           string           `json:"id"`
-	Status       string           `json:"status"`
-	IdentityMode string           `json:"identity_mode"`
-	ClaimOrder   string           `json:"claim_order"`
-	JobCounts    map[string]int64 `json:"job_counts"`
-	CreatedAt    int64            `json:"created_at"`
-	UpdatedAt    int64            `json:"updated_at"`
+	ID              string           `json:"id"`
+	Status          string           `json:"status"`
+	IdentityMode    string           `json:"identity_mode"`
+	ClaimOrder      string           `json:"claim_order"`
+	DispatchQPS     *float64         `json:"dispatch_qps"`
+	WorkerClaimQPS  *float64         `json:"worker_claim_qps"`
+	MaxJobsPerClaim int              `json:"max_jobs_per_claim"`
+	PolicyVersion   int64            `json:"policy_version"`
+	JobCounts       map[string]int64 `json:"job_counts"`
+	CreatedAt       int64            `json:"created_at"`
+	UpdatedAt       int64            `json:"updated_at"`
 }
 
 type AdminProjectListResponse struct {

@@ -66,6 +66,23 @@ LOCKED`, assigns a random attempt ID, records the worker ID, and sets a lease
 deadline in one PostgreSQL transaction. A setting change affects later claims
 but does not alter WIP attempts.
 
+Each project has three live claim-policy values. `dispatch_qps` is a hard,
+tracker-owned limit on jobs dispatched across all workers. `worker_claim_qps`
+is a cooperative per-worker request rate applied by official SDKs.
+`max_jobs_per_claim` is enforced by both SDK and tracker. Null QPS values mean
+unlimited; the dispatch fast path then avoids the project row lock entirely.
+`policy_version` increments only when one of these values changes.
+
+The hard dispatch limiter is a continuous token bucket, not a fixed time
+window. Capacity is one job through 1000 QPS. Above 1000 QPS it is the smaller
+of 100 ms of work (`qps / 10` tokens) and the 256-job protocol batch limit.
+Idle time cannot accumulate a larger burst. A claim that finds matching todo
+but lacks a complete token receives retryable 429; no matching todo remains a
+normal empty response. Per-minute `(project, worker)` counters retain the
+client-reported policy version when `worker_claim_qps` is configured, so
+cooperative-limit violations can be audited without adding writes to unlimited
+projects or putting that check on the hot rejection path.
+
 `complete`, `fail`, and `extend-lease` require the current project, internal job ID,
 attempt ID, worker ID, non-expired lease, and `wip` status. A stale mutation is
 rejected per item and cannot affect a later attempt.

@@ -88,7 +88,10 @@ tracker bootstrap-user \
 tracker put-project \
   --database-url "$HQ_DATABASE_URL" \
   --project-id sinavideo \
-  --identity-mode external_id
+  --identity-mode external_id \
+  --dispatch-qps 250 \
+  --worker-claim-qps 0.2 \
+  --max-jobs-per-claim 64
 ```
 
 Pack URLs and import them directly into the project queue:
@@ -120,6 +123,12 @@ HQ generates the key during enqueue unless the administrator supplies
 need to be unique. Switching the setting affects later claims and leaves WIP
 attempts unchanged. For deduplicated jobs, a retry never replaces the stored
 key.
+
+Projects may also set a tracker-enforced `dispatch_qps`, an SDK-enforced
+per-worker `worker_claim_qps`, and `max_jobs_per_claim` (1-256). Omit either QPS
+to leave that limit disabled; this preserves the unlimited fast path. At high
+dispatch rates the tracker permits at most 100 ms of accumulated tokens, while
+lower rates permit no burst larger than one job.
 
 Active members of the configured GitHub organization team can sign in at `/`
 and manage projects, statuses, and bounded job batches. The callback verifies
@@ -200,6 +209,7 @@ own machine token from the OAuth-authenticated worker page.
 All requests use `Authorization: Bearer <machine-token>`. Workers call:
 
 ```text
+GET  /api/v1/projects/{project_id}
 POST /api/v1/projects/{project_id}/jobs/claim
 POST /api/v1/projects/{project_id}/jobs/complete
 POST /api/v1/projects/{project_id}/jobs/fail
@@ -213,7 +223,8 @@ an attempt.
 
 The Go SDK exposes `worker.OpenProjectQueue`; the Python SDK exposes
 `open_project_queue`. Both call the project queue directly and contain no
-routing or inbound-server lifecycle.
+routing or inbound-server lifecycle. They refresh project policy, clamp claim
+batches, pace each worker's claims, and retry explicit retryable 429 responses.
 
 See [design.md](./design.md) for state semantics and
 [operations.md](./operations.md) for the minimal runbook.

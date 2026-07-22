@@ -58,10 +58,20 @@ type GitHubIdentity struct {
 }
 
 type Project struct {
-	ID           string
-	Status       string
-	IdentityMode string
-	ClaimOrder   string
+	ID              string
+	Status          string
+	IdentityMode    string
+	ClaimOrder      string
+	DispatchQPS     *float64
+	WorkerClaimQPS  *float64
+	MaxJobsPerClaim int
+	PolicyVersion   int64
+}
+
+type ProjectClaimResult struct {
+	Jobs          []protocol.ClaimedJob
+	RetryAfterMS  int64
+	PolicyVersion int64
 }
 
 const (

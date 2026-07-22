@@ -37,7 +37,7 @@ func TestClaimProjectJobsRequest(t *testing.T) {
 				"Content-Type":  []string{"application/json"},
 				"Cache-Control": []string{"no-store"},
 			},
-			Body: io.NopCloser(strings.NewReader(`{"project_id":"project-1","jobs":[],"retry_after_ms":1000}`)),
+			Body: io.NopCloser(strings.NewReader(`{"project_id":"project-1","jobs":[],"retry_after_ms":1000,"policy_version":1}`)),
 		}, nil
 	})
 	client, err := New(Config{
@@ -47,7 +47,7 @@ func TestClaimProjectJobsRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := client.ClaimProjectJobs(context.Background(), "project-1", protocol.ProjectClaimRequest{WorkerID: "worker-1", MaxJobs: 1, LeaseSeconds: 30})
+	response, err := client.ClaimProjectJobs(context.Background(), "project-1", protocol.ProjectClaimRequest{WorkerID: "worker-1", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1})
 	if err != nil || response.ProjectID != "project-1" || response.Jobs == nil {
 		t.Fatalf("response = %+v, %v", response, err)
 	}
@@ -88,7 +88,7 @@ func TestAdminProjectAndEnqueueSourceRequests(t *testing.T) {
 			if request.Method != http.MethodGet || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo" {
 				t.Fatalf("project request = %s %s", request.Method, request.URL)
 			}
-			body = `{"id":"demo","status":"active","identity_mode":"external_id","claim_order":"fifo","job_counts":{},"created_at":1,"updated_at":1}`
+			body = `{"id":"demo","status":"active","identity_mode":"external_id","claim_order":"fifo","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"policy_version":1,"job_counts":{},"created_at":1,"updated_at":1}`
 		case 2:
 			if request.Method != http.MethodPost || request.URL.String() != "https://hq.test/api/v1/admin/projects/demo/jobs" || request.Header.Get("Content-Type") != "application/json" {
 				t.Fatalf("jobs request = %s %s headers=%v", request.Method, request.URL, request.Header)

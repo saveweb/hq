@@ -92,6 +92,11 @@ func (c *Client) ClaimProjectJobs(ctx context.Context, projectID string, request
 	err := c.doJSON(ctx, projectJobsPath(projectID)+"/claim", request, &result)
 	return result, err
 }
+func (c *Client) ProjectPolicy(ctx context.Context, projectID string) (protocol.ProjectPolicy, error) {
+	var result protocol.ProjectPolicy
+	err := c.do(ctx, http.MethodGet, "/api/v1/projects/"+url.PathEscape(projectID), "", nil, &result)
+	return result, err
+}
 func (c *Client) CompleteProjectJobs(ctx context.Context, projectID string, request protocol.ProjectCompleteRequest) (protocol.BatchResultResponse, error) {
 	var result protocol.BatchResultResponse
 	err := c.doJSON(ctx, projectJobsPath(projectID)+"/complete", request, &result)

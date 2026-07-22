@@ -149,6 +149,18 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AdminEnqueueJobsResponse'}
         default: {$ref: '#/components/responses/Error'}
+  /api/v1/projects/{project_id}:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    get:
+      operationId: getProjectPolicy
+      description: Returns the active worker policy used by SDK claim pacing.
+      responses:
+        '200':
+          description: Current project policy
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectPolicy'}
+        default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/projects/{project_id}/source:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
     post:
@@ -210,6 +222,14 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ProjectClaimResponse'}
+        '429':
+          description: The project dispatch bucket has no complete job token.
+          headers:
+            Retry-After:
+              schema: {type: integer, minimum: 0}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/projects/{project_id}/jobs/complete:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
@@ -327,20 +347,27 @@ components:
     AdminProjectRequest:
       type: object
       additionalProperties: false
-      required: [status]
+      required: [status, dispatch_qps, worker_claim_qps, max_jobs_per_claim]
       properties:
         status: {type: string, enum: [active, draining, archived]}
         identity_mode: {type: string, enum: [none, external_id, unique_value]}
         claim_order: {type: string, enum: [fifo, random]}
+        dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
+        worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
+        max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, identity_mode, claim_order, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, policy_version, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
         identity_mode: {type: string, enum: [none, external_id, unique_value]}
         claim_order: {type: string, enum: [fifo, random]}
+        dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
+        worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
+        max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        policy_version: {type: integer, format: int64, minimum: 1}
         job_counts: {$ref: '#/components/schemas/JobCounts'}
         created_at: {type: integer, format: int64}
         updated_at: {type: integer, format: int64}
@@ -444,20 +471,33 @@ components:
     ProjectClaimRequest:
       type: object
       additionalProperties: false
-      required: [worker_id, max_jobs, lease_seconds, accept_types]
+      required: [worker_id, max_jobs, lease_seconds, accept_types, policy_version]
       properties:
         worker_id: {$ref: '#/components/schemas/Identifier'}
         max_jobs: {type: integer, minimum: 1, maximum: 256}
         lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
         accept_types: {type: array, maxItems: 16, items: {type: string, enum: [seed, asset]}}
+        policy_version: {type: integer, format: int64, minimum: 1}
     ProjectClaimResponse:
       type: object
       additionalProperties: false
-      required: [project_id, jobs, retry_after_ms]
+      required: [project_id, jobs, retry_after_ms, policy_version]
       properties:
         project_id: {$ref: '#/components/schemas/Identifier'}
         jobs: {type: array, items: {$ref: '#/components/schemas/ClaimedJob'}}
         retry_after_ms: {type: integer, format: int64, minimum: 0}
+        policy_version: {type: integer, format: int64, minimum: 1}
+    ProjectPolicy:
+      type: object
+      additionalProperties: false
+      required: [project_id, dispatch_qps, worker_claim_qps, max_jobs_per_claim, policy_version, refresh_after_ms]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        dispatch_qps: {type: [number, 'null'], exclusiveMinimum: 0}
+        worker_claim_qps: {type: [number, 'null'], exclusiveMinimum: 0}
+        max_jobs_per_claim: {type: integer, minimum: 1, maximum: 256}
+        policy_version: {type: integer, format: int64, minimum: 1}
+        refresh_after_ms: {type: integer, format: int64, minimum: 1}
     Outcome:
       type: object
       additionalProperties: false

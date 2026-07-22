@@ -71,13 +71,13 @@ python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"
 
 # Create a project and enqueue a mixed workload entirely through the admin API.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
-  -X PUT -d '{"status":"active","identity_mode":"external_id"}' \
+  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/project.json"
 python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and p["identity_mode"] == "external_id" and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
 
 # Upload the packed source format through a separate project.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
-  -X PUT -d '{"status":"active","identity_mode":"external_id"}' \
+  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256}' \
   "${base}/api/v1/admin/projects/source-e2e" >"${run_dir}/source-project.json"
 printf 'https://example.test/source\n' >"${run_dir}/source-values.txt"
 "${run_dir}/source" pack --identity-mode external_id \
@@ -92,7 +92,7 @@ test "${status}" = 204
 
 # Enqueue count is constrained by the JSON body limit, not the worker batch limit.
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
-  -X PUT -d '{"status":"active","identity_mode":"external_id"}' \
+  -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256}' \
   "${base}/api/v1/admin/projects/large-enqueue-e2e" >"${run_dir}/large-project.json"
 python3 -c 'import json,sys; json.dump({"jobs":[{"id":f"large-{i}","value":str(i)} for i in range(300)]},open(sys.argv[1],"w"))' "${run_dir}/large-enqueue.json"
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
@@ -144,7 +144,7 @@ python3 -c 'import json,sys; ps=json.load(open(sys.argv[1]))["projects"]; assert
 
 # Claim only seeds, extend one lease, complete one, and retry the other.
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
-  -d '{"worker_id":"worker-e2e","max_jobs":2,"lease_seconds":300,"accept_types":["seed"]}' \
+  -d '{"worker_id":"worker-e2e","max_jobs":2,"lease_seconds":300,"accept_types":["seed"],"policy_version":1}' \
   "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/seeds.json"
 read -r seed1 attempt1 seed2 attempt2 < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==2 and all(x["type"]=="seed" for x in j); print(j[0]["job_id"],j[0]["attempt_id"],j[1]["job_id"],j[1]["attempt_id"])' "${run_dir}/seeds.json")
 
@@ -180,7 +180,7 @@ python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; asser
 
 # Claim assets separately; one succeeds and one is permanently failed.
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
-  -d '{"worker_id":"worker-e2e","max_jobs":2,"lease_seconds":300,"accept_types":["asset"]}' \
+  -d '{"worker_id":"worker-e2e","max_jobs":2,"lease_seconds":300,"accept_types":["asset"],"policy_version":1}' \
   "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/assets.json"
 read -r asset1 asset_attempt1 asset2 asset_attempt2 < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==2 and all(x["type"]=="asset" for x in j); print(j[0]["job_id"],j[0]["attempt_id"],j[1]["job_id"],j[1]["attempt_id"])' "${run_dir}/assets.json")
 printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","retryable":false,"error":{"code":"not_found","message":"permanent","details":{}}}]}' \
@@ -196,7 +196,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${
 
 # Reclaim and finish the retryable seed.
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
-  -d '{"worker_id":"worker-e2e","max_jobs":10,"lease_seconds":300,"accept_types":[]}' \
+  -d '{"worker_id":"worker-e2e","max_jobs":10,"lease_seconds":300,"accept_types":[],"policy_version":1}' \
   "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/retry-claim.json"
 read -r retry_job retry_attempt < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==1; print(j[0]["job_id"],j[0]["attempt_id"])' "${run_dir}/retry-claim.json")
 test "${retry_job}" = "${seed2}"
@@ -206,15 +206,15 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${
   "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-retry-result.json"
 
 # Draining stops scheduling, and archived projects reject new jobs.
-curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"draining"}' \
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"draining","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/draining.json"
 status=$(curl --silent --output "${run_dir}/draining-claim.json" --write-out '%{http_code}' \
-  "${worker[@]}" "${json[@]}" -d '{"worker_id":"worker-e2e","max_jobs":1,"lease_seconds":30,"accept_types":[]}' \
+  "${worker[@]}" "${json[@]}" -d '{"worker_id":"worker-e2e","max_jobs":1,"lease_seconds":30,"accept_types":[],"policy_version":1}' \
   "${base}/api/v1/projects/project-e2e/jobs/claim")
 test "${status}" = 409
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"] == "project_not_active"' "${run_dir}/draining-claim.json"
 
-curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"archived"}' \
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X PUT -d '{"status":"archived","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256}' \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/archived.json"
 status=$(curl --silent --output "${run_dir}/archived-enqueue.json" --write-out '%{http_code}' \
   "${admin[@]}" "${json[@]}" -d '{"jobs":[{"id":"late-job","value":"https://example.test/late","type":"seed","via":null,"attr":{}}]}' \

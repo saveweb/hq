@@ -18,6 +18,23 @@ func TestRoleValidation(t *testing.T) {
 	}
 }
 
+func TestOptionalQPSAcceptsAnyPositiveFiniteFloat(t *testing.T) {
+	for _, raw := range []string{"1e-300", "0.1", "1000", "1e300"} {
+		value, err := parseOptionalQPS(raw)
+		if err != nil || value == nil || *value <= 0 {
+			t.Fatalf("parseOptionalQPS(%q) = %v, %v", raw, value, err)
+		}
+	}
+	for _, raw := range []string{"0", "-1", "NaN", "Inf"} {
+		if _, err := parseOptionalQPS(raw); err == nil {
+			t.Fatalf("parseOptionalQPS(%q) succeeded", raw)
+		}
+	}
+	if value, err := parseOptionalQPS(""); err != nil || value != nil {
+		t.Fatalf("empty QPS = %v, %v", value, err)
+	}
+}
+
 func TestWebKeygenCreatesPrivateSecret(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "web.secret")
 	if err := runWebKeygen([]string{"--out", path}); err != nil {

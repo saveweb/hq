@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -151,6 +153,9 @@ func runPutProject(args []string) error {
 	status := flags.String("status", tracker.ProjectStatusActive, "active, draining, or archived")
 	identityMode := flags.String("identity-mode", "", "creation mode: none, external_id, or unique_value; defaults to external_id")
 	claimOrder := flags.String("claim-order", "", "claim order: fifo or random; defaults to fifo")
+	dispatchQPSRaw := flags.String("dispatch-qps", "", "project job dispatch QPS; empty means unlimited")
+	workerClaimQPSRaw := flags.String("worker-claim-qps", "", "per-worker claim QPS; empty means unlimited")
+	maxJobsPerClaim := flags.Int("max-jobs-per-claim", 256, "maximum jobs returned by one claim")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -164,7 +169,29 @@ func runPutProject(args []string) error {
 		return err
 	}
 	defer store.Close()
-	return store.PutProject(ctx, tracker.Project{ID: *projectID, Status: *status, IdentityMode: *identityMode, ClaimOrder: *claimOrder}, time.Now().Unix())
+	dispatchQPS, err := parseOptionalQPS(*dispatchQPSRaw)
+	if err != nil {
+		return fmt.Errorf("put-project: dispatch-qps: %w", err)
+	}
+	workerClaimQPS, err := parseOptionalQPS(*workerClaimQPSRaw)
+	if err != nil {
+		return fmt.Errorf("put-project: worker-claim-qps: %w", err)
+	}
+	return store.PutProject(ctx, tracker.Project{
+		ID: *projectID, Status: *status, IdentityMode: *identityMode, ClaimOrder: *claimOrder,
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: *maxJobsPerClaim,
+	}, time.Now().Unix())
+}
+
+func parseOptionalQPS(raw string) (*float64, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil, fmt.Errorf("must be a positive finite number")
+	}
+	return &value, nil
 }
 
 func runEnqueueSource(args []string) error {
@@ -229,7 +256,12 @@ func runServe(args []string, logger *slog.Logger) error {
 		return err
 	}
 	defer store.Close()
-	handler := projectqueuehttp.New(store, func() int64 { return time.Now().Unix() }, logger)
+	handler := projectqueuehttp.New(
+		store,
+		func() int64 { return time.Now().Unix() },
+		func() int64 { return time.Now().UnixNano() },
+		logger,
+	)
 	webValues := []string{*publicURL, *githubClientID, *githubClientSecretFile, *webSessionSecretFile, *oauthAdminOrganization, *oauthAdminTeam}
 	webEnabled := false
 	for _, value := range webValues {

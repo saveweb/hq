@@ -27,6 +27,7 @@ def test_openapi_contract_has_all_v1_operations() -> None:
         "/api/v1/admin/projects/{project_id}/jobs/{job_id}": {"get", "delete"},
         "/api/v1/admin/projects/{project_id}/jobs/{job_id}/requeue": {"post"},
         "/api/v1/projects/{project_id}/jobs/claim": {"post"},
+        "/api/v1/projects/{project_id}": {"get"},
         "/api/v1/projects/{project_id}/jobs/complete": {"post"},
         "/api/v1/projects/{project_id}/jobs/fail": {"post"},
         "/api/v1/projects/{project_id}/jobs/extend-lease": {"post"},

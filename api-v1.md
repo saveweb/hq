@@ -33,8 +33,11 @@ DELETE /api/v1/admin/users/{user_id}/machine-token
 `archived`. Creation may set `identity_mode` to `none`, `external_id`, or
 `unique_value`; omitted mode defaults to `external_id`. The mode is immutable.
 `claim_order` is `fifo` or `random`, defaults to `fifo`, and may be changed at
-any time. Project responses include both settings and `todo`, `wip`, `done`,
-`failed`, and `reset_exhausted` counts.
+any time. `dispatch_qps` and `worker_claim_qps` are either `null` or any positive
+finite number. `max_jobs_per_claim` is 1-256 and defaults to 256. A server-owned
+`policy_version` starts at 1 and increases only when one of those three policy
+values changes. Project responses include these settings and `todo`, `wip`,
+`done`, `failed`, and `reset_exhausted` counts.
 
 The jobs endpoint accepts one or more JobSpecs within the 8 MiB JSON request
 body limit. `value` is required; `type`, `via`, `hops`, `attr`, and the signed
@@ -86,19 +89,38 @@ machine token. The worker page keeps the value hidden until the user chooses
 ## Claim
 
 ```text
+GET  /api/v1/projects/{project_id}
 POST /api/v1/projects/{project_id}/jobs/claim
 ```
 
-Request fields are `worker_id`, `max_jobs` (1-256), `lease_seconds` (1-3600),
-and `accept_types`. A successful response contains the project ID, claimed
-JobSpecs, internal numeric job IDs, unique attempt IDs, lease deadlines, and a
-retry delay. Workers use `job_id`, not an optional source `id`, for mutations.
+The GET returns the current claim policy and a refresh interval. Claim request
+fields are `worker_id`, `max_jobs` (1-256), `lease_seconds` (1-3600),
+`accept_types`, and the fetched `policy_version`. The tracker clamps `max_jobs`
+again to the project policy. A successful response contains the project ID,
+claimed JobSpecs, internal numeric job IDs, unique attempt IDs, lease deadlines,
+a retry delay, and the current policy version. Workers use `job_id`, not an
+optional source `id`, for mutations.
 
 Claims use one PostgreSQL transaction and `FOR UPDATE SKIP LOCKED`. An expired
 attempt is reset before new rows are selected. FIFO projects order eligible
 jobs by creation time and internal job ID. Random projects order them by the
 stored random key and internal job ID. Changing the project setting affects
 subsequent claims without changing WIP attempts.
+
+When `dispatch_qps` is set, the tracker uses a continuous token bucket under the
+project row lock. Rates up to and including 1000 QPS have capacity one; higher
+rates have capacity `min(dispatch_qps / 10, 256)`, limiting accumulated work to
+100 ms and one protocol batch. This avoids cold-start bursts while retaining
+practical batch claims at high throughput. If matching todo jobs exist but no
+full token is available, claim
+returns retryable HTTP 429 with a precise JSON `retry_after_ms` and a rounded-up
+`Retry-After` header. A genuinely empty queue returns HTTP 200 with `jobs: []`.
+
+Official SDKs refresh policy, apply `worker_claim_qps` with a monotonic clock and
+a random initial phase plus positive ongoing jitter, and retry only explicit
+retryable 429 responses. The tracker does not reject excess per-worker request
+rates; when `worker_claim_qps` is configured, it records per-minute worker claim
+buckets for later audit.
 
 ## Complete
 

@@ -52,22 +52,28 @@ class TrackerClient:
     def project_jobs(
         self, project_id: str, operation: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        body = _dumps(payload)
+        return self._request(
+            "POST", f"/api/v1/projects/{quote(project_id, safe='')}/jobs/{operation}", payload
+        )
+
+    def project_policy(self, project_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/projects/{quote(project_id, safe='')}")
+
+    def _request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        body = None if payload is None else _dumps(payload)
         headers = {
             **self._headers,
             "Accept": "application/json",
-            "Content-Type": "application/json",
             "Cache-Control": "no-store",
         }
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         with self._lock:
             try:
                 connection = self._get_connection()
-                connection.request(
-                    "POST",
-                    f"{self._base_path}/api/v1/projects/{quote(project_id, safe='')}/jobs/{operation}",
-                    body=body,
-                    headers=headers,
-                )
+                connection.request(method, f"{self._base_path}{path}", body=body, headers=headers)
                 response = connection.getresponse()
                 raw = response.read((8 << 20) + 1)
             except (OSError, ssl.SSLError, http.client.HTTPException) as error:

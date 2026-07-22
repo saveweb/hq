@@ -22,3 +22,9 @@ with open_project_queue(
 
 `complete`, `fail`, and `extend_lease` accept bounded lists matching the
 Project Queue OpenAPI contract.
+
+Before claiming, the SDK periodically fetches project policy, clamps the batch
+size, and applies the cooperative per-worker claim rate with monotonic timing
+and a randomized initial phase. Explicit retryable HTTP 429 responses are
+delayed using their precise `retry_after_ms` and retried automatically. Other
+transport and API errors are returned to the caller.

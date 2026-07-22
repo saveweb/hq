@@ -33,9 +33,10 @@ const (
 type handler struct {
 	store *postgres.Store
 	now   func() int64
+	nowNS func() int64
 }
 
-func New(store *postgres.Store, now func() int64, logger *slog.Logger) *echo.Echo {
+func New(store *postgres.Store, now, nowNS func() int64, logger *slog.Logger) *echo.Echo {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -74,12 +75,12 @@ func New(store *postgres.Store, now func() int64, logger *slog.Logger) *echo.Ech
 		}
 	})
 	server.GET("/healthz", func(ctx *echo.Context) error { return ctx.JSON(http.StatusOK, map[string]string{"status": "ok"}) })
-	Register(server, store, now)
+	Register(server, store, now, nowNS)
 	return server
 }
 
-func Register(server *echo.Echo, store *postgres.Store, now func() int64) {
-	h := &handler{store: store, now: now}
+func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64) {
+	h := &handler{store: store, now: now, nowNS: nowNS}
 	server.GET("/api/v1/admin/projects", h.listProjects)
 	server.GET("/api/v1/admin/users", h.listUsers)
 	server.PUT("/api/v1/admin/users/:user_id", h.putUser)
@@ -96,6 +97,7 @@ func Register(server *echo.Echo, store *postgres.Store, now func() int64) {
 	server.GET("/api/v1/admin/projects/:project_id/jobs/:job_id", h.getJob)
 	server.POST("/api/v1/admin/projects/:project_id/jobs/:job_id/requeue", h.requeueJob)
 	server.DELETE("/api/v1/admin/projects/:project_id/jobs/:job_id", h.deleteJob)
+	server.GET("/api/v1/projects/:project_id", h.projectPolicy)
 	server.POST("/api/v1/projects/:project_id/jobs/claim", h.claim)
 	server.POST("/api/v1/projects/:project_id/jobs/complete", h.complete)
 	server.POST("/api/v1/projects/:project_id/jobs/fail", h.fail)
@@ -209,7 +211,10 @@ func (h *handler) putProject(ctx *echo.Context) error {
 		return nil
 	}
 	projectID := ctx.Param("project_id")
-	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode, ClaimOrder: request.ClaimOrder}, h.now()); err != nil {
+	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{
+		ID: projectID, Status: request.Status, IdentityMode: request.IdentityMode, ClaimOrder: request.ClaimOrder,
+		DispatchQPS: request.DispatchQPS, WorkerClaimQPS: request.WorkerClaimQPS, MaxJobsPerClaim: request.MaxJobsPerClaim,
+	}, h.now()); err != nil {
 		return h.writeError(ctx, err)
 	}
 	project, err := h.store.ProjectSummary(ctx.Request().Context(), projectID)
@@ -355,11 +360,26 @@ func (h *handler) claim(ctx *echo.Context) error {
 	if !h.decode(ctx, &request) {
 		return nil
 	}
-	jobs, err := h.store.ClaimProjectJobs(ctx.Request().Context(), user.ID, ctx.Param("project_id"), request, h.now())
+	result, err := h.store.ClaimProjectJobs(ctx.Request().Context(), user.ID, ctx.Param("project_id"), request, h.nowNS())
 	if err != nil {
 		return h.writeError(ctx, err)
 	}
-	return ctx.JSON(http.StatusOK, protocol.ProjectClaimResponse{ProjectID: ctx.Param("project_id"), Jobs: jobs, RetryAfterMS: 1000})
+	return ctx.JSON(http.StatusOK, protocol.ProjectClaimResponse{
+		ProjectID: ctx.Param("project_id"), Jobs: result.Jobs,
+		RetryAfterMS: result.RetryAfterMS, PolicyVersion: result.PolicyVersion,
+	})
+}
+
+func (h *handler) projectPolicy(ctx *echo.Context) error {
+	user, ok := h.authenticate(ctx)
+	if !ok {
+		return nil
+	}
+	policy, err := h.store.ProjectPolicy(ctx.Request().Context(), user.ID, ctx.Param("project_id"))
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, policy)
 }
 
 func (h *handler) complete(ctx *echo.Context) error {
@@ -459,8 +479,16 @@ func (h *handler) writeError(ctx *echo.Context, err error) error {
 		status = http.StatusNotFound
 	case protocol.ErrorInvalidRequest, protocol.ErrorInvalidJob:
 		status = http.StatusBadRequest
+	case protocol.ErrorProjectRateLimited:
+		status = http.StatusTooManyRequests
 	}
-	return h.writeAPIError(ctx, status, protocol.APIError{Code: domainError.Code, Message: domainError.Message, Retryable: domainError.Retryable})
+	if status == http.StatusTooManyRequests && domainError.RetryAfter > 0 {
+		ctx.Response().Header().Set("Retry-After", strconv.FormatInt((domainError.RetryAfter+999)/1000, 10))
+	}
+	return h.writeAPIError(ctx, status, protocol.APIError{
+		Code: domainError.Code, Message: domainError.Message, Retryable: domainError.Retryable,
+		RetryAfterMS: domainError.RetryAfter, Details: protocol.Attrs(domainError.Details),
+	})
 }
 
 func (h *handler) writeAPIError(ctx *echo.Context, status int, value protocol.APIError) error {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -441,14 +442,18 @@ func (h *Handler) project(ctx *echo.Context) error {
 			AdminProjectSummary: project,
 			CreatedAt:           formatUnixTime(project.CreatedAt),
 			UpdatedAt:           formatUnixTime(project.UpdatedAt),
+			DispatchQPS:         optionalFloatValue(project.DispatchQPS),
+			WorkerClaimQPS:      optionalFloatValue(project.WorkerClaimQPS),
 		}, "Jobs": jobs.Jobs, "CSRF": h.csrfToken(sessionToken), "JobExample": jobExample(project.IdentityMode),
 	})
 }
 
 type projectView struct {
 	protocol.AdminProjectSummary
-	CreatedAt string
-	UpdatedAt string
+	CreatedAt      string
+	UpdatedAt      string
+	DispatchQPS    string
+	WorkerClaimQPS string
 }
 
 func (h *Handler) createProject(ctx *echo.Context) error {
@@ -456,7 +461,15 @@ func (h *Handler) createProject(ctx *echo.Context) error {
 	if !ok {
 		return nil
 	}
-	project := tracker.Project{ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"), IdentityMode: ctx.FormValue("identity_mode"), ClaimOrder: ctx.FormValue("claim_order")}
+	dispatchQPS, workerClaimQPS, maxJobs, err := projectPolicyForm(ctx)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Project policy is invalid")
+	}
+	project := tracker.Project{
+		ID: ctx.FormValue("project_id"), Status: ctx.FormValue("status"),
+		IdentityMode: ctx.FormValue("identity_mode"), ClaimOrder: ctx.FormValue("claim_order"),
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs,
+	}
 	if err := h.store.PutProject(ctx.Request().Context(), project, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
@@ -476,10 +489,55 @@ func (h *Handler) updateProjectStatus(ctx *echo.Context) error {
 		return nil
 	}
 	projectID := ctx.Param("project_id")
-	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{ID: projectID, Status: ctx.FormValue("status"), ClaimOrder: ctx.FormValue("claim_order")}, h.clock()); err != nil {
+	dispatchQPS, workerClaimQPS, maxJobs, err := projectPolicyForm(ctx)
+	if err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Project policy is invalid")
+	}
+	if err := h.store.PutProject(ctx.Request().Context(), tracker.Project{
+		ID: projectID, Status: ctx.FormValue("status"), ClaimOrder: ctx.FormValue("claim_order"),
+		DispatchQPS: dispatchQPS, WorkerClaimQPS: workerClaimQPS, MaxJobsPerClaim: maxJobs,
+	}, h.clock()); err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Project update was rejected")
 	}
 	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
+}
+
+func projectPolicyForm(ctx *echo.Context) (*float64, *float64, int, error) {
+	dispatchQPS, err := optionalPositiveFloat(ctx.FormValue("dispatch_qps"))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	workerClaimQPS, err := optionalPositiveFloat(ctx.FormValue("worker_claim_qps"))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	maxJobs := 256
+	if raw := strings.TrimSpace(ctx.FormValue("max_jobs_per_claim")); raw != "" {
+		maxJobs, err = strconv.Atoi(raw)
+		if err != nil || maxJobs < 1 || maxJobs > 256 {
+			return nil, nil, 0, fmt.Errorf("invalid max jobs per claim")
+		}
+	}
+	return dispatchQPS, workerClaimQPS, maxJobs, nil
+}
+
+func optionalPositiveFloat(raw string) (*float64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil, fmt.Errorf("invalid positive number")
+	}
+	return &value, nil
+}
+
+func optionalFloatValue(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*value, 'g', -1, 64)
 }
 
 func (h *Handler) deleteProject(ctx *echo.Context) error {

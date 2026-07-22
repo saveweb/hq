@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -200,11 +201,11 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatalf("job detail = %+v, %v", job, err)
 	}
 
-	claimed, err := store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 1, LeaseSeconds: 300}, now+3)
-	if err != nil || len(claimed) != 1 || claimed[0].Value != "https://example.test/1" {
+	claimed, err := store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 1, LeaseSeconds: 300, PolicyVersion: 1}, (now+3)*1_000_000_000)
+	if err != nil || len(claimed.Jobs) != 1 || claimed.Jobs[0].Value != "https://example.test/1" {
 		t.Fatalf("claim = %+v, %v", claimed, err)
 	}
-	item := claimed[0]
+	item := claimed.Jobs[0]
 	receipt := protocol.WARCReceipt{ID: "receipt-1", Issuer: "https://warc.test", ObjectID: "warc/object-1", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 1234, AcceptedAt: now + 4, Signature: "test-signature"}
 	completed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: "success", Meta: protocol.Attrs{}}, WARCReceipts: []protocol.WARCReceipt{receipt}}}}, now+5)
 	if err != nil || len(completed.Results) != 1 || completed.Results[0].Status != protocol.ItemStatusApplied {
@@ -215,41 +216,41 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatalf("replayed complete = %+v, %v", replayed, err)
 	}
 
-	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 1, LeaseSeconds: 300}, now+7)
-	if err != nil || len(claimed) != 1 {
+	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 1, LeaseSeconds: 300, PolicyVersion: 1}, (now+7)*1_000_000_000)
+	if err != nil || len(claimed.Jobs) != 1 {
 		t.Fatalf("second claim = %+v, %v", claimed, err)
 	}
-	extended, err := store.ExtendProjectJobLeases(ctx, "queue-worker", "queue-project", protocol.ProjectExtendLeaseRequest{WorkerID: "worker-process-1", ExtendSeconds: 600, Items: []protocol.AttemptRef{{JobID: claimed[0].JobID, AttemptID: claimed[0].AttemptID}}}, now+8)
+	extended, err := store.ExtendProjectJobLeases(ctx, "queue-worker", "queue-project", protocol.ProjectExtendLeaseRequest{WorkerID: "worker-process-1", ExtendSeconds: 600, Items: []protocol.AttemptRef{{JobID: claimed.Jobs[0].JobID, AttemptID: claimed.Jobs[0].AttemptID}}}, now+8)
 	if err != nil || extended.Results[0].Status != protocol.ItemStatusApplied || *extended.Results[0].LeaseExpiresAt != now+608 {
 		t.Fatalf("extend lease = %+v, %v", extended, err)
 	}
-	failed, err := store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-1", Items: []protocol.FailItem{{JobID: claimed[0].JobID, AttemptID: claimed[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "retry", Details: protocol.Attrs{}}}}}, now+9)
+	failed, err := store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-1", Items: []protocol.FailItem{{JobID: claimed.Jobs[0].JobID, AttemptID: claimed.Jobs[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "retry", Details: protocol.Attrs{}}}}}, now+9)
 	if err != nil || failed.Results[0].Status != protocol.ItemStatusApplied || *failed.Results[0].JobStatus != protocol.JobStatusTodo {
 		t.Fatalf("retryable fail = %+v, %v", failed, err)
 	}
 
-	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 1, LeaseSeconds: 1, AcceptTypes: []string{protocol.JobTypeSeed}}, now+10)
-	if err != nil || len(claimed) != 1 || claimed[0].Type != protocol.JobTypeSeed {
+	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 1, LeaseSeconds: 1, AcceptTypes: []string{protocol.JobTypeSeed}, PolicyVersion: 1}, (now+10)*1_000_000_000)
+	if err != nil || len(claimed.Jobs) != 1 || claimed.Jobs[0].Type != protocol.JobTypeSeed {
 		t.Fatalf("normalized claim = %+v, %v", claimed, err)
 	}
-	expiredAttempt := claimed[0]
-	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-2", MaxJobs: 1, LeaseSeconds: 30}, now+12)
-	if err != nil || len(claimed) != 1 || claimed[0].AttemptID == expiredAttempt.AttemptID {
+	expiredAttempt := claimed.Jobs[0]
+	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-2", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1}, (now+12)*1_000_000_000)
+	if err != nil || len(claimed.Jobs) != 1 || claimed.Jobs[0].AttemptID == expiredAttempt.AttemptID {
 		t.Fatalf("reclaim expired lease = %+v, %v", claimed, err)
 	}
 	stale, err := store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-1", Items: []protocol.FailItem{{JobID: expiredAttempt.JobID, AttemptID: expiredAttempt.AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "stale", Details: protocol.Attrs{}}}}}, now+13)
 	if err != nil || stale.Results[0].Status != protocol.ItemStatusRejected {
 		t.Fatalf("stale expired attempt = %+v, %v", stale, err)
 	}
-	failed, err = store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-2", Items: []protocol.FailItem{{JobID: claimed[0].JobID, AttemptID: claimed[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "retry", Details: protocol.Attrs{}}}}}, now+14)
+	failed, err = store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-2", Items: []protocol.FailItem{{JobID: claimed.Jobs[0].JobID, AttemptID: claimed.Jobs[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "retry", Details: protocol.Attrs{}}}}}, now+14)
 	if err != nil || *failed.Results[0].JobStatus != protocol.JobStatusTodo {
 		t.Fatalf("third reset = %+v, %v", failed, err)
 	}
-	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-2", MaxJobs: 1, LeaseSeconds: 30}, now+15)
-	if err != nil || len(claimed) != 1 {
+	claimed, err = store.ClaimProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-2", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1}, (now+15)*1_000_000_000)
+	if err != nil || len(claimed.Jobs) != 1 {
 		t.Fatalf("final claim = %+v, %v", claimed, err)
 	}
-	failed, err = store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-2", Items: []protocol.FailItem{{JobID: claimed[0].JobID, AttemptID: claimed[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "exhaust", Details: protocol.Attrs{}}}}}, now+16)
+	failed, err = store.FailProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectFailRequest{WorkerID: "worker-process-2", Items: []protocol.FailItem{{JobID: claimed.Jobs[0].JobID, AttemptID: claimed.Jobs[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "exhaust", Details: protocol.Attrs{}}}}}, now+16)
 	if err != nil || *failed.Results[0].JobStatus != protocol.JobStatusResetExhausted {
 		t.Fatalf("reset exhaustion = %+v, %v", failed, err)
 	}
@@ -262,10 +263,10 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err != nil || project.JobCounts[protocol.JobStatusDone] != 1 || project.JobCounts[protocol.JobStatusResetExhausted] != 1 {
 		t.Fatalf("final project summary = %+v, %v", project, err)
 	}
-	if err := store.RequeueProjectJob(ctx, "queue-project", claimed[0].JobID, now+17); err != nil {
+	if err := store.RequeueProjectJob(ctx, "queue-project", claimed.Jobs[0].JobID, now+17); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeleteProjectJob(ctx, "queue-project", claimed[0].JobID); err != nil {
+	if err := store.DeleteProjectJob(ctx, "queue-project", claimed.Jobs[0].JobID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -277,11 +278,11 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if inserted, err := store.EnqueueProjectJobs(ctx, "random-project", randomJobs, now+19); err != nil || inserted != 2 {
 		t.Fatalf("random enqueue = %d, %v", inserted, err)
 	}
-	randomClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "random-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 2, LeaseSeconds: 300}, now+20)
-	if err != nil || len(randomClaim) != 2 || randomClaim[0].Value != "low" || randomClaim[1].Value != "high" {
+	randomClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "random-project", protocol.ProjectClaimRequest{WorkerID: "worker-process-1", MaxJobs: 2, LeaseSeconds: 300, PolicyVersion: 1}, (now+20)*1_000_000_000)
+	if err != nil || len(randomClaim.Jobs) != 2 || randomClaim.Jobs[0].Value != "low" || randomClaim.Jobs[1].Value != "high" {
 		t.Fatalf("random claim = %+v, %v", randomClaim, err)
 	}
-	storedLow, err := store.ProjectJob(ctx, "random-project", randomClaim[0].JobID)
+	storedLow, err := store.ProjectJob(ctx, "random-project", randomClaim.Jobs[0].JobID)
 	if err != nil || storedLow.RandomKey != low {
 		t.Fatalf("stored random key = %+v, %v", storedLow, err)
 	}
@@ -291,6 +292,159 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	randomProject, err := store.ProjectSummary(ctx, "random-project")
 	if err != nil || randomProject.ClaimOrder != tracker.ClaimOrderFIFO {
 		t.Fatalf("switched project = %+v, %v", randomProject, err)
+	}
+
+	dispatchQPS, workerClaimQPS := 2.5, 0.1
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "limited-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		DispatchQPS: &dispatchQPS, WorkerClaimQPS: &workerClaimQPS, MaxJobsPerClaim: 8,
+	}, now+22); err != nil {
+		t.Fatal(err)
+	}
+	limitedPolicy, err := store.ProjectPolicy(ctx, "queue-worker", "limited-project")
+	if err != nil || limitedPolicy.DispatchQPS == nil || *limitedPolicy.DispatchQPS != dispatchQPS ||
+		limitedPolicy.WorkerClaimQPS == nil || *limitedPolicy.WorkerClaimQPS != workerClaimQPS ||
+		limitedPolicy.MaxJobsPerClaim != 8 || limitedPolicy.PolicyVersion != 1 {
+		t.Fatalf("limited policy = %+v, %v", limitedPolicy, err)
+	}
+	limitedJobs := []protocol.AdminEnqueueJob{{Value: "limited-1"}, {Value: "limited-2"}, {Value: "limited-3"}}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "limited-project", limitedJobs, now+23); err != nil || inserted != 3 {
+		t.Fatalf("limited enqueue = %d, %v", inserted, err)
+	}
+	limitedNow := (now + 24) * 1_000_000_000
+	limitedClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "limited-project", protocol.ProjectClaimRequest{
+		WorkerID: "limited-worker", MaxJobs: 8, LeaseSeconds: 300, PolicyVersion: 1,
+	}, limitedNow)
+	if err != nil || len(limitedClaim.Jobs) != 1 || limitedClaim.RetryAfterMS != 400 {
+		t.Fatalf("first limited claim = %+v, %v", limitedClaim, err)
+	}
+	_, err = store.ClaimProjectJobs(ctx, "queue-worker", "limited-project", protocol.ProjectClaimRequest{
+		WorkerID: "limited-worker", MaxJobs: 8, LeaseSeconds: 300, PolicyVersion: 1,
+	}, limitedNow+100_000_000)
+	var limitedError *tracker.Error
+	if !errors.As(err, &limitedError) || limitedError.Code != protocol.ErrorProjectRateLimited || limitedError.RetryAfter != 300 {
+		t.Fatalf("limited retry = %#v", err)
+	}
+	limitedClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "limited-project", protocol.ProjectClaimRequest{
+		WorkerID: "limited-worker", MaxJobs: 8, LeaseSeconds: 300, PolicyVersion: 1,
+	}, limitedNow+400_000_000)
+	if err != nil || len(limitedClaim.Jobs) != 1 {
+		t.Fatalf("second limited claim = %+v, %v", limitedClaim, err)
+	}
+	limitedClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "limited-project", protocol.ProjectClaimRequest{
+		WorkerID: "limited-worker", MaxJobs: 8, LeaseSeconds: 300, PolicyVersion: 1,
+	}, limitedNow+800_000_000)
+	if err != nil || len(limitedClaim.Jobs) != 1 {
+		t.Fatalf("third limited claim = %+v, %v", limitedClaim, err)
+	}
+	limitedClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "limited-project", protocol.ProjectClaimRequest{
+		WorkerID: "limited-worker", MaxJobs: 8, LeaseSeconds: 300, PolicyVersion: 1,
+	}, limitedNow+800_000_000)
+	if err != nil || len(limitedClaim.Jobs) != 0 {
+		t.Fatalf("empty limited claim = %+v, %v", limitedClaim, err)
+	}
+	connection, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(ctx)
+	var claimRequests, dispatchedJobs int64
+	if err := connection.QueryRow(ctx, `
+		SELECT claim_requests,jobs_dispatched
+		FROM tracker_worker_claim_buckets
+		WHERE project_id='limited-project' AND worker_id='limited-worker'
+	`).Scan(&claimRequests, &dispatchedJobs); err != nil || claimRequests != 5 || dispatchedJobs != 3 {
+		t.Fatalf("worker claim bucket = requests %d jobs %d, %v", claimRequests, dispatchedJobs, err)
+	}
+	var unlimitedBuckets int
+	if err := connection.QueryRow(ctx, `SELECT count(*) FROM tracker_worker_claim_buckets WHERE project_id='queue-project'`).Scan(&unlimitedBuckets); err != nil || unlimitedBuckets != 0 {
+		t.Fatalf("unlimited project buckets = %d, %v", unlimitedBuckets, err)
+	}
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "limited-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		DispatchQPS: &dispatchQPS, WorkerClaimQPS: &workerClaimQPS, MaxJobsPerClaim: 8,
+	}, now+25); err != nil {
+		t.Fatal(err)
+	}
+	unchangedPolicy, err := store.ProjectPolicy(ctx, "queue-worker", "limited-project")
+	if err != nil || unchangedPolicy.PolicyVersion != 1 {
+		t.Fatalf("unchanged policy = %+v, %v", unchangedPolicy, err)
+	}
+	changedWorkerClaimQPS := 0.2
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "limited-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		DispatchQPS: &dispatchQPS, WorkerClaimQPS: &changedWorkerClaimQPS, MaxJobsPerClaim: 8,
+	}, now+26); err != nil {
+		t.Fatal(err)
+	}
+	changedPolicy, err := store.ProjectPolicy(ctx, "queue-worker", "limited-project")
+	if err != nil || changedPolicy.PolicyVersion != 2 {
+		t.Fatalf("changed policy = %+v, %v", changedPolicy, err)
+	}
+
+	highQPS := 2000.0
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "high-qps-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		DispatchQPS: &highQPS, MaxJobsPerClaim: 256,
+	}, now+25); err != nil {
+		t.Fatal(err)
+	}
+	highJobs := make([]protocol.AdminEnqueueJob, 256)
+	for index := range highJobs {
+		highJobs[index] = protocol.AdminEnqueueJob{Value: "high-qps-" + strconv.Itoa(index)}
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "high-qps-project", highJobs, now+26); err != nil || inserted != 256 {
+		t.Fatalf("high QPS enqueue = %d, %v", inserted, err)
+	}
+	highClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "high-qps-project", protocol.ProjectClaimRequest{
+		WorkerID: "high-qps-worker", MaxJobs: 256, LeaseSeconds: 300, PolicyVersion: 1,
+	}, (now+27)*1_000_000_000)
+	if err != nil || len(highClaim.Jobs) != 200 {
+		t.Fatalf("high QPS claim = %d jobs, %v", len(highClaim.Jobs), err)
+	}
+
+	extremeQPS := 1e300
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "extreme-qps-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		DispatchQPS: &extremeQPS, MaxJobsPerClaim: 256,
+	}, now+27); err != nil {
+		t.Fatal(err)
+	}
+	extremeJobs := make([]protocol.AdminEnqueueJob, 257)
+	for index := range extremeJobs {
+		extremeJobs[index] = protocol.AdminEnqueueJob{Value: "extreme-qps-" + strconv.Itoa(index)}
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "extreme-qps-project", extremeJobs, now+28); err != nil || inserted != 257 {
+		t.Fatalf("extreme QPS enqueue = %d, %v", inserted, err)
+	}
+	extremeNow := (now + 29) * 1_000_000_000
+	extremeClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "extreme-qps-project", protocol.ProjectClaimRequest{
+		WorkerID: "extreme-qps-worker", MaxJobs: 256, LeaseSeconds: 300, PolicyVersion: 1,
+	}, extremeNow)
+	if err != nil || len(extremeClaim.Jobs) != 256 {
+		t.Fatalf("extreme QPS claim = %d jobs, %v", len(extremeClaim.Jobs), err)
+	}
+	_, err = store.ClaimProjectJobs(ctx, "queue-worker", "extreme-qps-project", protocol.ProjectClaimRequest{
+		WorkerID: "extreme-qps-worker", MaxJobs: 256, LeaseSeconds: 300, PolicyVersion: 1,
+	}, extremeNow)
+	if !errors.As(err, &limitedError) || limitedError.Code != protocol.ErrorProjectRateLimited {
+		t.Fatalf("extreme QPS same-time retry = %#v", err)
+	}
+
+	if err := store.PutProject(ctx, tracker.Project{
+		ID: "batch-cap-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,
+		MaxJobsPerClaim: 1,
+	}, now+28); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "batch-cap-project", limitedJobs, now+29); err != nil || inserted != 3 {
+		t.Fatalf("batch cap enqueue = %d, %v", inserted, err)
+	}
+	cappedClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "batch-cap-project", protocol.ProjectClaimRequest{
+		WorkerID: "batch-cap-worker", MaxJobs: 256, LeaseSeconds: 300, PolicyVersion: 1,
+	}, (now+30)*1_000_000_000)
+	if err != nil || len(cappedClaim.Jobs) != 1 {
+		t.Fatalf("batch cap claim = %+v, %v", cappedClaim, err)
 	}
 }
 

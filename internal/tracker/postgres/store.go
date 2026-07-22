@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -120,19 +121,46 @@ func (s *Store) PutProject(ctx context.Context, project tracker.Project, now int
 	if project.ClaimOrder != "" && project.ClaimOrder != tracker.ClaimOrderFIFO && project.ClaimOrder != tracker.ClaimOrderRandom {
 		return tracker.InvalidRequest("invalid project claim order")
 	}
-	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO tracker_projects(id,status,identity_mode,claim_order,created_at,updated_at)
-		VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$5)
-		ON CONFLICT(id) DO UPDATE SET
-			status=EXCLUDED.status,
-			claim_order=COALESCE(NULLIF($4,''),tracker_projects.claim_order),
-			updated_at=EXCLUDED.updated_at
-		WHERE $3='' OR tracker_projects.identity_mode=$3
-	`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, now)
-	if err == nil && tag.RowsAffected() == 0 {
-		return tracker.InvalidRequest("project identity mode cannot be changed")
+	if !validProjectQPS(project.DispatchQPS) || !validProjectQPS(project.WorkerClaimQPS) {
+		return tracker.InvalidRequest("project QPS must be a positive finite number")
 	}
-	return err
+	if project.MaxJobsPerClaim == 0 {
+		project.MaxJobsPerClaim = maxProjectBatch
+	}
+	if project.MaxJobsPerClaim < 1 || project.MaxJobsPerClaim > maxProjectBatch {
+		return tracker.InvalidRequest("max jobs per claim must be between 1 and 256")
+	}
+	return storeError("put project", pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO tracker_projects(
+				id,status,identity_mode,claim_order,dispatch_qps,worker_claim_qps,max_jobs_per_claim,policy_version,created_at,updated_at
+			)
+			VALUES($1,$2,COALESCE(NULLIF($3,''),'external_id'),COALESCE(NULLIF($4,''),'fifo'),$5,$6,$7,1,$8,$8)
+			ON CONFLICT(id) DO UPDATE SET
+				status=EXCLUDED.status,
+				claim_order=COALESCE(NULLIF($4,''),tracker_projects.claim_order),
+				dispatch_qps=EXCLUDED.dispatch_qps,
+				worker_claim_qps=EXCLUDED.worker_claim_qps,
+				max_jobs_per_claim=EXCLUDED.max_jobs_per_claim,
+				policy_version=tracker_projects.policy_version + CASE WHEN
+					tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps OR
+					tracker_projects.worker_claim_qps IS DISTINCT FROM EXCLUDED.worker_claim_qps OR
+					tracker_projects.max_jobs_per_claim IS DISTINCT FROM EXCLUDED.max_jobs_per_claim
+				THEN 1 ELSE 0 END,
+				dispatch_tokens=CASE WHEN tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps THEN NULL ELSE tracker_projects.dispatch_tokens END,
+				dispatch_refilled_at_ns=CASE WHEN tracker_projects.dispatch_qps IS DISTINCT FROM EXCLUDED.dispatch_qps THEN NULL ELSE tracker_projects.dispatch_refilled_at_ns END,
+				updated_at=EXCLUDED.updated_at
+			WHERE $3='' OR tracker_projects.identity_mode=$3
+		`, project.ID, project.Status, project.IdentityMode, project.ClaimOrder, project.DispatchQPS, project.WorkerClaimQPS, project.MaxJobsPerClaim, now)
+		if err == nil && tag.RowsAffected() == 0 {
+			return tracker.InvalidRequest("project identity mode cannot be changed")
+		}
+		return err
+	}))
+}
+
+func validProjectQPS(value *float64) bool {
+	return value == nil || (!math.IsNaN(*value) && !math.IsInf(*value, 0) && *value > 0)
 }
 
 func tokenDigest(token string) []byte {
