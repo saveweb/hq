@@ -9,9 +9,9 @@ import (
 	"os"
 	"strings"
 
-	"git.saveweb.org/saveweb/hq/internal/sourceformat"
-	"git.saveweb.org/saveweb/hq/internal/tracker"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/sourceformat"
+	"github.com/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func main() {

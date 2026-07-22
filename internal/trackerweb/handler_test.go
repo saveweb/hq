@@ -15,9 +15,9 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"git.saveweb.org/saveweb/hq/internal/sourceformat"
-	"git.saveweb.org/saveweb/hq/internal/tracker"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/sourceformat"
+	"github.com/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 type fakeStore struct {

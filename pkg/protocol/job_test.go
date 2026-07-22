@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func TestDefaultJobIDConformance(t *testing.T) {

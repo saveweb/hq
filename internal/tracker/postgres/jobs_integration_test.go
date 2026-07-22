@@ -10,9 +10,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"git.saveweb.org/saveweb/hq/internal/tracker"
-	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/internal/tracker/postgres"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func TestPostgresProjectQueueContract(t *testing.T) {

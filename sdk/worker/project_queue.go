@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/internal/trackerclient"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/trackerclient"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 // ProjectQueue is the direct client for the single-site PostgreSQL queue.

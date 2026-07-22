@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {

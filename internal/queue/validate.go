@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"unicode/utf8"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 const (

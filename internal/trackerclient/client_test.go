@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

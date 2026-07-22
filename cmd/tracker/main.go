@@ -16,14 +16,14 @@ import (
 	"syscall"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/internal/githuboauth"
-	"git.saveweb.org/saveweb/hq/internal/projectqueuehttp"
-	"git.saveweb.org/saveweb/hq/internal/queue"
-	"git.saveweb.org/saveweb/hq/internal/sourceformat"
-	"git.saveweb.org/saveweb/hq/internal/tracker"
-	"git.saveweb.org/saveweb/hq/internal/tracker/postgres"
-	"git.saveweb.org/saveweb/hq/internal/trackerweb"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/githuboauth"
+	"github.com/saveweb/hq/internal/projectqueuehttp"
+	"github.com/saveweb/hq/internal/queue"
+	"github.com/saveweb/hq/internal/sourceformat"
+	"github.com/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/internal/tracker/postgres"
+	"github.com/saveweb/hq/internal/trackerweb"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func main() {

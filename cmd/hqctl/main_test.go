@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.saveweb.org/saveweb/hq/internal/tracker"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func TestEnqueueValuesUsesBoundedBatchesAndProjectIdentity(t *testing.T) {

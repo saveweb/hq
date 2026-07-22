@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"git.saveweb.org/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/internal/tracker"
 )
 
 const webUserColumns = `id,github_user_id,COALESCE(github_login,''),github_avatar_url,status,roles,last_login_at`

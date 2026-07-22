@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 var (

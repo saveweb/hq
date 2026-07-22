@@ -13,8 +13,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"git.saveweb.org/saveweb/hq/internal/queue"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/queue"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 const (

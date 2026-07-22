@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/internal/trackerclient"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/trackerclient"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 type Config struct {

@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.saveweb.org/saveweb/hq/internal/queue"
-	"git.saveweb.org/saveweb/hq/internal/sourceformat"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/queue"
+	"github.com/saveweb/hq/internal/sourceformat"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func TestPackJobsTextProducesStableSource(t *testing.T) {

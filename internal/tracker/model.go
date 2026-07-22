@@ -4,7 +4,7 @@ package tracker
 import (
 	"errors"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 var ErrWebSessionNotFound = errors.New("web session not found")

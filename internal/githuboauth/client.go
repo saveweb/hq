@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/internal/tracker"
 )
 
 const (

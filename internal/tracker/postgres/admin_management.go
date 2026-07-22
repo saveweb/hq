@@ -8,9 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"git.saveweb.org/saveweb/hq/internal/queue"
-	"git.saveweb.org/saveweb/hq/internal/tracker"
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/internal/queue"
+	"github.com/saveweb/hq/internal/tracker"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 func (s *Store) ListUsers(ctx context.Context) ([]protocol.AdminUserSummary, error) {

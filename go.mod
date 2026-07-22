@@ -1,4 +1,4 @@
-module git.saveweb.org/saveweb/hq
+module github.com/saveweb/hq
 
 go 1.25.0
 

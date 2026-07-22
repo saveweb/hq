@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 const ContentTypeJSON = "application/json"

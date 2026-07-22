@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"git.saveweb.org/saveweb/hq/pkg/protocol"
+	"github.com/saveweb/hq/pkg/protocol"
 )
 
 const maxResponseBytes = int64(8 << 20)
