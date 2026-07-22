@@ -277,9 +277,19 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	if enqueue.Code != http.StatusSeeOther || len(store.enqueued) != 1 || store.enqueued[0].Value != "https://example.com/" || store.enqueued[0].RandomKey == nil || *store.enqueued[0].RandomKey != -9 {
 		t.Fatalf("enqueue = %d jobs=%+v", enqueue.Code, store.enqueued)
 	}
+	attemptID := "attempt-web-1"
+	completedAt := int64(1700000060)
+	job := store.jobs["demo"][0]
+	job.Hops = 2
+	job.AttemptID = &attemptID
+	job.CompletedAt = &completedAt
+	store.jobs["demo"][0] = job
 	jobDetail := request(t, server, http.MethodGet, "/admin/projects/demo/jobs/1", "", sessionCookie)
 	if jobDetail.Code != http.StatusOK || !strings.Contains(jobDetail.Body.String(), "https://example.com/") ||
-		!strings.Contains(jobDetail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
+		!strings.Contains(jobDetail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") ||
+		!strings.Contains(jobDetail.Body.String(), "<th>Hops</th><td>2</td>") ||
+		!strings.Contains(jobDetail.Body.String(), "attempt-web-1") ||
+		!strings.Contains(jobDetail.Body.String(), "1700000060 (2023-11-14 22:14:20 UTC)") {
 		t.Fatalf("job detail = %d %q", jobDetail.Code, jobDetail.Body.String())
 	}
 	users := request(t, server, http.MethodGet, "/admin/users", "", sessionCookie)

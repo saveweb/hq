@@ -667,6 +667,7 @@ func (h *Handler) job(ctx *echo.Context) error {
 			LeaseExpiresAt: formatOptionalUnixTime(job.LeaseExpiresAt),
 			CreatedAt:      formatUnixTime(job.CreatedAt),
 			UpdatedAt:      formatUnixTime(job.UpdatedAt),
+			CompletedAt:    formatOptionalUnixTime(job.CompletedAt),
 		}, "CSRF": h.csrfToken(sessionToken),
 		"AttrsJSON": displayJSON(job.Attrs), "OutcomeJSON": displayJSON(job.Outcome),
 		"ErrorJSON": displayJSON(job.ExecutionError), "ReceiptsJSON": displayJSON(job.WARCReceipts),
@@ -678,6 +679,7 @@ type jobView struct {
 	LeaseExpiresAt string
 	CreatedAt      string
 	UpdatedAt      string
+	CompletedAt    string
 }
 
 func formatUnixTime(timestamp int64) string {
