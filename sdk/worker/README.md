@@ -24,6 +24,11 @@ renewal and cancels every held job. The context passed to `Claim` controls only
 that claim request; canceling it after `Claim` returns does not cancel the jobs
 that were returned.
 
+`Claim` retries network failures, HTTP 5xx responses, and retryable rate limits
+with bounded exponential backoff. Server-provided retry delays take precedence.
+Permanent API errors such as invalid credentials or an unsupported client
+version are returned immediately.
+
 ## Claim and process jobs
 
 ```go

@@ -67,6 +67,69 @@ func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 	}
 }
 
+func TestProjectQueueRetriesTransientPolicyAndClaimFailures(t *testing.T) {
+	var policyCalls, claimCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		switch request.URL.Path {
+		case "/api/v1/projects/demo":
+			policyCalls++
+			if policyCalls == 1 {
+				response.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(response).Encode(protocol.ErrorEnvelope{Error: protocol.APIError{Code: protocol.ErrorInternal, Message: "unavailable", Retryable: true, RetryAfterMS: 1, Details: protocol.Attrs{}}})
+				return
+			}
+			_ = json.NewEncoder(response).Encode(protocol.ProjectPolicy{ProjectID: "demo", MaxJobsPerClaim: 1, RecommendedLeaseSeconds: 30, PolicyVersion: 1, RefreshAfterMS: 60_000})
+		case "/api/v1/projects/demo/jobs/claim":
+			claimCalls++
+			if claimCalls == 1 {
+				response.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(response).Encode(protocol.ErrorEnvelope{Error: protocol.APIError{Code: protocol.ErrorInternal, Message: "bad gateway", Retryable: false, RetryAfterMS: 1, Details: protocol.Attrs{}}})
+				return
+			}
+			_ = json.NewEncoder(response).Encode(protocol.ProjectClaimResponse{ProjectID: "demo", PolicyVersion: 1, RetryAfterMS: 1000})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "worker-v2", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queue.Close()
+	if _, err := queue.Claim(context.Background(), ClaimOptions{MaxJobs: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if policyCalls != 2 || claimCalls != 2 {
+		t.Fatalf("policy_calls=%d claim_calls=%d", policyCalls, claimCalls)
+	}
+}
+
+func TestProjectQueueDoesNotRetryPermanentClientError(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		response.WriteHeader(http.StatusUpgradeRequired)
+		_ = json.NewEncoder(response).Encode(protocol.ErrorEnvelope{Error: protocol.APIError{Code: protocol.ErrorClientUpgrade, Message: "upgrade required", Details: protocol.Attrs{}}})
+	}))
+	defer server.Close()
+
+	queue, err := OpenProjectQueue(context.Background(), Config{TrackerURL: server.URL, MachineToken: "token", WorkerID: "worker-1", ClientVersion: "old", AllowHTTPTracker: true, RequestTimeout: time.Second}, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queue.Close()
+	_, err = queue.Claim(context.Background(), ClaimOptions{MaxJobs: 1})
+	if !IsCode(err, protocol.ErrorClientUpgrade) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
 func TestJobAutoRenewsAndCompletes(t *testing.T) {
 	var renewCalls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

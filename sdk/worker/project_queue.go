@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"net"
 	"sync"
 	"time"
 
@@ -82,9 +83,17 @@ func (q *ProjectQueue) Claim(ctx context.Context, options ClaimOptions) (ClaimBa
 	}
 	ctx, cancel := q.requestContext(ctx)
 	defer cancel()
+	retryDelay := time.Second
 	for {
 		policy, err := q.currentPolicy(ctx)
 		if err != nil {
+			if delay, retry := claimRetryDelay(ctx, err, retryDelay); retry {
+				if err := waitContext(ctx, jittered(delay)); err != nil {
+					return ClaimBatch{}, err
+				}
+				retryDelay = min(retryDelay*2, time.Minute)
+				continue
+			}
 			return ClaimBatch{}, err
 		}
 		leaseSeconds, err := claimLeaseSeconds(options.Lease, policy.RecommendedLeaseSeconds)
@@ -106,11 +115,11 @@ func (q *ProjectQueue) Claim(ctx context.Context, options ClaimOptions) (ClaimBa
 			AcceptTypes: append([]string(nil), options.AcceptTypes...), PolicyVersion: policy.PolicyVersion,
 		})
 		if err != nil {
-			var apiError *trackerclient.Error
-			if errors.As(err, &apiError) && apiError.Status == 429 && apiError.API.Retryable && apiError.API.RetryAfterMS > 0 {
-				if err := waitContext(ctx, jittered(millisecondsDuration(apiError.API.RetryAfterMS))); err != nil {
+			if delay, retry := claimRetryDelay(ctx, err, retryDelay); retry {
+				if err := waitContext(ctx, jittered(delay)); err != nil {
 					return ClaimBatch{}, err
 				}
+				retryDelay = min(retryDelay*2, time.Minute)
 				continue
 			}
 			return ClaimBatch{}, convertTrackerError(err)
@@ -127,6 +136,39 @@ func (q *ProjectQueue) Claim(ctx context.Context, options ClaimOptions) (ClaimBa
 		}
 		return ClaimBatch{Jobs: jobs, RetryAfter: millisecondsDuration(result.RetryAfterMS)}, nil
 	}
+}
+
+func claimRetryDelay(ctx context.Context, err error, fallback time.Duration) (time.Duration, bool) {
+	if ctx.Err() != nil {
+		return 0, false
+	}
+	status, api, ok := trackerAPIError(err)
+	if ok {
+		if status < 500 && !(status == 429 && api.Retryable) {
+			return 0, false
+		}
+		if api.RetryAfterMS > 0 {
+			return millisecondsDuration(api.RetryAfterMS), true
+		}
+		return fallback, true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return fallback, true
+	}
+	return 0, false
+}
+
+func trackerAPIError(err error) (int, protocol.APIError, bool) {
+	var clientError *trackerclient.Error
+	if errors.As(err, &clientError) {
+		return clientError.Status, clientError.API, true
+	}
+	var workerError *APIError
+	if errors.As(err, &workerError) {
+		return workerError.Status, workerError.API, true
+	}
+	return 0, protocol.APIError{}, false
 }
 
 func (q *ProjectQueue) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
