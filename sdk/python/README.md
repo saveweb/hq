@@ -16,7 +16,8 @@ with open_project_queue(
 ) as queue:
     response = queue.claim(max_jobs=64)
     for job in response["jobs"]:
-        # Upload WARC to WARC Core, then include its receipt in complete().
+        # Upload artifacts to the external Artifact Receiver, then include its
+        # receipts in complete().
         ...
 ```
 

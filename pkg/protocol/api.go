@@ -51,7 +51,7 @@ type Outcome struct {
 	URI  *string `json:"uri"`
 	Meta Attrs   `json:"meta"`
 }
-type WARCReceipt struct {
+type ArtifactReceipt struct {
 	ID         string `json:"id"`
 	Issuer     string `json:"issuer"`
 	ObjectID   string `json:"object_id"`
@@ -84,10 +84,10 @@ type ProjectPolicy struct {
 	RefreshAfterMS          int64    `json:"refresh_after_ms"`
 }
 type ProjectCompleteItem struct {
-	JobID        int64         `json:"job_id"`
-	AttemptID    string        `json:"attempt_id"`
-	Outcome      Outcome       `json:"outcome"`
-	WARCReceipts []WARCReceipt `json:"warc_receipts"`
+	JobID            int64             `json:"job_id"`
+	AttemptID        string            `json:"attempt_id"`
+	Outcome          Outcome           `json:"outcome"`
+	ArtifactReceipts []ArtifactReceipt `json:"artifact_receipts"`
 }
 type ProjectCompleteRequest struct {
 	WorkerID string                `json:"worker_id"`
@@ -216,19 +216,19 @@ type AdminMachineTokenResponse struct {
 
 type AdminJob struct {
 	JobSpecV1
-	JobID          int64           `json:"job_id"`
-	RandomKey      int32           `json:"random_key"`
-	Status         string          `json:"status"`
-	AttemptID      *string         `json:"attempt_id"`
-	WorkerID       *string         `json:"worker_id"`
-	LeaseExpiresAt *int64          `json:"lease_expires_at"`
-	ResetCount     int             `json:"reset_count"`
-	Outcome        *Outcome        `json:"outcome"`
-	WARCReceipts   []WARCReceipt   `json:"warc_receipts"`
-	ExecutionError *ExecutionError `json:"execution_error"`
-	CreatedAt      int64           `json:"created_at"`
-	UpdatedAt      int64           `json:"updated_at"`
-	CompletedAt    *int64          `json:"completed_at"`
+	JobID            int64             `json:"job_id"`
+	RandomKey        int32             `json:"random_key"`
+	Status           string            `json:"status"`
+	AttemptID        *string           `json:"attempt_id"`
+	WorkerID         *string           `json:"worker_id"`
+	LeaseExpiresAt   *int64            `json:"lease_expires_at"`
+	ResetCount       int               `json:"reset_count"`
+	Outcome          *Outcome          `json:"outcome"`
+	ArtifactReceipts []ArtifactReceipt `json:"artifact_receipts"`
+	ExecutionError   *ExecutionError   `json:"execution_error"`
+	CreatedAt        int64             `json:"created_at"`
+	UpdatedAt        int64             `json:"updated_at"`
+	CompletedAt      *int64            `json:"completed_at"`
 }
 
 type AdminJobListResponse struct {

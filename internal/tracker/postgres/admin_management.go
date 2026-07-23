@@ -184,7 +184,7 @@ func (s *Store) RequeueProjectJob(ctx context.Context, projectID string, jobID, 
 	if !queue.ValidateIdentifier(projectID) || jobID < 1 {
 		return tracker.InvalidRequest("invalid job")
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE tracker_jobs SET status='todo',reset_count=0,execution_error=NULL,outcome=NULL,warc_receipts=NULL,completed_at=NULL,updated_at=$3 WHERE project_id=$1 AND job_id=$2 AND status IN ('failed','reset_exhausted')`, projectID, jobID, now)
+	tag, err := s.pool.Exec(ctx, `UPDATE tracker_jobs SET status='todo',reset_count=0,execution_error=NULL,outcome=NULL,artifact_receipts=NULL,completed_at=NULL,updated_at=$3 WHERE project_id=$1 AND job_id=$2 AND status IN ('failed','reset_exhausted')`, projectID, jobID, now)
 	if err != nil {
 		return storeError("requeue project job", err)
 	}
@@ -208,7 +208,7 @@ func (s *Store) DeleteProjectJob(ctx context.Context, projectID string, jobID in
 	return nil
 }
 
-const adminJobSelect = `SELECT job_id,external_id,value,spec,random_key,status,attempt_id,worker_id,lease_expires_at,reset_count,outcome,warc_receipts,execution_error,created_at,updated_at,completed_at FROM tracker_jobs`
+const adminJobSelect = `SELECT job_id,external_id,value,spec,random_key,status,attempt_id,worker_id,lease_expires_at,reset_count,outcome,artifact_receipts,execution_error,created_at,updated_at,completed_at FROM tracker_jobs`
 
 type adminJobScanner interface{ Scan(...any) error }
 
@@ -236,9 +236,9 @@ func scanAdminJob(row adminJobScanner) (protocol.AdminJob, error) {
 			return protocol.AdminJob{}, err
 		}
 	}
-	job.WARCReceipts = []protocol.WARCReceipt{}
+	job.ArtifactReceipts = []protocol.ArtifactReceipt{}
 	if receipts != nil {
-		if err := json.Unmarshal(receipts, &job.WARCReceipts); err != nil {
+		if err := json.Unmarshal(receipts, &job.ArtifactReceipts); err != nil {
 			return protocol.AdminJob{}, err
 		}
 	}

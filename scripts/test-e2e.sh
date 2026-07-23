@@ -173,7 +173,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "wip" and r["lease_expires_at"] > 0' "${run_dir}/extend.json"
 
 accepted_at=$(date +%s)
-printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[{"id":"receipt-seed-1","issuer":"https://warc.example","object_id":"warc-seed-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":123,"accepted_at":%s,"signature":"test-signature"}]}]}' \
+printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"artifact_receipts":[{"id":"receipt-seed-1","issuer":"https://artifacts.example","object_id":"artifact-seed-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":123,"accepted_at":%s,"signature":"test-signature"}]}]}' \
   "${seed1}" "${attempt1}" "${accepted_at}" >"${run_dir}/complete-seed.json"
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
   --data-binary "@${run_dir}/complete-seed.json" \
@@ -188,7 +188,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "todo"' "${run_dir}/retry-seed-result.json"
 
 # A late completion from the old attempt must be rejected.
-printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[]}]}' \
+printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"artifact_receipts":[]}]}' \
   "${seed2}" "${attempt2}" >"${run_dir}/stale.json"
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
   --data-binary "@${run_dir}/stale.json" \
@@ -206,7 +206,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${
   "${base}/api/v1/projects/project-e2e/jobs/fail" >"${run_dir}/fail-asset-result.json"
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "failed"' "${run_dir}/fail-asset-result.json"
 
-printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[]}]}' \
+printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"artifact_receipts":[]}]}' \
   "${asset2}" "${asset_attempt2}" >"${run_dir}/complete-asset.json"
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${run_dir}/complete-asset.json" \
   "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-asset-result.json"
@@ -217,7 +217,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
   "${base}/api/v1/projects/project-e2e/jobs/claim" >"${run_dir}/retry-claim.json"
 read -r retry_job retry_attempt < <(python3 -c 'import json,sys; j=json.load(open(sys.argv[1]))["jobs"]; assert len(j)==1; print(j[0]["job_id"],j[0]["attempt_id"])' "${run_dir}/retry-claim.json")
 test "${retry_job}" = "${seed2}"
-printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"warc_receipts":[]}]}' \
+printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"artifact_receipts":[]}]}' \
   "${retry_job}" "${retry_attempt}" >"${run_dir}/complete-retry.json"
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" --data-binary "@${run_dir}/complete-retry.json" \
   "${base}/api/v1/projects/project-e2e/jobs/complete" >"${run_dir}/complete-retry-result.json"
@@ -244,7 +244,7 @@ curl --fail --silent --show-error "${admin[@]}" \
 python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["status"] == "archived"; assert p["job_counts"] == {"todo":0,"wip":0,"done":3,"failed":1,"reset_exhausted":0}' "${run_dir}/final-project.json"
 
 database_check=$(docker exec "${container}" psql -U postgres -d hq -Atc \
-  "SELECT count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), count(*) FILTER (WHERE jsonb_array_length(warc_receipts)=1), count(*) FILTER (WHERE attempt_id IS NOT NULL) FROM tracker_jobs WHERE project_id='project-e2e'")
+  "SELECT count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), count(*) FILTER (WHERE jsonb_array_length(artifact_receipts)=1), count(*) FILTER (WHERE attempt_id IS NOT NULL) FROM tracker_jobs WHERE project_id='project-e2e'")
 test "${database_check}" = '3|1|1|0'
 
 curl --fail --silent --show-error "${admin[@]}" \

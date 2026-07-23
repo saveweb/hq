@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS tracker_jobs (
     lease_expires_at bigint,
     reset_count integer NOT NULL DEFAULT 0 CHECK (reset_count >= 0),
     outcome jsonb,
-    warc_receipts jsonb,
+    artifact_receipts jsonb,
     execution_error jsonb,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,

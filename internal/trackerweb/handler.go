@@ -691,7 +691,7 @@ func (h *Handler) job(ctx *echo.Context) error {
 			CompletedAt:    formatOptionalUnixTime(job.CompletedAt),
 		}, "CSRF": h.csrfToken(sessionToken),
 		"AttrsJSON": displayJSON(job.Attrs), "OutcomeJSON": displayJSON(job.Outcome),
-		"ErrorJSON": displayJSON(job.ExecutionError), "ReceiptsJSON": displayJSON(job.WARCReceipts),
+		"ErrorJSON": displayJSON(job.ExecutionError), "ReceiptsJSON": displayJSON(job.ArtifactReceipts),
 	})
 }
 

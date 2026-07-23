@@ -45,5 +45,19 @@ def test_openapi_has_no_worker_inbound_endpoint() -> None:
 
 def test_all_named_timestamp_fields_are_int64() -> None:
     document = yaml.safe_load(SPEC.read_text())
-    receipt = document["components"]["schemas"]["WARCReceipt"]
+    receipt = document["components"]["schemas"]["ArtifactReceipt"]
     assert receipt["properties"]["accepted_at"]["format"] == "int64"
+
+
+def test_completion_uses_artifact_receipts() -> None:
+    document = yaml.safe_load(SPEC.read_text())
+    schemas = document["components"]["schemas"]
+    complete_item = schemas["ProjectCompleteItem"]
+    admin_job = schemas["AdminJob"]
+
+    assert "ArtifactReceipt" in schemas
+    assert "WARCReceipt" not in schemas
+    assert "artifact_receipts" in complete_item["required"]
+    assert "artifact_receipts" in complete_item["properties"]
+    assert "warc_receipts" not in complete_item["properties"]
+    assert "artifact_receipts" in admin_job["properties"]

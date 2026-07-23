@@ -38,7 +38,7 @@ type Job struct {
 
 func (j *Job) Context() context.Context { return j.ctx }
 
-func (j *Job) Complete(ctx context.Context, outcome protocol.Outcome, receipts ...protocol.WARCReceipt) error {
+func (j *Job) Complete(ctx context.Context, outcome protocol.Outcome, receipts ...protocol.ArtifactReceipt) error {
 	j.finishMu.Lock()
 	defer j.finishMu.Unlock()
 	if cause := context.Cause(j.ctx); cause != nil {
@@ -48,7 +48,7 @@ func (j *Job) Complete(ctx context.Context, outcome protocol.Outcome, receipts .
 	defer cancel()
 	result, err := j.queue.client.CompleteProjectJobs(ctx, j.queue.projectID, protocol.ProjectCompleteRequest{
 		WorkerID: j.queue.workerID,
-		Items:    []protocol.ProjectCompleteItem{{JobID: j.JobID, AttemptID: j.attemptID, Outcome: outcome, WARCReceipts: append([]protocol.WARCReceipt(nil), receipts...)}},
+		Items:    []protocol.ProjectCompleteItem{{JobID: j.JobID, AttemptID: j.attemptID, Outcome: outcome, ArtifactReceipts: append([]protocol.ArtifactReceipt(nil), receipts...)}},
 	})
 	if err != nil {
 		return convertTrackerError(err)

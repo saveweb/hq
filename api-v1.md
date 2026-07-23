@@ -79,7 +79,7 @@ jobs.
 
 Job listing is cursor-paginated with `after_job_id`, `limit` (1-200), and an
 optional status filter. Job detail includes the immutable spec, current attempt,
-terminal outcome or execution error, WARC receipts, reset count, and timestamps.
+terminal outcome or execution error, artifact receipts, reset count, and timestamps.
 Only `failed` and `reset_exhausted` jobs can be manually requeued. WIP jobs
 cannot be deleted, and projects with WIP jobs cannot be deleted.
 
@@ -165,10 +165,11 @@ POST /api/v1/projects/{project_id}/jobs/complete
 ```
 
 The request contains `worker_id` and 1-256 items. Each item contains `job_id`,
-`attempt_id`, a bounded outcome, and zero or more bounded WARC receipts.
+`attempt_id`, a bounded outcome, and zero or more bounded artifact receipts.
 
-A WARC receipt means that the independent WARC Core durably accepted the WARC.
-It does not mean that a final sink accepted it.
+An artifact receipt means that the external Artifact Receiver durably accepted
+an artifact. HQ stores only the receipt; it does not receive the artifact or
+imply that a final sink accepted it.
 
 ## Fail
 

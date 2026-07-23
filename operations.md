@@ -100,12 +100,12 @@ shutdown does not need to rewrite job state.
   the Web Dashboard.
 - Preserve the web-session secret to avoid invalidating all browser sessions
   on routine redeploys. Rotate it to revoke every browser session.
-- WARC Core has a separate backup and recovery plan because HQ stores receipts,
-  not WARC bytes.
+- The external Artifact Receiver has a separate backup and recovery plan because
+  HQ stores receipts, not artifact contents.
 
 After restoring an older PostgreSQL backup, some completed work may run again.
-WARC Core and workers must therefore use stable object identity and tolerate
-at-least-once execution.
+The Artifact Receiver and workers must therefore use stable object identity and
+tolerate at-least-once execution.
 
 ## Minimum monitoring
 

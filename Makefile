@@ -14,7 +14,7 @@ test-go:
 	go test ./...
 
 test-python:
-	uv run --project sdk/python pytest
+	uv run --project sdk/python python -m pytest
 
 test-postgres:
 	./scripts/test-postgres.sh

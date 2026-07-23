@@ -16,7 +16,7 @@ HQ owns:
 - projects and their active/draining/archived lifecycle;
 - immutable job identity and work specification;
 - claims, attempt IDs, leases, retry counts, and terminal outcomes;
-- WARC receipts supplied by workers.
+- artifact receipts supplied by workers.
 
 Each project publishes a recommended lease from one second through one hour.
 It is a worker policy rather than a server-enforced fixed lease: raw clients may
@@ -25,8 +25,8 @@ default. Changing it increments the project policy version.
 
 HQ does not own:
 
-- WARC bytes or upload sessions;
-- WARC validation, packing, retention, or garbage collection;
+- artifact contents or upload sessions;
+- artifact validation, packing, retention, or garbage collection;
 - MegaWARC creation;
 - Internet Archive or other sink delivery state;
 - worker process supervision;
@@ -100,36 +100,37 @@ Expired WIP rows are reset during a later claim. Each project's `max_resets`
 setting limits the combined number of lease-expiration resets and retryable
 failures before the job enters `reset_exhausted`.
 
-## 4. WARC receipt contract
+## 4. Artifact receipt contract
 
-WARC Core returns a signed receipt only after it has validated and durably
-accepted a WARC object. HQ stores the receipt as part of job completion.
+The external Artifact Receiver returns a signed receipt only after it has
+validated and durably accepted an artifact. HQ stores the receipt as part of job
+completion and never receives the artifact contents.
 
 A receipt contains:
 
 - stable receipt ID and issuer;
-- WARC Core object ID;
+- Artifact Receiver object ID;
 - SHA-256 and size;
 - acceptance time;
 - signature.
 
 Receipts are bounded in count and encoded size. HQ stores but does not itself
-verify a particular WARC Core signature scheme until that external protocol is
-frozen. Deployment policy must configure workers to trust the intended WARC
-Core; signature verification belongs in the shared receipt library once that
-project exists.
+verify a particular Artifact Receiver signature scheme until that external
+protocol is frozen. Deployment policy must configure workers to trust the
+intended Artifact Receiver; signature verification belongs in the shared
+receipt library once that project exists.
 
 Receipt acceptance is the job/file boundary:
 
 ```text
-worker has WARC
-  -> WARC Core accepted and issued receipt
+worker produces artifact
+  -> Artifact Receiver accepted and issued receipt
   -> worker completes HQ attempt with receipt
-  -> WARC Core independently processes and delivers the file
+  -> Artifact Receiver independently processes and delivers the artifact
 ```
 
-Later WARC processing or sink failure never reopens an HQ job. WARC Core owns
-its durable retry queue and operator-visible delivery state.
+Later artifact processing or sink failure never reopens an HQ job. The Artifact
+Receiver owns its durable retry queue and operator-visible delivery state.
 
 ## 5. Authentication
 
@@ -181,7 +182,7 @@ PostgreSQL is intentionally the only HQ state store. Required operational
 controls are ordinary database backups, WAL retention appropriate to the
 deployment, connection monitoring, and restore exercises.
 
-WARC bytes, HTTP bodies, and unbounded logs must never be stored in HQ.
+Artifact contents, HTTP bodies, and unbounded logs must never be stored in HQ.
 
 No table partitioning is required initially. Add it only after measurements
 show that completed-job history or vacuum behavior is a real problem.

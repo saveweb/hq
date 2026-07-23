@@ -505,18 +505,18 @@ func (s *Store) CompleteProjectJobs(ctx context.Context, userID, projectID strin
 			if _, _, validationError := queue.NormalizeOutcome(queue.Outcome{Kind: item.Outcome.Kind, Code: item.Outcome.Code, URI: item.Outcome.URI, Meta: item.Outcome.Meta}); validationError != nil {
 				return nil, &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: validationError.Message}
 			}
-			if err := validateWARCReceipts(item.WARCReceipts); err != nil {
+			if err := validateArtifactReceipts(item.ArtifactReceipts); err != nil {
 				return nil, err
 			}
 			outcome, err := json.Marshal(item.Outcome)
 			if err != nil {
 				return nil, err
 			}
-			receipts, err := json.Marshal(item.WARCReceipts)
+			receipts, err := json.Marshal(item.ArtifactReceipts)
 			if err != nil {
 				return nil, err
 			}
-			tag, err := tx.Exec(ctx, `UPDATE tracker_jobs SET status='done',attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,outcome=$6,warc_receipts=$7,execution_error=NULL,updated_at=$5,completed_at=$5 WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, outcome, receipts)
+			tag, err := tx.Exec(ctx, `UPDATE tracker_jobs SET status='done',attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,outcome=$6,artifact_receipts=$7,execution_error=NULL,updated_at=$5,completed_at=$5 WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, outcome, receipts)
 			if err != nil {
 				return nil, err
 			}
@@ -611,15 +611,15 @@ func projectItemResult(jobID int64, attemptID string, affected int64, status str
 	return protocol.ItemResult{JobID: jobID, AttemptID: attemptID, Status: protocol.ItemStatusRejected, Error: &protocol.APIError{Code: protocol.ErrorStaleAttempt, Message: "attempt is stale, expired, or already finalized"}}
 }
 
-func validateWARCReceipts(receipts []protocol.WARCReceipt) error {
+func validateArtifactReceipts(receipts []protocol.ArtifactReceipt) error {
 	if len(receipts) > 16 {
-		return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "at most 16 WARC receipts are allowed per job"}
+		return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "at most 16 artifact receipts are allowed per job"}
 	}
 	for _, receipt := range receipts {
 		if !queue.ValidateIdentifier(receipt.ID) || receipt.Issuer == "" || len(receipt.Issuer) > 512 ||
 			receipt.ObjectID == "" || len(receipt.ObjectID) > 1024 || !sha256Pattern.MatchString(receipt.SHA256) ||
 			receipt.SizeBytes < 1 || receipt.AcceptedAt < 1 || receipt.Signature == "" || len(receipt.Signature) > 4096 {
-			return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid WARC receipt"}
+			return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid artifact receipt"}
 		}
 	}
 	return nil

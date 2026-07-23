@@ -453,7 +453,7 @@ components:
     AdminJob:
       type: object
       additionalProperties: false
-      required: [value, job_id, random_key, status, attempt_id, worker_id, lease_expires_at, reset_count, outcome, warc_receipts, execution_error, created_at, updated_at, completed_at]
+      required: [value, job_id, random_key, status, attempt_id, worker_id, lease_expires_at, reset_count, outcome, artifact_receipts, execution_error, created_at, updated_at, completed_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         value: {type: string, minLength: 1, maxLength: 8192}
@@ -469,7 +469,7 @@ components:
         lease_expires_at: {type: [integer, 'null'], format: int64}
         reset_count: {type: integer, minimum: 0}
         outcome: {oneOf: [{$ref: '#/components/schemas/Outcome'}, {type: 'null'}]}
-        warc_receipts: {type: array, items: {$ref: '#/components/schemas/WARCReceipt'}}
+        artifact_receipts: {type: array, items: {$ref: '#/components/schemas/ArtifactReceipt'}}
         execution_error: {oneOf: [{$ref: '#/components/schemas/ExecutionError'}, {type: 'null'}]}
         created_at: {type: integer, format: int64}
         updated_at: {type: integer, format: int64}
@@ -548,8 +548,9 @@ components:
         code: {type: [integer, 'null'], minimum: 0, maximum: 999}
         uri: {type: [string, 'null'], maxLength: 4096}
         meta: {$ref: '#/components/schemas/Attrs'}
-    WARCReceipt:
+    ArtifactReceipt:
       type: object
+      description: Proof that an external Artifact Receiver durably accepted an artifact.
       additionalProperties: false
       required: [id, issuer, object_id, sha256, size_bytes, accepted_at, signature]
       properties:
@@ -563,12 +564,16 @@ components:
     ProjectCompleteItem:
       type: object
       additionalProperties: false
-      required: [job_id, attempt_id, outcome, warc_receipts]
+      required: [job_id, attempt_id, outcome, artifact_receipts]
       properties:
         job_id: {$ref: '#/components/schemas/JobID'}
         attempt_id: {$ref: '#/components/schemas/Identifier'}
         outcome: {$ref: '#/components/schemas/Outcome'}
-        warc_receipts: {type: array, maxItems: 16, items: {$ref: '#/components/schemas/WARCReceipt'}}
+        artifact_receipts:
+          type: array
+          maxItems: 16
+          description: Receipts issued by an external Artifact Receiver; HQ does not receive artifact contents.
+          items: {$ref: '#/components/schemas/ArtifactReceipt'}
     ProjectCompleteRequest:
       type: object
       additionalProperties: false

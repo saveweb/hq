@@ -1,26 +1,26 @@
 # SavewebHQ
 
 SavewebHQ is a single-site PostgreSQL job coordinator for Saveweb archive
-workers. HQ owns projects, job attempts, leases, outcomes, and bounded WARC
-receipts. It does not receive WARC files, operate volunteer queue shards, or
-track delivery to Internet Archive.
+workers. HQ owns projects, job attempts, leases, outcomes, and bounded artifact
+receipts. It does not receive artifact contents, operate volunteer queue shards,
+or track delivery to downstream sinks.
 
 ## Boundary
 
 ```text
-source -> HQ/PostgreSQL -> worker -> WARC Core -> sink adapters
-                ^            |
-                +-- receipt --+
+source -> HQ/PostgreSQL -> worker -> external Artifact Receiver -> sink adapters
+                ^                         |
+                +---- artifact receipt ---+
 ```
 
 - HQ decides whether a job is `todo`, `wip`, `done`, `failed`, or
   `reset_exhausted`.
-- WARC Core validates and durably accepts WARC files, then issues signed
-  receipts.
-- A receipt proves that WARC Core accepted responsibility for an object. It
-  does not prove delivery to Internet Archive or another final sink.
-- `go2internetarchive` is expected to remain an IA client library used by WARC
-  Core, not an HQ component or WARC receiver.
+- The external Artifact Receiver validates and durably accepts artifacts, then
+  issues signed artifact receipts.
+- A receipt proves that the Artifact Receiver accepted responsibility for an
+  artifact. It does not prove delivery to Internet Archive or another final sink.
+- `go2internetarchive` remains an IA client library used outside HQ, not an HQ
+  component or artifact receiver.
 
 ## Components
 
