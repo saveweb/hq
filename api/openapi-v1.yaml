@@ -550,17 +550,20 @@ components:
         meta: {$ref: '#/components/schemas/Attrs'}
     ArtifactReceipt:
       type: object
-      description: Proof that an external Artifact Receiver durably accepted an artifact.
+      description: Record that an external Artifact Receiver accepted an artifact.
       additionalProperties: false
-      required: [id, issuer, object_id, sha256, size_bytes, accepted_at, signature]
+      required: [id, issuer, object_id, checksum, size_bytes, accepted_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         issuer: {type: string, minLength: 1, maxLength: 512}
         object_id: {type: string, minLength: 1, maxLength: 1024}
-        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        checksum:
+          type: string
+          maxLength: 161
+          pattern: '^[a-z0-9][a-z0-9_-]{0,31}:([0-9a-f]{2}){1,64}$'
+          description: Self-describing content checksum in algorithm:lowercase-hex form.
         size_bytes: {type: integer, format: int64, minimum: 1}
         accepted_at: {type: integer, format: int64, minimum: 1}
-        signature: {type: string, minLength: 1, maxLength: 4096}
     ProjectCompleteItem:
       type: object
       additionalProperties: false

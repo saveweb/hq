@@ -21,7 +21,7 @@ import (
 
 const maxProjectBatch = 256
 
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var checksumPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}:([0-9a-f]{2}){1,64}$`)
 
 type storedJobSpec struct {
 	Type  string         `json:"type,omitempty"`
@@ -617,8 +617,8 @@ func validateArtifactReceipts(receipts []protocol.ArtifactReceipt) error {
 	}
 	for _, receipt := range receipts {
 		if !queue.ValidateIdentifier(receipt.ID) || receipt.Issuer == "" || len(receipt.Issuer) > 512 ||
-			receipt.ObjectID == "" || len(receipt.ObjectID) > 1024 || !sha256Pattern.MatchString(receipt.SHA256) ||
-			receipt.SizeBytes < 1 || receipt.AcceptedAt < 1 || receipt.Signature == "" || len(receipt.Signature) > 4096 {
+			receipt.ObjectID == "" || len(receipt.ObjectID) > 1024 || !checksumPattern.MatchString(receipt.Checksum) ||
+			receipt.SizeBytes < 1 || receipt.AcceptedAt < 1 {
 			return &tracker.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid artifact receipt"}
 		}
 	}

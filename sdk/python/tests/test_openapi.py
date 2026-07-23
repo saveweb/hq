@@ -49,6 +49,14 @@ def test_all_named_timestamp_fields_are_int64() -> None:
     assert receipt["properties"]["accepted_at"]["format"] == "int64"
 
 
+def test_artifact_receipt_uses_self_describing_checksum() -> None:
+    document = yaml.safe_load(SPEC.read_text())
+    receipt = document["components"]["schemas"]["ArtifactReceipt"]
+    assert "checksum" in receipt["required"]
+    assert "sha256" not in receipt["properties"]
+    assert "signature" not in receipt["properties"]
+
+
 def test_completion_uses_artifact_receipts() -> None:
     document = yaml.safe_load(SPEC.read_text())
     schemas = document["components"]["schemas"]

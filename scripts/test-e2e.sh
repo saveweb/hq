@@ -173,7 +173,7 @@ curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; assert r["status"] == "applied" and r["job_status"] == "wip" and r["lease_expires_at"] > 0' "${run_dir}/extend.json"
 
 accepted_at=$(date +%s)
-printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"artifact_receipts":[{"id":"receipt-seed-1","issuer":"https://artifacts.example","object_id":"artifact-seed-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":123,"accepted_at":%s,"signature":"test-signature"}]}]}' \
+printf '{"worker_id":"worker-e2e","items":[{"job_id":%s,"attempt_id":"%s","outcome":{"kind":"success","code":200,"uri":null,"meta":{}},"artifact_receipts":[{"id":"receipt-seed-1","issuer":"https://artifacts.example","object_id":"artifact-seed-1","checksum":"blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":123,"accepted_at":%s}]}]}' \
   "${seed1}" "${attempt1}" "${accepted_at}" >"${run_dir}/complete-seed.json"
 curl --fail --silent --show-error "${worker[@]}" "${json[@]}" \
   --data-binary "@${run_dir}/complete-seed.json" \

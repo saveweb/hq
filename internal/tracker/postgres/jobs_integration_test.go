@@ -229,7 +229,7 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatalf("claim = %+v, %v", claimed, err)
 	}
 	item := claimed.Jobs[0]
-	receipt := protocol.ArtifactReceipt{ID: "receipt-1", Issuer: "https://artifacts.test", ObjectID: "artifacts/object-1", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 1234, AcceptedAt: now + 4, Signature: "test-signature"}
+	receipt := protocol.ArtifactReceipt{ID: "receipt-1", Issuer: "https://artifacts.test", ObjectID: "artifacts/object-1", Checksum: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 1234, AcceptedAt: now + 4}
 	completed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: "success", Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+5)
 	if err != nil || len(completed.Results) != 1 || completed.Results[0].Status != protocol.ItemStatusApplied {
 		t.Fatalf("complete = %+v, %v", completed, err)

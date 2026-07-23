@@ -102,7 +102,7 @@ failures before the job enters `reset_exhausted`.
 
 ## 4. Artifact receipt contract
 
-The external Artifact Receiver returns a signed receipt only after it has
+The external Artifact Receiver returns a receipt only after it has
 validated and durably accepted an artifact. HQ stores the receipt as part of job
 completion and never receives the artifact contents.
 
@@ -110,15 +110,11 @@ A receipt contains:
 
 - stable receipt ID and issuer;
 - Artifact Receiver object ID;
-- SHA-256 and size;
-- acceptance time;
-- signature.
+- self-describing content checksum and size;
+- acceptance time.
 
-Receipts are bounded in count and encoded size. HQ stores but does not itself
-verify a particular Artifact Receiver signature scheme until that external
-protocol is frozen. Deployment policy must configure workers to trust the
-intended Artifact Receiver; signature verification belongs in the shared
-receipt library once that project exists.
+Receipts are bounded in count and encoded size. HQ treats them as worker-reported
+acceptance metadata; it does not verify receipt authenticity.
 
 Receipt acceptance is the job/file boundary:
 
