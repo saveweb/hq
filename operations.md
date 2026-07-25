@@ -17,9 +17,14 @@ Before first startup:
    administer HQ.
 
 ```bash
-docker compose up -d
-docker compose ps
+git pull --ff-only origin main
+make deploy
 ```
+
+The deploy target derives `HQ_VERSION` and `HQ_COMMIT` from Git, persists them
+in `.env`, rebuilds the Compose project, waits for tracker health, checks the
+running image revision, and probes `HQ_PUBLIC_URL` when configured. It requires
+a clean worktree so the image revision always identifies its source exactly.
 
 `GET /healthz` reports process liveness. PostgreSQL health and backup status
 must be monitored separately.

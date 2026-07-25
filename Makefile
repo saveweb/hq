@@ -1,4 +1,7 @@
-.PHONY: check fmt test test-go test-python test-postgres test-e2e
+.PHONY: check deploy fmt test test-go test-python test-shell test-postgres test-e2e
+
+deploy:
+	./scripts/deploy.sh
 
 check: test
 	go vet ./...
@@ -8,13 +11,16 @@ fmt:
 	uv run --project sdk/python ruff format sdk/python
 	uv run --project sdk/python ruff check --fix sdk/python
 
-test: test-go test-python
+test: test-go test-python test-shell
 
 test-go:
 	go test ./...
 
 test-python:
 	uv run --project sdk/python python -m pytest
+
+test-shell:
+	bash -n scripts/*.sh
 
 test-postgres:
 	./scripts/test-postgres.sh

@@ -66,10 +66,13 @@ cp .env.example .env
 install -d -m 0700 secrets
 printf '%s\n' 'GITHUB_OAUTH_CLIENT_SECRET' > secrets/github-client.secret
 chmod 0600 secrets/github-client.secret
-docker compose build
-docker compose up -d
-docker compose ps
+make deploy
 ```
+
+`make deploy` derives `HQ_VERSION` and `HQ_COMMIT` from the current Git HEAD,
+updates those values in `.env`, rebuilds Compose, waits for tracker health, and
+verifies that the running image revision matches HEAD. It refuses to deploy
+from a dirty worktree.
 
 HQ runs migrations before serving and listens on `127.0.0.74:8080` for a host
 HTTPS reverse proxy. PostgreSQL is not published to the host.
