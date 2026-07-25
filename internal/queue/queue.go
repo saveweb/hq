@@ -1,5 +1,7 @@
 package queue
 
+import "github.com/saveweb/hq/pkg/protocol"
+
 type Error struct {
 	Code      string
 	Message   string
@@ -19,7 +21,7 @@ type JobSpec struct {
 }
 
 type Outcome struct {
-	Kind string
+	Kind protocol.OutcomeKind
 	Code *int
 	URI  *string
 	Meta map[string]any

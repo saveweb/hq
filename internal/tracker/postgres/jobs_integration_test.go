@@ -230,7 +230,7 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	}
 	item := claimed.Jobs[0]
 	receipt := protocol.ArtifactReceipt{ID: "receipt-1", Issuer: "https://artifacts.test", ObjectID: "artifacts/object-1", Checksum: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 1234, AcceptedAt: now + 4}
-	completed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: "success", Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+5)
+	completed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: protocol.OutcomeSuccess, Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+5)
 	if err != nil || len(completed.Results) != 1 || completed.Results[0].Status != protocol.ItemStatusApplied {
 		t.Fatalf("complete = %+v, %v", completed, err)
 	}
@@ -248,7 +248,7 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if workerUserID, found, err = store.WorkerUserID(ctx, "worker-process-1"); err != nil || found || workerUserID != "" {
 		t.Fatalf("deleted worker user = %q, %t, %v", workerUserID, found, err)
 	}
-	replayed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: "success", Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+6)
+	replayed, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: protocol.OutcomeSuccess, Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+6)
 	if err != nil || replayed.Results[0].Status != protocol.ItemStatusRejected || replayed.Results[0].Error.Code != protocol.ErrorStaleAttempt {
 		t.Fatalf("replayed complete = %+v, %v", replayed, err)
 	}

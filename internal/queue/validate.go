@@ -73,7 +73,7 @@ func NormalizeJob(job JobSpec) (NormalizedJob, *Error) {
 }
 
 func NormalizeOutcome(outcome Outcome) (Outcome, string, *Error) {
-	if outcome.Kind != "success" && outcome.Kind != "http_error" && outcome.Kind != "skipped" {
+	if !outcome.Kind.Valid() {
 		return Outcome{}, "", invalidRequest("outcome kind must be success, http_error, or skipped")
 	}
 	if outcome.Code != nil && (*outcome.Code < 0 || *outcome.Code > 999) {

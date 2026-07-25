@@ -45,11 +45,30 @@ type ClaimedJob struct {
 	AttemptID      string `json:"attempt_id"`
 	LeaseExpiresAt int64  `json:"lease_expires_at"`
 }
+
+// OutcomeKind identifies a terminal result for a processed job attempt.
+type OutcomeKind string
+
+const (
+	OutcomeSuccess   OutcomeKind = "success"
+	OutcomeHTTPError OutcomeKind = "http_error"
+	OutcomeSkipped   OutcomeKind = "skipped"
+)
+
+func (kind OutcomeKind) Valid() bool {
+	switch kind {
+	case OutcomeSuccess, OutcomeHTTPError, OutcomeSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
 type Outcome struct {
-	Kind string  `json:"kind"`
-	Code *int    `json:"code"`
-	URI  *string `json:"uri"`
-	Meta Attrs   `json:"meta"`
+	Kind OutcomeKind `json:"kind"`
+	Code *int        `json:"code"`
+	URI  *string     `json:"uri"`
+	Meta Attrs       `json:"meta"`
 }
 type ArtifactReceipt struct {
 	ID         string `json:"id"`

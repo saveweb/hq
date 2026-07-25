@@ -167,6 +167,16 @@ POST /api/v1/projects/{project_id}/jobs/complete
 The request contains `worker_id` and 1-256 items. Each item contains `job_id`,
 `attempt_id`, a bounded outcome, and zero or more bounded artifact receipts.
 
+`outcome.kind` is one of:
+
+- `success`: processing completed successfully;
+- `http_error`: processing received a definitive HTTP error response;
+- `skipped`: the project deliberately skipped the job and considers it handled.
+
+`code` and `uri` are nullable, and `meta` contains project-specific structured
+data. Retryable execution failures such as timeouts and DNS errors use the fail
+endpoint instead of a terminal outcome.
+
 An artifact receipt means that the external Artifact Receiver durably accepted
 an artifact. HQ stores only the receipt; it does not receive the artifact or
 imply that a final sink accepted it.

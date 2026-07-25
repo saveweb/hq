@@ -201,7 +201,7 @@ func TestJobAutoRenewsAndCompletes(t *testing.T) {
 	if renewCalls.Load() == 0 || job.Context().Err() != nil {
 		t.Fatalf("renew calls = %d, cause = %v", renewCalls.Load(), context.Cause(job.Context()))
 	}
-	if err := job.Complete(context.Background(), protocol.Outcome{Kind: "success", Meta: protocol.Attrs{}}); err != nil {
+	if err := job.Complete(context.Background(), protocol.Outcome{Kind: protocol.OutcomeSuccess, Meta: protocol.Attrs{}}); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(context.Cause(job.Context()), ErrJobFinished) {
