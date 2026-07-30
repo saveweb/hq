@@ -12,6 +12,8 @@ import (
 	"github.com/saveweb/hq/pkg/protocol"
 )
 
+const DefaultTrackerURL = "https://hq.saveweb.org/"
+
 type Config struct {
 	TrackerURL       string
 	MachineToken     string
@@ -21,8 +23,11 @@ type Config struct {
 }
 
 func (c Config) normalized() (Config, error) {
-	if c.TrackerURL == "" || c.MachineToken == "" || c.ClientVersion == "" {
-		return Config{}, fmt.Errorf("worker: tracker URL, machine token, and client version are required")
+	if c.TrackerURL == "" {
+		c.TrackerURL = DefaultTrackerURL
+	}
+	if c.MachineToken == "" || c.ClientVersion == "" {
+		return Config{}, fmt.Errorf("worker: machine token and client version are required")
 	}
 	if c.RequestTimeout == 0 {
 		c.RequestTimeout = 45 * time.Second

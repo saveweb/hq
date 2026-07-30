@@ -40,6 +40,16 @@ func TestWhoAmI(t *testing.T) {
 	}
 }
 
+func TestConfigUsesDefaultTrackerURL(t *testing.T) {
+	config, err := (Config{MachineToken: "token", ClientVersion: "worker-v2"}).normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.TrackerURL != "https://hq.saveweb.org/" {
+		t.Fatalf("tracker URL = %q", config.TrackerURL)
+	}
+}
+
 func TestProjectQueueAppliesPolicyAndRetriesRateLimit(t *testing.T) {
 	var policyCalls, claimCalls int
 	var workerID string

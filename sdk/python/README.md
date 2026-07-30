@@ -8,7 +8,6 @@ from saveweb_hq import Config, open_project_queue
 
 with open_project_queue(
     Config(
-        tracker_url="https://hq.example",
         machine_token=machine_token,
         client_version="sinavideo/2.4.0",
     ),
@@ -20,6 +19,9 @@ with open_project_queue(
         # receipts in complete().
         ...
 ```
+
+`tracker_url` defaults to `https://hq.saveweb.org/`. Set it explicitly only
+when connecting to another HQ deployment.
 
 Opening a queue generates a fresh seven-character `a-z0-9` worker ID, exposed
 as `queue.worker_id` and fixed for that queue instance.

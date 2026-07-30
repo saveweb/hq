@@ -43,6 +43,13 @@ class FakeTracker:
         return {"results": []}
 
 
+def test_config_uses_default_tracker_url() -> None:
+    config = Config(machine_token="machine-token", client_version="worker-v2")
+
+    config.validate()
+    assert config.tracker_url == "https://hq.saveweb.org/"
+
+
 def test_project_queue_builds_direct_requests(monkeypatch: Any) -> None:
     monkeypatch.setattr(project_queue_module, "TrackerClient", FakeTracker)
     monkeypatch.setattr(project_queue_module.secrets, "choice", lambda _: "a")

@@ -8,7 +8,6 @@ canceled when the attempt can no longer be processed safely.
 
 ```go
 queue, err := worker.OpenProjectQueue(rootCtx, worker.Config{
-	TrackerURL:    "https://hq.saveweb.org",
 	MachineToken:  machineToken,
 	ClientVersion: "sinavideo/2.5.0",
 }, "sinavideo")
@@ -17,6 +16,9 @@ if err != nil {
 }
 defer queue.Close()
 ```
+
+`TrackerURL` defaults to `https://hq.saveweb.org/`. Set it explicitly only
+when connecting to another HQ deployment.
 
 Opening a queue generates a fresh seven-character `a-z0-9` worker ID. It stays
 fixed for that queue instance and is available through `queue.WorkerID()`.
