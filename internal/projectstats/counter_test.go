@@ -4,6 +4,9 @@ import "testing"
 
 func TestCounterWindowsAndRotation(t *testing.T) {
 	c := New()
+	if got := c.Snapshot("missing", 100); got != (Snapshot{}) {
+		t.Fatalf("empty snapshot = %+v", got)
+	}
 	c.AddClaimed("demo", 100, 5)
 	c.AddCompleted("demo", 100, 3)
 	c.AddClaimed("demo", 91, 7)

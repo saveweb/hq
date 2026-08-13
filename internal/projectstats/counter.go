@@ -53,7 +53,11 @@ func (c *Counter) Snapshot(projectID string, now int64) Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var result Snapshot
-	for _, b := range c.projects[projectID] {
+	buckets := c.projects[projectID]
+	if buckets == nil {
+		return result
+	}
+	for _, b := range buckets {
 		age := now - b.second
 		if age < 0 || age >= windowSeconds {
 			continue
