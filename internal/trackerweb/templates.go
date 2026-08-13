@@ -6,7 +6,7 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-var pages = template.Must(template.New("pages").Parse(loginTemplate + workerRegistrationTemplate + workerTemplate + workerTokenTemplate + dashboardTemplate + projectTemplate + usersTemplate + workersTemplate + tokenTemplate + jobTemplate + errorTemplate))
+var pages = template.Must(template.New("pages").Parse(loginTemplate + workerRegistrationTemplate + workerTemplate + workerTokenTemplate + dashboardTemplate + projectTemplate + projectStatsTemplate + usersTemplate + workersTemplate + tokenTemplate + jobTemplate + errorTemplate))
 
 func render(ctx *echo.Context, status int, name string, data any) error {
 	ctx.Response().Header().Set("Content-Type", "text/html; charset=utf-8")

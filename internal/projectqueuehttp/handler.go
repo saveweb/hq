@@ -16,6 +16,7 @@ import (
 	"github.com/labstack/echo/v5/middleware"
 
 	"github.com/saveweb/hq/internal/httpapi"
+	"github.com/saveweb/hq/internal/projectstats"
 	"github.com/saveweb/hq/internal/queue"
 	"github.com/saveweb/hq/internal/sourceformat"
 	"github.com/saveweb/hq/internal/tracker"
@@ -34,9 +35,10 @@ type handler struct {
 	store *postgres.Store
 	now   func() int64
 	nowNS func() int64
+	stats *projectstats.Counter
 }
 
-func New(store *postgres.Store, now, nowNS func() int64, logger *slog.Logger) *echo.Echo {
+func New(store *postgres.Store, now, nowNS func() int64, stats *projectstats.Counter, logger *slog.Logger) *echo.Echo {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -75,12 +77,12 @@ func New(store *postgres.Store, now, nowNS func() int64, logger *slog.Logger) *e
 		}
 	})
 	server.GET("/healthz", func(ctx *echo.Context) error { return ctx.JSON(http.StatusOK, map[string]string{"status": "ok"}) })
-	Register(server, store, now, nowNS)
+	Register(server, store, now, nowNS, stats)
 	return server
 }
 
-func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64) {
-	h := &handler{store: store, now: now, nowNS: nowNS}
+func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64, stats *projectstats.Counter) {
+	h := &handler{store: store, now: now, nowNS: nowNS, stats: stats}
 	server.GET("/api/v1/whoami", h.whoAmI)
 	server.GET("/api/v1/admin/projects", h.listProjects)
 	server.GET("/api/v1/admin/users", h.listUsers)
@@ -377,6 +379,9 @@ func (h *handler) claim(ctx *echo.Context) error {
 	if err != nil {
 		return h.writeError(ctx, err)
 	}
+	if h.stats != nil {
+		h.stats.AddClaimed(ctx.Param("project_id"), h.now(), len(result.Jobs))
+	}
 	return ctx.JSON(http.StatusOK, protocol.ProjectClaimResponse{
 		ProjectID: ctx.Param("project_id"), Jobs: result.Jobs,
 		RetryAfterMS: result.RetryAfterMS, PolicyVersion: result.PolicyVersion,
@@ -413,6 +418,15 @@ func (h *handler) complete(ctx *echo.Context) error {
 	result, err := h.store.CompleteProjectJobs(ctx.Request().Context(), user.ID, ctx.Param("project_id"), request, h.now())
 	if err != nil {
 		return h.writeError(ctx, err)
+	}
+	if h.stats != nil {
+		var applied int64
+		for _, item := range result.Results {
+			if item.Status == protocol.ItemStatusApplied {
+				applied++
+			}
+		}
+		h.stats.AddCompleted(ctx.Param("project_id"), h.now(), applied)
 	}
 	return ctx.JSON(http.StatusOK, result)
 }

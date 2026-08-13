@@ -22,6 +22,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"github.com/saveweb/hq/internal/projectstats"
 	"github.com/saveweb/hq/internal/queue"
 	"github.com/saveweb/hq/internal/sourceformat"
 	"github.com/saveweb/hq/internal/tracker"
@@ -76,6 +77,7 @@ type Config struct {
 	Secret                                  []byte
 	SessionTTL                              time.Duration
 	Clock                                   func() int64
+	Stats                                   *projectstats.Counter
 }
 
 type Handler struct {
@@ -87,6 +89,7 @@ type Handler struct {
 	adminOrganization, team string
 	sessionTTL              time.Duration
 	clock                   func() int64
+	stats                   *projectstats.Counter
 }
 
 func New(store Store, oauth OAuth, config Config, logger *slog.Logger) (*Handler, error) {
@@ -116,7 +119,7 @@ func New(store Store, oauth OAuth, config Config, logger *slog.Logger) (*Handler
 	return &Handler{
 		store: store, oauth: oauth, logger: logger, secret: append([]byte(nil), config.Secret...),
 		secureCookies: publicURL.Scheme == "https", adminOrganization: config.AdminOrganization,
-		team: config.AdminTeam, sessionTTL: config.SessionTTL, clock: config.Clock,
+		team: config.AdminTeam, sessionTTL: config.SessionTTL, clock: config.Clock, stats: config.Stats,
 	}, nil
 }
 
@@ -140,6 +143,7 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.POST("/admin/users/:user_id/token/revoke", h.revokeUserToken)
 	server.POST("/admin/projects", h.createProject)
 	server.GET("/admin/projects/:project_id", h.project)
+	server.GET("/admin/projects/:project_id/stats", h.projectStats)
 	server.POST("/admin/projects/:project_id/status", h.updateProjectStatus)
 	server.POST("/admin/projects/:project_id/delete", h.deleteProject)
 	server.POST("/admin/projects/:project_id/jobs", h.enqueueJobs)
@@ -147,6 +151,30 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/admin/projects/:project_id/jobs/:job_id", h.job)
 	server.POST("/admin/projects/:project_id/jobs/:job_id/requeue", h.requeueJob)
 	server.POST("/admin/projects/:project_id/jobs/:job_id/delete", h.deleteJob)
+}
+
+func (h *Handler) projectStats(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, _, ok := h.requireAdmin(ctx)
+	if !ok {
+		return nil
+	}
+	project, err := h.store.ProjectSummary(ctx.Request().Context(), ctx.Param("project_id"))
+	if err != nil {
+		if tracker.IsCode(err, protocol.ErrorNotFound) {
+			return h.pageError(ctx, http.StatusNotFound, "Project not found")
+		}
+		return h.internal(ctx, err)
+	}
+	var snapshot projectstats.Snapshot
+	if h.stats != nil {
+		snapshot = h.stats.Snapshot(project.ID, h.clock())
+	}
+	return render(ctx, http.StatusOK, "project-stats", map[string]any{
+		"User": user, "Project": project,
+		"ClaimQPS10": float64(snapshot.Claimed10) / 10, "ClaimQPS60": float64(snapshot.Claimed60) / 60,
+		"CompletedQPS10": float64(snapshot.Completed10) / 10, "CompletedQPS60": float64(snapshot.Completed60) / 60,
+	})
 }
 
 func (h *Handler) landing(ctx *echo.Context) error {

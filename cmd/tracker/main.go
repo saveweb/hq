@@ -18,6 +18,7 @@ import (
 
 	"github.com/saveweb/hq/internal/githuboauth"
 	"github.com/saveweb/hq/internal/projectqueuehttp"
+	"github.com/saveweb/hq/internal/projectstats"
 	"github.com/saveweb/hq/internal/queue"
 	"github.com/saveweb/hq/internal/sourceformat"
 	"github.com/saveweb/hq/internal/tracker"
@@ -266,10 +267,12 @@ func runServe(args []string, logger *slog.Logger) error {
 		return err
 	}
 	defer store.Close()
+	stats := projectstats.New()
 	handler := projectqueuehttp.New(
 		store,
 		func() int64 { return time.Now().Unix() },
 		func() int64 { return time.Now().UnixNano() },
+		stats,
 		logger,
 	)
 	webValues := []string{*publicURL, *githubClientID, *githubClientSecretFile, *webSessionSecretFile, *oauthAdminOrganization, *oauthAdminTeam}
@@ -302,7 +305,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		}
 		webHandler, err := trackerweb.New(store, oauthClient, trackerweb.Config{
 			PublicURL: *publicURL, AdminOrganization: *oauthAdminOrganization,
-			AdminTeam: *oauthAdminTeam, Secret: webSecret,
+			AdminTeam: *oauthAdminTeam, Secret: webSecret, Stats: stats,
 		}, logger)
 		if err != nil {
 			return err

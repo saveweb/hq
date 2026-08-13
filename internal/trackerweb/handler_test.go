@@ -15,6 +15,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"github.com/saveweb/hq/internal/projectstats"
 	"github.com/saveweb/hq/internal/sourceformat"
 	"github.com/saveweb/hq/internal/tracker"
 	"github.com/saveweb/hq/pkg/protocol"
@@ -283,6 +284,10 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		!strings.Contains(detail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
 	}
+	statsPage := request(t, server, http.MethodGet, "/admin/projects/demo/stats", "", sessionCookie)
+	if statsPage.Code != http.StatusOK || !strings.Contains(statsPage.Body.String(), "Claim QPS") || !strings.Contains(statsPage.Body.String(), "Completed QPS") || !strings.Contains(statsPage.Body.String(), `http-equiv="refresh" content="1"`) {
+		t.Fatalf("stats = %d %q", statsPage.Code, statsPage.Body.String())
+	}
 	settings := postForm(t, server, "/admin/projects/demo/status", url.Values{"csrf": {csrf}, "status": {tracker.ProjectStatusActive}, "claim_order": {tracker.ClaimOrderFIFO}, "recommended_lease_seconds": {"120"}, "client_versions": {"worker-v2\nworker-v1"}}, sessionCookie)
 	if settings.Code != http.StatusSeeOther || store.projects["demo"].ClaimOrder != tracker.ClaimOrderFIFO || store.projects["demo"].RecommendedLeaseSeconds != 120 || len(store.projects["demo"].ClientVersions) != 2 {
 		t.Fatalf("settings = %d project=%+v", settings.Code, store.projects["demo"])
@@ -504,7 +509,10 @@ func TestSourceUploadAcceptsMultipartCSRF(t *testing.T) {
 
 func newTestServer(t *testing.T, store *fakeStore, oauth *fakeOAuth) *echo.Echo {
 	t.Helper()
-	handler, err := New(store, oauth, Config{PublicURL: "https://hq.example", AdminOrganization: "saveweb", AdminTeam: "core", Secret: []byte("0123456789abcdef0123456789abcdef"), Clock: func() int64 { return 1_700_000_000 }}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	stats := projectstats.New()
+	stats.AddClaimed("demo", 1_700_000_000, 20)
+	stats.AddCompleted("demo", 1_700_000_000, 10)
+	handler, err := New(store, oauth, Config{PublicURL: "https://hq.example", AdminOrganization: "saveweb", AdminTeam: "core", Secret: []byte("0123456789abcdef0123456789abcdef"), Clock: func() int64 { return 1_700_000_000 }, Stats: stats}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
