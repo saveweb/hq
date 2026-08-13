@@ -238,9 +238,30 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err != nil || !found || workerUserID != "queue-worker" {
 		t.Fatalf("worker user = %q, %t, %v", workerUserID, found, err)
 	}
-	workers, err := store.ListWorkers(ctx, "worker-process-1", 200)
-	if err != nil || len(workers) != 1 || workers[0].UserID != "queue-worker" {
+	workers, err := store.ListWorkers(ctx, "worker-process-1", "", 200)
+	if err != nil || len(workers) != 1 || workers[0].UserID != "queue-worker" || workers[0].LastSeenAt != now+3 {
 		t.Fatalf("workers = %+v, %v", workers, err)
+	}
+	if _, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: protocol.OutcomeSuccess, Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+62); err != nil {
+		t.Fatal(err)
+	}
+	workers, err = store.ListWorkers(ctx, "worker-process-1", "", 200)
+	if err != nil || workers[0].LastSeenAt != now+3 {
+		t.Fatalf("worker last seen before write interval = %+v, %v", workers, err)
+	}
+	if _, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: protocol.OutcomeSuccess, Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+63); err != nil {
+		t.Fatal(err)
+	}
+	workers, err = store.ListWorkers(ctx, "", "queue-worker", 200)
+	if err != nil || len(workers) == 0 || workers[0].WorkerID != "worker-process-1" || workers[0].LastSeenAt != now+63 {
+		t.Fatalf("worker last seen at write interval = %+v, %v", workers, err)
+	}
+	if _, err := store.CompleteProjectJobs(ctx, "queue-worker", "queue-project", protocol.ProjectCompleteRequest{WorkerID: "worker-process-1", Items: []protocol.ProjectCompleteItem{{JobID: item.JobID, AttemptID: item.AttemptID, Outcome: protocol.Outcome{Kind: protocol.OutcomeSuccess, Meta: protocol.Attrs{}}, ArtifactReceipts: []protocol.ArtifactReceipt{receipt}}}}, now+10); err != nil {
+		t.Fatal(err)
+	}
+	workers, err = store.ListWorkers(ctx, "worker-process-1", "", 200)
+	if err != nil || workers[0].LastSeenAt != now+63 {
+		t.Fatalf("worker last seen moved backward = %+v, %v", workers, err)
 	}
 	if err := store.DeleteWorker(ctx, "worker-process-1"); err != nil {
 		t.Fatal(err)

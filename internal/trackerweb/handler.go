@@ -51,7 +51,7 @@ type Store interface {
 	PutProject(context.Context, tracker.Project, int64) error
 	EnqueueProjectJobs(context.Context, string, []protocol.AdminEnqueueJob, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
-	ListWorkers(context.Context, string, int) ([]tracker.WorkerUserMapping, error)
+	ListWorkers(context.Context, string, string, int) ([]tracker.WorkerUserMapping, error)
 	MachineToken(context.Context, string) (string, bool, error)
 	PutUser(context.Context, string, string, []string, int64) error
 	DeleteUser(context.Context, string) error
@@ -127,6 +127,7 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/auth/github/callback", h.oauthCallback)
 	server.POST("/logout", h.logout)
 	server.GET("/worker", h.workerPortal)
+	server.GET("/worker/workers", h.ownWorkers)
 	server.POST("/worker/token", h.rotateOwnToken)
 	server.POST("/worker/token/revoke", h.revokeOwnToken)
 	server.GET("/admin", h.dashboard)
@@ -370,16 +371,49 @@ func (h *Handler) workers(ctx *echo.Context) error {
 		return nil
 	}
 	workerID := ctx.QueryParam("worker_id")
-	workers, err := h.store.ListWorkers(ctx.Request().Context(), workerID, 200)
+	userID := ctx.QueryParam("user_id")
+	if workerID != "" && userID != "" {
+		return h.pageError(ctx, http.StatusBadRequest, "Choose either a worker ID or a user ID")
+	}
+	workers, err := h.store.ListWorkers(ctx.Request().Context(), workerID, userID, 200)
 	if err != nil {
 		if tracker.IsCode(err, protocol.ErrorInvalidRequest) {
-			return h.pageError(ctx, http.StatusBadRequest, "Invalid worker ID")
+			return h.pageError(ctx, http.StatusBadRequest, "Invalid worker query")
 		}
 		return h.internal(ctx, err)
 	}
 	return render(ctx, http.StatusOK, "workers", map[string]any{
-		"User": user, "Workers": workers, "WorkerID": workerID,
+		"User": user, "Workers": presentWorkers(workers), "WorkerID": workerID, "UserID": userID, "Admin": true,
 	})
+}
+
+func (h *Handler) ownWorkers(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, _, ok := h.requireWorker(ctx)
+	if !ok {
+		return nil
+	}
+	workers, err := h.store.ListWorkers(ctx.Request().Context(), "", user.ID, 200)
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	return render(ctx, http.StatusOK, "workers", map[string]any{
+		"User": user, "Workers": presentWorkers(workers), "UserID": user.ID,
+	})
+}
+
+type workerView struct {
+	WorkerID, UserID, LastSeenAt string
+}
+
+func presentWorkers(workers []tracker.WorkerUserMapping) []workerView {
+	result := make([]workerView, 0, len(workers))
+	for _, worker := range workers {
+		result = append(result, workerView{
+			WorkerID: worker.WorkerID, UserID: worker.UserID, LastSeenAt: formatUnixTime(worker.LastSeenAt),
+		})
+	}
+	return result
 }
 
 func (h *Handler) deleteUser(ctx *echo.Context) error {

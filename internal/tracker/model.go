@@ -52,8 +52,9 @@ type User struct {
 func (u User) HasRole(role string) bool { return u.Roles[role] }
 
 type WorkerUserMapping struct {
-	WorkerID string
-	UserID   string
+	WorkerID   string
+	UserID     string
+	LastSeenAt int64
 }
 
 type GitHubIdentity struct {

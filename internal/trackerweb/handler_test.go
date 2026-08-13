@@ -28,6 +28,7 @@ type fakeStore struct {
 	jobs         map[string][]protocol.AdminJob
 	users        map[string]protocol.AdminUserSummary
 	workers      []tracker.WorkerUserMapping
+	workerUserID string
 	tokens       map[string]string
 	deleted      bool
 	upsertedID   int64
@@ -139,10 +140,11 @@ func (s *fakeStore) ListUsers(context.Context) ([]protocol.AdminUserSummary, err
 	}
 	return result, nil
 }
-func (s *fakeStore) ListWorkers(_ context.Context, workerID string, limit int) ([]tracker.WorkerUserMapping, error) {
+func (s *fakeStore) ListWorkers(_ context.Context, workerID, userID string, limit int) ([]tracker.WorkerUserMapping, error) {
+	s.workerUserID = userID
 	result := []tracker.WorkerUserMapping{}
 	for _, worker := range s.workers {
-		if workerID == "" || worker.WorkerID == workerID {
+		if (workerID == "" || worker.WorkerID == workerID) && (userID == "" || worker.UserID == userID) {
 			result = append(result, worker)
 		}
 		if len(result) == limit {
@@ -299,7 +301,7 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	job.WorkerID = &workerID
 	job.CompletedAt = &completedAt
 	store.jobs["demo"][0] = job
-	store.workers = []tracker.WorkerUserMapping{{WorkerID: workerID, UserID: "gh_42"}}
+	store.workers = []tracker.WorkerUserMapping{{WorkerID: workerID, UserID: "gh_42", LastSeenAt: 1700000060}}
 	jobDetail := request(t, server, http.MethodGet, "/admin/projects/demo/jobs/1", "", sessionCookie)
 	if jobDetail.Code != http.StatusOK || !strings.Contains(jobDetail.Body.String(), "https://example.com/") ||
 		!strings.Contains(jobDetail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") ||
@@ -311,8 +313,17 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	}
 	workers := request(t, server, http.MethodGet, "/admin/workers?worker_id=abc1234", "", sessionCookie)
 	if workers.Code != http.StatusOK || !strings.Contains(workers.Body.String(), "Exact match for") ||
-		!strings.Contains(workers.Body.String(), "abc1234") || !strings.Contains(workers.Body.String(), "gh_42") {
+		!strings.Contains(workers.Body.String(), "abc1234") || !strings.Contains(workers.Body.String(), "gh_42") ||
+		!strings.Contains(workers.Body.String(), "1700000060 (2023-11-14 22:14:20 UTC)") {
 		t.Fatalf("workers = %d %q", workers.Code, workers.Body.String())
+	}
+	userWorkers := request(t, server, http.MethodGet, "/admin/workers?user_id=gh_42", "", sessionCookie)
+	if userWorkers.Code != http.StatusOK || !strings.Contains(userWorkers.Body.String(), "Workers for") || !strings.Contains(userWorkers.Body.String(), "abc1234") {
+		t.Fatalf("user workers = %d %q", userWorkers.Code, userWorkers.Body.String())
+	}
+	invalidWorkers := request(t, server, http.MethodGet, "/admin/workers?worker_id=abc1234&user_id=gh_42", "", sessionCookie)
+	if invalidWorkers.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous worker query = %d", invalidWorkers.Code)
 	}
 	missingWorker := request(t, server, http.MethodGet, "/admin/workers?worker_id=missing", "", sessionCookie)
 	if missingWorker.Code != http.StatusOK || !strings.Contains(missingWorker.Body.String(), "No worker mapping found") {
@@ -399,8 +410,16 @@ func TestActiveWorkerManagesOwnMachineToken(t *testing.T) {
 	}
 	sessionCookie := responseCookie(t, callback, sessionCookieName)
 	portal := request(t, server, http.MethodGet, "/worker", "", sessionCookie)
-	if portal.Code != http.StatusOK || !strings.Contains(portal.Body.String(), "Generate token") {
+	if portal.Code != http.StatusOK || !strings.Contains(portal.Body.String(), "Generate token") || !strings.Contains(portal.Body.String(), "/worker/workers") {
 		t.Fatalf("worker portal = %d %q", portal.Code, portal.Body.String())
+	}
+	store.workers = []tracker.WorkerUserMapping{
+		{WorkerID: "own-worker", UserID: "gh_42", LastSeenAt: 1700000060},
+		{WorkerID: "other-worker", UserID: "gh_99", LastSeenAt: 1700000120},
+	}
+	ownWorkers := request(t, server, http.MethodGet, "/worker/workers?user_id=gh_99", "", sessionCookie)
+	if ownWorkers.Code != http.StatusOK || store.workerUserID != "gh_42" || !strings.Contains(ownWorkers.Body.String(), "own-worker") || strings.Contains(ownWorkers.Body.String(), "other-worker") {
+		t.Fatalf("own workers = %d queried=%q body=%q", ownWorkers.Code, store.workerUserID, ownWorkers.Body.String())
 	}
 	csrf := extractCSRF(t, portal.Body.String())
 	token := postForm(t, server, "/worker/token", url.Values{"csrf": {csrf}}, sessionCookie)
@@ -415,6 +434,10 @@ func TestActiveWorkerManagesOwnMachineToken(t *testing.T) {
 	admin := request(t, server, http.MethodGet, "/admin", "", sessionCookie)
 	if admin.Code != http.StatusForbidden {
 		t.Fatalf("worker admin access = %d", admin.Code)
+	}
+	adminWorkers := request(t, server, http.MethodGet, "/admin/workers?user_id=gh_99", "", sessionCookie)
+	if adminWorkers.Code != http.StatusForbidden {
+		t.Fatalf("worker admin worker lookup = %d", adminWorkers.Code)
 	}
 	revoke := postForm(t, server, "/worker/token/revoke", url.Values{"csrf": {csrf}}, sessionCookie)
 	if revoke.Code != http.StatusSeeOther || store.users["gh_42"].MachineTokenActive {
