@@ -36,8 +36,16 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	const now = int64(1_780_100_000)
 	avatar := "https://avatars.example/admin"
 	admin, err := store.UpsertGitHubAdmin(ctx, tracker.GitHubIdentity{UserID: 42, Login: "hq-admin", AvatarURL: &avatar}, now)
-	if err != nil || admin.ID != "gh_42" || admin.GitHubUserID == nil || *admin.GitHubUserID != 42 || !admin.HasRole(tracker.RoleAdmin) {
+	if err != nil || admin.ID != "gh_42" || admin.GitHubUserID == nil || *admin.GitHubUserID != 42 ||
+		!admin.HasRole(tracker.RoleAdmin) || !admin.HasRole(tracker.RoleWorker) {
 		t.Fatalf("GitHub admin = %+v, %v", admin, err)
+	}
+	if err := store.PutUser(ctx, admin.ID, tracker.UserStatusActive, []string{tracker.RoleAdmin}, now+1); err != nil {
+		t.Fatal(err)
+	}
+	admin, err = store.UpsertGitHubAdmin(ctx, tracker.GitHubIdentity{UserID: 42, Login: "hq-admin", AvatarURL: &avatar}, now+2)
+	if err != nil || !admin.HasRole(tracker.RoleAdmin) || !admin.HasRole(tracker.RoleWorker) {
+		t.Fatalf("returning GitHub admin = %+v, %v", admin, err)
 	}
 	pending, err := store.UpsertGitHubPendingWorker(ctx, tracker.GitHubIdentity{UserID: 43, Login: "new-worker"}, now)
 	if err != nil || pending.ID != "gh_43" || pending.Status != tracker.UserStatusPending || !pending.HasRole(tracker.RoleWorker) {
@@ -130,8 +138,8 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", ""); !tracker.IsCode(err, protocol.ErrorClientUpgrade) {
 		t.Fatalf("missing client version = %v", err)
 	}
-	if err := store.CheckProjectClientVersion(ctx, admin.ID, "queue-project", "worker-v2"); !tracker.IsCode(err, protocol.ErrorPermissionDenied) {
-		t.Fatalf("non-worker client version check = %v", err)
+	if err := store.CheckProjectClientVersion(ctx, admin.ID, "queue-project", "worker-v2"); err != nil {
+		t.Fatalf("admin worker client version check = %v", err)
 	}
 	if err := store.PutProject(ctx, tracker.Project{ID: "invalid-versions", Status: tracker.ProjectStatusActive, ClientVersions: []string{"v1", "v1"}}, now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
 		t.Fatalf("duplicate client versions = %v", err)

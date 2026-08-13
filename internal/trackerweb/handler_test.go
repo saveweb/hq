@@ -42,7 +42,7 @@ func newFakeStore() *fakeStore {
 
 func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
 	s.upsertedID = identity.UserID
-	s.user = tracker.User{ID: "gh_42", GitHubUserID: &identity.UserID, GitHubLogin: identity.Login, Status: tracker.UserStatusActive, Roles: map[string]bool{tracker.RoleAdmin: true}, LastLoginAt: &now}
+	s.user = tracker.User{ID: "gh_42", GitHubUserID: &identity.UserID, GitHubLogin: identity.Login, Status: tracker.UserStatusActive, Roles: map[string]bool{tracker.RoleAdmin: true, tracker.RoleWorker: true}, LastLoginAt: &now}
 	return s.user, nil
 }
 func (s *fakeStore) UpsertGitHubPendingWorker(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {

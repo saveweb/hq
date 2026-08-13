@@ -17,7 +17,7 @@ func (s *Store) UpsertGitHubAdmin(ctx context.Context, identity tracker.GitHubId
 	if err := validateGitHubIdentity(identity); err != nil {
 		return tracker.User{}, err
 	}
-	roles := []string{tracker.RoleAdmin}
+	roles := []string{tracker.RoleAdmin, tracker.RoleWorker}
 	var user tracker.User
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var err error
