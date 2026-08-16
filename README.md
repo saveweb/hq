@@ -144,6 +144,19 @@ GitHub users are registered as pending workers and receive no administration
 session. After an administrator activates the account, the worker signs in
 again and generates its own machine token at `/worker`.
 
+An active worker that already has a machine token can open a temporary shell
+with `HQ_MACHINE_TOKEN` set without copying or saving the token:
+
+```bash
+curl -fsSL https://hq.saveweb.org/auth/machine-token.sh | bash
+```
+
+The script prints a one-time GitHub OAuth URL and starts an interactive Bash
+subshell after authorization. Authorization is rejected unless the account is
+active, has the `worker` role, and has an active, viewable machine token. Exit
+the subshell to remove the environment variable. The script does not write the
+token to a file or export it back to the parent shell.
+
 An active administrator machine token can perform the same operations through
 `/api/v1/admin/projects`. Project responses include queue counts for all job
 states. Browser sessions are not accepted by machine API routes.

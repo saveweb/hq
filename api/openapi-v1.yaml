@@ -22,6 +22,43 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, const: ok}
+  /api/v1/device/authorizations:
+    post:
+      security: []
+      operationId: createDeviceAuthorization
+      description: Creates a short-lived browser authorization transaction for retrieving an existing machine token.
+      responses:
+        '201':
+          description: Device authorization created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceAuthorizationResponse'}
+  /api/v1/device/token:
+    post:
+      security: []
+      operationId: redeemDeviceAuthorization
+      description: Polls and consumes a device authorization. A machine token is returned only for an active user with the worker role and an active, viewable token.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [device_code]
+              properties:
+                device_code: {type: string, minLength: 43, maxLength: 43}
+      responses:
+        '200':
+          description: Current authorization state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceTokenResponse'}
+        '400':
+          description: Authorization is invalid, expired, or already consumed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceTokenResponse'}
   /api/v1/whoami:
     get:
       operationId: whoAmI
@@ -333,6 +370,22 @@ components:
       required: [user_id]
       properties:
         user_id: {$ref: '#/components/schemas/Identifier'}
+    DeviceAuthorizationResponse:
+      type: object
+      additionalProperties: false
+      required: [device_code, verification_uri_complete, expires_in, interval]
+      properties:
+        device_code: {type: string, minLength: 43, maxLength: 43}
+        verification_uri_complete: {type: string, format: uri}
+        expires_in: {type: integer, const: 600}
+        interval: {type: integer, const: 2}
+    DeviceTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, enum: [authorization_pending, authorized, access_denied]}
+        machine_token: {type: string, pattern: '^hq_[A-Za-z0-9_-]+$'}
     JobCounts:
       type: object
       additionalProperties: false

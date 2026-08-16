@@ -17,6 +17,8 @@ def test_openapi_contract_has_all_v1_operations() -> None:
 
     expected = {
         "/healthz": {"get"},
+        "/api/v1/device/authorizations": {"post"},
+        "/api/v1/device/token": {"post"},
         "/api/v1/whoami": {"get"},
         "/api/v1/admin/projects": {"get"},
         "/api/v1/admin/users": {"get"},

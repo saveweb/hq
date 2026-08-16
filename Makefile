@@ -20,7 +20,7 @@ test-python:
 	uv run --project sdk/python python -m pytest
 
 test-shell:
-	bash -n scripts/*.sh
+	bash -n scripts/*.sh internal/trackerweb/*.sh
 
 test-postgres:
 	./scripts/test-postgres.sh

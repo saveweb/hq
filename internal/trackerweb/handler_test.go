@@ -3,6 +3,7 @@ package trackerweb
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,10 +36,17 @@ type fakeStore struct {
 	deleted      bool
 	upsertedID   int64
 	registeredID int64
+	devices      map[string]fakeDeviceAuthorization
+}
+
+type fakeDeviceAuthorization struct {
+	userCode string
+	userID   string
+	status   string
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}, tokens: map[string]string{}}
+	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}, tokens: map[string]string{}, devices: map[string]fakeDeviceAuthorization{}}
 }
 
 func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
@@ -181,6 +190,42 @@ func (s *fakeStore) RevokeMachineToken(_ context.Context, id string, _ int64) er
 	user.MachineTokenActive, user.MachineTokenViewable = false, false
 	s.users[id] = user
 	return nil
+}
+func (s *fakeStore) CreateDeviceAuthorization(_ context.Context, hash []byte, userCode string, _, _ int64) error {
+	s.devices[string(hash)] = fakeDeviceAuthorization{userCode: userCode, status: tracker.DeviceAuthorizationPending}
+	return nil
+}
+func (s *fakeStore) AuthorizeDevice(_ context.Context, userCode, userID string, _ int64) (bool, error) {
+	for key, device := range s.devices {
+		if device.userCode != userCode || device.status != tracker.DeviceAuthorizationPending {
+			continue
+		}
+		user := s.users[userID]
+		eligible := user.Status == tracker.UserStatusActive && slices.Contains(user.Roles, tracker.RoleWorker) && user.MachineTokenActive && s.tokens[userID] != ""
+		device.userID = userID
+		device.status = tracker.DeviceAuthorizationDenied
+		if eligible {
+			device.status = tracker.DeviceAuthorizationAuthorized
+		}
+		s.devices[key] = device
+		return eligible, nil
+	}
+	return false, tracker.InvalidRequest("missing")
+}
+func (s *fakeStore) RedeemDeviceAuthorization(_ context.Context, hash []byte, _ int64) (tracker.DeviceAuthorization, error) {
+	key := string(hash)
+	device, ok := s.devices[key]
+	if !ok {
+		return tracker.DeviceAuthorization{}, tracker.InvalidRequest("missing")
+	}
+	result := tracker.DeviceAuthorization{Status: device.status}
+	if device.status != tracker.DeviceAuthorizationPending {
+		delete(s.devices, key)
+		if device.status == tracker.DeviceAuthorizationAuthorized {
+			result.MachineToken = s.tokens[device.userID]
+		}
+	}
+	return result, nil
 }
 func (s *fakeStore) DeleteProject(_ context.Context, id string) error {
 	delete(s.projects, id)
@@ -401,6 +446,91 @@ func TestOAuthRegistersNonTeamMemberAsPendingWorker(t *testing.T) {
 	}
 }
 
+func TestDeviceAuthorizationReturnsExistingActiveWorkerToken(t *testing.T) {
+	store := newFakeStore()
+	store.users["gh_42"] = protocol.AdminUserSummary{
+		ID: "gh_42", Status: tracker.UserStatusActive, Roles: []string{tracker.RoleWorker}, MachineTokenActive: true, MachineTokenViewable: true,
+	}
+	store.tokens["gh_42"] = "hq_existing-token"
+	server := newTestServer(t, store, &fakeOAuth{member: false})
+
+	created := request(t, server, http.MethodPost, "/api/v1/device/authorizations", "", nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create device authorization = %d %q", created.Code, created.Body.String())
+	}
+	var authorization struct {
+		DeviceCode              string `json:"device_code"`
+		VerificationURIComplete string `json:"verification_uri_complete"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &authorization); err != nil {
+		t.Fatal(err)
+	}
+	if len(authorization.DeviceCode) != 43 || !strings.HasPrefix(authorization.VerificationURIComplete, "https://hq.example/device?code=") {
+		t.Fatalf("device authorization = %+v", authorization)
+	}
+	pending := postForm(t, server, "/api/v1/device/token", url.Values{"device_code": {authorization.DeviceCode}}, nil)
+	if pending.Code != http.StatusOK || !strings.Contains(pending.Body.String(), tracker.DeviceAuthorizationPending) {
+		t.Fatalf("pending redemption = %d %q", pending.Code, pending.Body.String())
+	}
+
+	verificationURL, _ := url.Parse(authorization.VerificationURIComplete)
+	device := request(t, server, http.MethodGet, verificationURL.RequestURI(), "", nil)
+	if device.Code != http.StatusFound || !strings.HasPrefix(device.Header().Get("Location"), "/auth/github/start?device_code=") {
+		t.Fatalf("device verification = %d location=%q", device.Code, device.Header().Get("Location"))
+	}
+	start := request(t, server, http.MethodGet, device.Header().Get("Location"), "", nil)
+	authorize, _ := url.Parse(start.Header().Get("Location"))
+	callback := request(t, server, http.MethodGet, "/auth/github/callback?code=accepted-code&state="+url.QueryEscape(authorize.Query().Get("state")), "", responseCookie(t, start, oauthCookieName))
+	if callback.Code != http.StatusOK || !strings.Contains(callback.Body.String(), "Device authorized") {
+		t.Fatalf("device callback = %d %q", callback.Code, callback.Body.String())
+	}
+
+	redeemed := postForm(t, server, "/api/v1/device/token", url.Values{"device_code": {authorization.DeviceCode}}, nil)
+	if redeemed.Code != http.StatusOK || !strings.Contains(redeemed.Body.String(), tracker.DeviceAuthorizationAuthorized) || !strings.Contains(redeemed.Body.String(), "hq_existing-token") {
+		t.Fatalf("device redemption = %d %q", redeemed.Code, redeemed.Body.String())
+	}
+	reused := postForm(t, server, "/api/v1/device/token", url.Values{"device_code": {authorization.DeviceCode}}, nil)
+	if reused.Code != http.StatusBadRequest || strings.Contains(reused.Body.String(), "hq_existing-token") {
+		t.Fatalf("reused device redemption = %d %q", reused.Code, reused.Body.String())
+	}
+}
+
+func TestMachineTokenShellScriptIsGeneric(t *testing.T) {
+	server := newTestServer(t, newFakeStore(), &fakeOAuth{member: false})
+	response := request(t, server, http.MethodGet, "/auth/machine-token.sh", "", nil)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/x-shellscript; charset=utf-8" ||
+		!strings.Contains(body, "export HQ_MACHINE_TOKEN") || !strings.Contains(body, "exec bash -i") ||
+		strings.Contains(body, "sinavideo") || strings.Contains(body, "docker") {
+		t.Fatalf("machine-token shell script = %d headers=%v body=%q", response.Code, response.Header(), body)
+	}
+}
+
+func TestDeviceAuthorizationRejectsIneligibleAccount(t *testing.T) {
+	store := newFakeStore()
+	server := newTestServer(t, store, &fakeOAuth{member: false})
+	created := request(t, server, http.MethodPost, "/api/v1/device/authorizations", "", nil)
+	var authorization struct {
+		DeviceCode              string `json:"device_code"`
+		VerificationURIComplete string `json:"verification_uri_complete"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &authorization); err != nil {
+		t.Fatal(err)
+	}
+	verificationURL, _ := url.Parse(authorization.VerificationURIComplete)
+	device := request(t, server, http.MethodGet, verificationURL.RequestURI(), "", nil)
+	start := request(t, server, http.MethodGet, device.Header().Get("Location"), "", nil)
+	authorize, _ := url.Parse(start.Header().Get("Location"))
+	callback := request(t, server, http.MethodGet, "/auth/github/callback?code=accepted-code&state="+url.QueryEscape(authorize.Query().Get("state")), "", responseCookie(t, start, oauthCookieName))
+	if callback.Code != http.StatusOK || !strings.Contains(callback.Body.String(), "Authorization denied") {
+		t.Fatalf("denied callback = %d %q", callback.Code, callback.Body.String())
+	}
+	denied := postForm(t, server, "/api/v1/device/token", url.Values{"device_code": {authorization.DeviceCode}}, nil)
+	if denied.Code != http.StatusOK || !strings.Contains(denied.Body.String(), tracker.DeviceAuthorizationDenied) || strings.Contains(denied.Body.String(), "machine_token") {
+		t.Fatalf("denied redemption = %d %q", denied.Code, denied.Body.String())
+	}
+}
+
 func TestActiveWorkerManagesOwnMachineToken(t *testing.T) {
 	store := newFakeStore()
 	store.users["gh_42"] = protocol.AdminUserSummary{
@@ -536,7 +666,9 @@ func postForm(t *testing.T, server http.Handler, target string, form url.Values,
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(cookie)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, req)
 	return response

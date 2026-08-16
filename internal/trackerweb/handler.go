@@ -33,6 +33,7 @@ const (
 	sessionCookieName  = "saveweb_hq_session"
 	oauthCookieName    = "saveweb_hq_oauth"
 	oauthTTL           = 10 * time.Minute
+	deviceTTL          = 10 * time.Minute
 	defaultSessionTTL  = 12 * time.Hour
 	maxFormBytes       = int64(1 << 20)
 	maxSourceFormBytes = int64(257 << 20)
@@ -58,6 +59,9 @@ type Store interface {
 	DeleteUser(context.Context, string) error
 	RotateMachineToken(context.Context, string, string, int64) error
 	RevokeMachineToken(context.Context, string, int64) error
+	CreateDeviceAuthorization(context.Context, []byte, string, int64, int64) error
+	AuthorizeDevice(context.Context, string, string, int64) (bool, error)
+	RedeemDeviceAuthorization(context.Context, []byte, int64) (tracker.DeviceAuthorization, error)
 	DeleteProject(context.Context, string) error
 	ListProjectJobs(context.Context, string, string, int64, int) (protocol.AdminJobListResponse, error)
 	ProjectJob(context.Context, string, int64) (protocol.AdminJob, error)
@@ -86,6 +90,7 @@ type Handler struct {
 	logger                  *slog.Logger
 	secret                  []byte
 	secureCookies           bool
+	publicURL               string
 	adminOrganization, team string
 	sessionTTL              time.Duration
 	clock                   func() int64
@@ -118,7 +123,7 @@ func New(store Store, oauth OAuth, config Config, logger *slog.Logger) (*Handler
 	}
 	return &Handler{
 		store: store, oauth: oauth, logger: logger, secret: append([]byte(nil), config.Secret...),
-		secureCookies: publicURL.Scheme == "https", adminOrganization: config.AdminOrganization,
+		secureCookies: publicURL.Scheme == "https", publicURL: strings.TrimSuffix(config.PublicURL, "/"), adminOrganization: config.AdminOrganization,
 		team: config.AdminTeam, sessionTTL: config.SessionTTL, clock: config.Clock, stats: config.Stats,
 	}, nil
 }
@@ -128,6 +133,10 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/assets/admin.css", h.stylesheet)
 	server.GET("/auth/github/start", h.oauthStart)
 	server.GET("/auth/github/callback", h.oauthCallback)
+	server.POST("/api/v1/device/authorizations", h.createDeviceAuthorization)
+	server.POST("/api/v1/device/token", h.redeemDeviceAuthorization)
+	server.GET("/device", h.deviceAuthorization)
+	server.GET("/auth/machine-token.sh", h.machineTokenShell)
 	server.POST("/logout", h.logout)
 	server.GET("/worker", h.workerPortal)
 	server.GET("/worker/workers", h.ownWorkers)
@@ -151,6 +160,79 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/admin/projects/:project_id/jobs/:job_id", h.job)
 	server.POST("/admin/projects/:project_id/jobs/:job_id/requeue", h.requeueJob)
 	server.POST("/admin/projects/:project_id/jobs/:job_id/delete", h.deleteJob)
+}
+
+func (h *Handler) createDeviceAuthorization(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	deviceCode, err := randomValue()
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	userCode, err := randomValue()
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	now := h.clock()
+	if err := h.store.CreateDeviceAuthorization(ctx.Request().Context(), deviceAuthorizationHash(deviceCode), userCode, now, now+int64(deviceTTL/time.Second)); err != nil {
+		return h.internal(ctx, err)
+	}
+	return ctx.JSON(http.StatusCreated, map[string]any{
+		"device_code":               deviceCode,
+		"verification_uri_complete": h.publicURL + "/device?code=" + url.QueryEscape(userCode),
+		"expires_in":                int(deviceTTL / time.Second),
+		"interval":                  2,
+	})
+}
+
+func (h *Handler) redeemDeviceAuthorization(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	if err := ctx.Request().ParseForm(); err != nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"status": tracker.DeviceAuthorizationDenied})
+	}
+	deviceCode := ctx.FormValue("device_code")
+	if len(deviceCode) != 43 {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"status": tracker.DeviceAuthorizationDenied})
+	}
+	result, err := h.store.RedeemDeviceAuthorization(ctx.Request().Context(), deviceAuthorizationHash(deviceCode), h.clock())
+	if err != nil {
+		if tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"status": tracker.DeviceAuthorizationDenied})
+		}
+		return h.internal(ctx, err)
+	}
+	response := map[string]string{"status": result.Status}
+	if result.Status == tracker.DeviceAuthorizationAuthorized {
+		response["machine_token"] = result.MachineToken
+	}
+	return ctx.JSON(http.StatusOK, response)
+}
+
+func (h *Handler) deviceAuthorization(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	userCode := ctx.QueryParam("code")
+	if len(userCode) != 43 {
+		return h.pageError(ctx, http.StatusBadRequest, "Device authorization is invalid or expired")
+	}
+	user, _, err := h.currentUser(ctx)
+	if errors.Is(err, tracker.ErrWebSessionNotFound) {
+		return ctx.Redirect(http.StatusFound, "/auth/github/start?device_code="+url.QueryEscape(userCode))
+	}
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	return h.decideDeviceAuthorization(ctx, userCode, user.ID)
+}
+
+func (h *Handler) decideDeviceAuthorization(ctx *echo.Context, userCode, userID string) error {
+	authorized, err := h.store.AuthorizeDevice(ctx.Request().Context(), userCode, userID, h.clock())
+	if err != nil {
+		if tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+			return h.pageError(ctx, http.StatusBadRequest, "Device authorization is invalid, expired, or already used")
+		}
+		return h.internal(ctx, err)
+	}
+	h.webHeaders(ctx.Response().Header())
+	return render(ctx, http.StatusOK, "device-authorization", map[string]bool{"Authorized": authorized})
 }
 
 func (h *Handler) projectStats(ctx *echo.Context) error {
@@ -200,6 +282,10 @@ func (h *Handler) stylesheet(ctx *echo.Context) error {
 
 func (h *Handler) oauthStart(ctx *echo.Context) error {
 	h.webHeaders(ctx.Response().Header())
+	deviceCode := ctx.QueryParam("device_code")
+	if deviceCode != "" && len(deviceCode) != 43 {
+		return h.pageError(ctx, http.StatusBadRequest, "Device authorization is invalid")
+	}
 	state, err := randomValue()
 	if err != nil {
 		return h.internal(ctx, err)
@@ -215,7 +301,7 @@ func (h *Handler) oauthStart(ctx *echo.Context) error {
 	}
 	expiresAt := h.clock() + int64(oauthTTL/time.Second)
 	ctx.SetCookie(&http.Cookie{
-		Name: oauthCookieName, Value: h.signOAuthTransaction(state, verifier, expiresAt),
+		Name: oauthCookieName, Value: h.signOAuthTransaction(state, verifier, deviceCode, expiresAt),
 		Path: "/auth/github/callback", MaxAge: int(oauthTTL / time.Second), HttpOnly: true,
 		Secure: h.secureCookies, SameSite: http.SameSiteLaxMode,
 	})
@@ -229,7 +315,7 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 	if err != nil {
 		return h.pageError(ctx, http.StatusBadRequest, "Login transaction is missing or expired")
 	}
-	state, verifier, err := h.verifyOAuthTransaction(cookie.Value)
+	state, verifier, deviceCode, err := h.verifyOAuthTransaction(cookie.Value)
 	if err != nil || !hmac.Equal([]byte(state), []byte(ctx.QueryParam("state"))) || ctx.QueryParam("error") != "" || ctx.QueryParam("code") == "" {
 		return h.pageError(ctx, http.StatusBadRequest, "GitHub authorization was not completed")
 	}
@@ -256,6 +342,9 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 		if err != nil {
 			return h.internal(ctx, err)
 		}
+		if deviceCode != "" {
+			return h.decideDeviceAuthorization(ctx, deviceCode, user.ID)
+		}
 		if user.Status == tracker.UserStatusActive && user.HasRole(tracker.RoleWorker) {
 			return h.createSession(ctx, requestContext, user, now, "/worker")
 		}
@@ -264,6 +353,9 @@ func (h *Handler) oauthCallback(ctx *echo.Context) error {
 	user, err := h.store.UpsertGitHubAdmin(requestContext, identity, now)
 	if err != nil {
 		return h.internal(ctx, err)
+	}
+	if deviceCode != "" {
+		return h.decideDeviceAuthorization(ctx, deviceCode, user.ID)
 	}
 	return h.createSession(ctx, requestContext, user, now, "/admin")
 }
@@ -955,31 +1047,36 @@ func randomValue() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
-func (h *Handler) signOAuthTransaction(state, verifier string, expiresAt int64) string {
-	payload := state + "." + verifier + "." + strconv.FormatInt(expiresAt, 10)
+func (h *Handler) signOAuthTransaction(state, verifier, deviceCode string, expiresAt int64) string {
+	payload := state + "." + verifier + "." + deviceCode + "." + strconv.FormatInt(expiresAt, 10)
 	mac := hmac.New(sha256.New, h.secret)
 	_, _ = mac.Write([]byte("oauth\x00" + payload))
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (h *Handler) verifyOAuthTransaction(value string) (string, string, error) {
+func (h *Handler) verifyOAuthTransaction(value string) (string, string, string, error) {
 	encoded, signature, found := strings.Cut(value, ".")
 	payload, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
 	provided, signatureErr := base64.RawURLEncoding.DecodeString(signature)
 	if !found || decodeErr != nil || signatureErr != nil {
-		return "", "", errors.New("invalid OAuth transaction")
+		return "", "", "", errors.New("invalid OAuth transaction")
 	}
 	mac := hmac.New(sha256.New, h.secret)
 	_, _ = mac.Write([]byte("oauth\x00" + string(payload)))
 	parts := strings.Split(string(payload), ".")
-	if !hmac.Equal(provided, mac.Sum(nil)) || len(parts) != 3 {
-		return "", "", errors.New("invalid OAuth transaction")
+	if !hmac.Equal(provided, mac.Sum(nil)) || len(parts) != 4 {
+		return "", "", "", errors.New("invalid OAuth transaction")
 	}
-	expiresAt, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil || expiresAt < h.clock() || len(parts[0]) != 43 || len(parts[1]) != 43 {
-		return "", "", errors.New("expired OAuth transaction")
+	expiresAt, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || expiresAt < h.clock() || len(parts[0]) != 43 || len(parts[1]) != 43 || (parts[2] != "" && len(parts[2]) != 43) {
+		return "", "", "", errors.New("expired OAuth transaction")
 	}
-	return parts[0], parts[1], nil
+	return parts[0], parts[1], parts[2], nil
+}
+
+func deviceAuthorizationHash(value string) []byte {
+	sum := sha256.Sum256([]byte("saveweb-device-authorization-v1\x00" + value))
+	return sum[:]
 }
 
 func (h *Handler) clearCookie(ctx *echo.Context, name, path string) {

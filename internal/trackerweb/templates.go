@@ -6,7 +6,7 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-var pages = template.Must(template.New("pages").Parse(loginTemplate + workerRegistrationTemplate + workerTemplate + workerTokenTemplate + dashboardTemplate + projectTemplate + projectStatsTemplate + usersTemplate + workersTemplate + tokenTemplate + jobTemplate + errorTemplate))
+var pages = template.Must(template.New("pages").Parse(loginTemplate + deviceAuthorizationTemplate + workerRegistrationTemplate + workerTemplate + workerTokenTemplate + dashboardTemplate + projectTemplate + projectStatsTemplate + usersTemplate + workersTemplate + tokenTemplate + jobTemplate + errorTemplate))
 
 func render(ctx *echo.Context, status int, name string, data any) error {
 	ctx.Response().Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -15,6 +15,8 @@ func render(ctx *echo.Context, status int, name string, data any) error {
 }
 
 const loginTemplate = `{{define "login"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SavewebHQ sign in</title><link rel="stylesheet" href="/assets/admin.css"></head><body class="login-body"><main class="login"><div class="brand">SavewebHQ</div><h1>Sign in</h1><a class="button primary" href="/auth/github/start">Continue with GitHub</a></main></body></html>{{end}}`
+
+const deviceAuthorizationTemplate = `{{define "device-authorization"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Device authorization · SavewebHQ</title><link rel="stylesheet" href="/assets/admin.css"></head><body class="login-body"><main class="login"><div class="brand">SavewebHQ</div>{{if .Authorized}}<h1>Device authorized</h1><p>You may return to the terminal.</p>{{else}}<h1>Authorization denied</h1><p>Your account must be active, have the worker role, and have an active machine token.</p>{{end}}</main></body></html>{{end}}`
 
 const workerRegistrationTemplate = `{{define "worker-registration"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Worker registration · SavewebHQ</title><link rel="stylesheet" href="/assets/admin.css"></head><body class="login-body"><main class="login"><div class="brand">SavewebHQ</div><h1>Worker registration</h1><p><strong>{{.User.GitHubLogin}}</strong> · <code>{{.User.Status}}</code></p><a class="button" href="/">Return</a></main></body></html>{{end}}`
 

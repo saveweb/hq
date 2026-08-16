@@ -90,6 +90,57 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if user, err := store.AuthenticateMachineToken(ctx, "managed-token"); err != nil || user.ID != "managed-user" {
 		t.Fatalf("managed token authentication = %+v, %v", user, err)
 	}
+	deviceHash := sha256.Sum256([]byte("managed-device"))
+	userCode := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"
+	if err := store.CreateDeviceAuthorization(ctx, deviceHash[:], userCode, now, now+600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.RedeemDeviceAuthorization(ctx, deviceHash[:], now); err != nil || result.Status != tracker.DeviceAuthorizationPending || result.MachineToken != "" {
+		t.Fatalf("pending device authorization = %+v, %v", result, err)
+	}
+	if authorized, err := store.AuthorizeDevice(ctx, userCode, "managed-user", now); err != nil || !authorized {
+		t.Fatalf("authorize managed device = %v, %v", authorized, err)
+	}
+	if result, err := store.RedeemDeviceAuthorization(ctx, deviceHash[:], now); err != nil || result.Status != tracker.DeviceAuthorizationAuthorized || result.MachineToken != "managed-token" {
+		t.Fatalf("authorized device redemption = %+v, %v", result, err)
+	}
+	if _, err := store.RedeemDeviceAuthorization(ctx, deviceHash[:], now); !tracker.IsCode(err, protocol.ErrorInvalidRequest) {
+		t.Fatalf("reused device authorization = %v", err)
+	}
+	deniedHash := sha256.Sum256([]byte("denied-device"))
+	deniedCode := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"
+	if err := store.CreateDeviceAuthorization(ctx, deniedHash[:], deniedCode, now, now+600); err != nil {
+		t.Fatal(err)
+	}
+	if authorized, err := store.AuthorizeDevice(ctx, deniedCode, admin.ID, now); err != nil || authorized {
+		t.Fatalf("authorize tokenless device = %v, %v", authorized, err)
+	}
+	if result, err := store.RedeemDeviceAuthorization(ctx, deniedHash[:], now); err != nil || result.Status != tracker.DeviceAuthorizationDenied || result.MachineToken != "" {
+		t.Fatalf("denied device redemption = %+v, %v", result, err)
+	}
+	for _, test := range []struct {
+		user   tracker.User
+		token  string
+		code   string
+		hashID string
+	}{
+		{tracker.User{ID: "device-no-worker", Status: tracker.UserStatusActive, Roles: map[string]bool{tracker.RoleAdmin: true}}, "no-worker-token", "0123456789012345678901234567890123456789012", "no-worker-device"},
+		{tracker.User{ID: "device-suspended", Status: tracker.UserStatusSuspended, Roles: map[string]bool{tracker.RoleWorker: true}}, "suspended-token", "9876543210987654321098765432109876543210987", "suspended-device"},
+	} {
+		if err := store.PutUserAndToken(ctx, test.user, test.token, now); err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256([]byte(test.hashID))
+		if err := store.CreateDeviceAuthorization(ctx, hash[:], test.code, now, now+600); err != nil {
+			t.Fatal(err)
+		}
+		if authorized, err := store.AuthorizeDevice(ctx, test.code, test.user.ID, now); err != nil || authorized {
+			t.Fatalf("authorize ineligible device for %s = %v, %v", test.user.ID, authorized, err)
+		}
+		if result, err := store.RedeemDeviceAuthorization(ctx, hash[:], now); err != nil || result.Status != tracker.DeviceAuthorizationDenied || result.MachineToken != "" {
+			t.Fatalf("denied device redemption for %s = %+v, %v", test.user.ID, result, err)
+		}
+	}
 	users, err := store.ListUsers(ctx)
 	if err != nil || len(users) < 3 {
 		t.Fatalf("users = %+v, %v", users, err)

@@ -63,6 +63,17 @@ type GitHubIdentity struct {
 	AvatarURL *string
 }
 
+const (
+	DeviceAuthorizationPending    = "authorization_pending"
+	DeviceAuthorizationAuthorized = "authorized"
+	DeviceAuthorizationDenied     = "access_denied"
+)
+
+type DeviceAuthorization struct {
+	Status       string
+	MachineToken string
+}
+
 type Project struct {
 	ID                      string
 	Status                  string
