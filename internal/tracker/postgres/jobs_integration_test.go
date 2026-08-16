@@ -448,6 +448,49 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 		t.Fatalf("switched project = %+v, %v", randomProject, err)
 	}
 
+	initialResetKey := int32(0)
+	if err := store.PutProject(ctx, tracker.Project{ID: "random-reset-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone, ClaimOrder: tracker.ClaimOrderRandom}, now+22); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := store.EnqueueProjectJobs(ctx, "random-reset-project", []protocol.AdminEnqueueJob{{Value: "reset-me", RandomKey: &initialResetKey}}, now+23); err != nil || inserted != 1 {
+		t.Fatalf("random reset enqueue = %d, %v", inserted, err)
+	}
+	resetClaim, err := store.ClaimProjectJobs(ctx, "queue-worker", "random-reset-project", protocol.ProjectClaimRequest{WorkerID: "random-reset-worker", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1}, (now+24)*1_000_000_000)
+	if err != nil || len(resetClaim.Jobs) != 1 {
+		t.Fatalf("random reset claim = %+v, %v", resetClaim, err)
+	}
+	resetFailure, err := store.FailProjectJobs(ctx, "queue-worker", "random-reset-project", protocol.ProjectFailRequest{WorkerID: "random-reset-worker", Items: []protocol.FailItem{{JobID: resetClaim.Jobs[0].JobID, AttemptID: resetClaim.Jobs[0].AttemptID, Retryable: true, Error: protocol.ExecutionError{Code: "temporary", Message: "retry", Details: protocol.Attrs{}}}}}, now+25)
+	if err != nil || *resetFailure.Results[0].JobStatus != protocol.JobStatusTodo {
+		t.Fatalf("random retryable reset = %+v, %v", resetFailure, err)
+	}
+	afterRetry, err := store.ProjectJob(ctx, "random-reset-project", resetClaim.Jobs[0].JobID)
+	if err != nil || afterRetry.RandomKey == initialResetKey {
+		t.Fatalf("random key after retryable reset = %+v, %v", afterRetry, err)
+	}
+	resetClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "random-reset-project", protocol.ProjectClaimRequest{WorkerID: "random-reset-worker", MaxJobs: 1, LeaseSeconds: 1, PolicyVersion: 1}, (now+26)*1_000_000_000)
+	if err != nil || len(resetClaim.Jobs) != 1 {
+		t.Fatalf("random expiring claim = %+v, %v", resetClaim, err)
+	}
+	resetClaim, err = store.ClaimProjectJobs(ctx, "queue-worker", "random-reset-project", protocol.ProjectClaimRequest{WorkerID: "random-reset-worker-2", MaxJobs: 1, LeaseSeconds: 30, PolicyVersion: 1}, (now+28)*1_000_000_000)
+	if err != nil || len(resetClaim.Jobs) != 1 {
+		t.Fatalf("random expired reset claim = %+v, %v", resetClaim, err)
+	}
+	afterExpiry, err := store.ProjectJob(ctx, "random-reset-project", resetClaim.Jobs[0].JobID)
+	if err != nil || afterExpiry.RandomKey == afterRetry.RandomKey {
+		t.Fatalf("random key after lease reset = %+v, %v", afterExpiry, err)
+	}
+	resetFailure, err = store.FailProjectJobs(ctx, "queue-worker", "random-reset-project", protocol.ProjectFailRequest{WorkerID: "random-reset-worker-2", Items: []protocol.FailItem{{JobID: resetClaim.Jobs[0].JobID, AttemptID: resetClaim.Jobs[0].AttemptID, Retryable: false, Error: protocol.ExecutionError{Code: "permanent", Message: "stop", Details: protocol.Attrs{}}}}}, now+29)
+	if err != nil || *resetFailure.Results[0].JobStatus != protocol.JobStatusFailed {
+		t.Fatalf("random permanent failure = %+v, %v", resetFailure, err)
+	}
+	if err := store.RequeueProjectJob(ctx, "random-reset-project", resetClaim.Jobs[0].JobID, now+30); err != nil {
+		t.Fatal(err)
+	}
+	afterRequeue, err := store.ProjectJob(ctx, "random-reset-project", resetClaim.Jobs[0].JobID)
+	if err != nil || afterRequeue.Status != protocol.JobStatusTodo || afterRequeue.ResetCount != 0 || afterRequeue.RandomKey == afterExpiry.RandomKey {
+		t.Fatalf("random key after manual requeue = %+v, %v", afterRequeue, err)
+	}
+
 	dispatchQPS, workerClaimQPS := 2.5, 0.1
 	if err := store.PutProject(ctx, tracker.Project{
 		ID: "limited-project", Status: tracker.ProjectStatusActive, IdentityMode: tracker.IdentityModeNone,

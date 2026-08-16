@@ -70,7 +70,8 @@ other modes:
 Identical retries in the two deduplicating modes report zero new inserts. A
 matching identity with different immutable job data returns `identity_conflict`.
 `random_key` applies only when a job is first inserted; an idempotent retry does
-not change the stored key.
+not change the stored key. A retryable failure, expired lease, or manual requeue
+that returns a job to `todo` replaces it with a newly generated key.
 
 The source endpoint accepts a `jobs-jsonl-zstd-v1` body as `application/zstd`
 and streams it through the same project identity rules. The compressed body is
@@ -132,10 +133,10 @@ for privacy or storage reclamation, after which reverse lookup is unavailable.
 Claims use one PostgreSQL transaction and `FOR UPDATE SKIP LOCKED`. An expired
 attempt is reset before new rows are selected. The project's `max_resets`
 applies to both lease expirations and retryable failures; zero disables retries.
-FIFO projects order eligible
-jobs by creation time and internal job ID. Random projects order them by the
-stored random key and internal job ID. Changing the project setting affects
-subsequent claims without changing WIP attempts.
+Each reset that returns a job to `todo` generates a new random key. FIFO projects
+order eligible jobs by creation time and internal job ID. Random projects order
+them by the stored random key and internal job ID. Changing the project setting
+affects subsequent claims without changing WIP attempts.
 
 When `dispatch_qps` is set, the tracker uses a continuous token bucket under the
 project row lock. Rates up to and including 1000 QPS have capacity one; higher
@@ -189,7 +190,8 @@ POST /api/v1/projects/{project_id}/jobs/fail
 
 Each item supplies an execution error and whether it is retryable. A retryable
 failure increments `reset_count` and returns the job to `todo`; exceeding the
-limit enters `reset_exhausted`. A non-retryable failure enters `failed`.
+limit enters `reset_exhausted`. Returning to `todo` also generates a new random
+key. A non-retryable failure enters `failed`.
 
 ## Extend lease
 

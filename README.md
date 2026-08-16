@@ -126,8 +126,9 @@ orders jobs by creation time; `random` uses a stored signed 32-bit random key.
 HQ generates the key during enqueue unless the administrator supplies
 `random_key`. Equal keys are resolved by internal job ID, so custom keys do not
 need to be unique. Switching the setting affects later claims and leaves WIP
-attempts unchanged. For deduplicated jobs, a retry never replaces the stored
-key.
+attempts unchanged. An idempotent enqueue retry never replaces the stored key.
+Returning a job to `todo` after a retryable failure, expired lease, or manual
+requeue generates a new key so the job is placed at a new random position.
 
 Projects may also set a tracker-enforced `dispatch_qps`, an SDK-enforced
 per-worker `worker_claim_qps`, `max_jobs_per_claim` (1-256), and `max_resets`

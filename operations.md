@@ -60,7 +60,8 @@ in bounded batches. It reads the project identity mode before submitting and
 defaults to 1000 jobs per request. `--batch-size` accepts any positive count;
 the API enforces its 8 MiB JSON request-body limit instead of a job-count cap.
 JSONL jobs may provide a signed 32-bit `random_key`; the Tracker generates one
-when it is absent.
+when it is absent. Retryable failures, expired leases, and manual requeues
+generate a new key when they return a job to `todo`.
 Use `hqctl enqueue-source` for an existing `jobs-jsonl-zstd-v1` file. Both
 commands require a `0600` administrator machine-token file and print a JSON
 summary.

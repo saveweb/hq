@@ -296,6 +296,7 @@ func (s *Store) ClaimProjectJobs(ctx context.Context, userID, projectID string, 
 		if _, err := tx.Exec(ctx, `
 			UPDATE tracker_jobs SET
 				status=CASE WHEN reset_count + 1 > $3 THEN 'reset_exhausted' ELSE 'todo' END,
+				random_key=CASE WHEN reset_count + 1 > $3 THEN random_key ELSE (floor(random() * (1::bigint << 32)) - (1::bigint << 31))::integer END,
 				reset_count=reset_count+1, attempt_id=NULL, worker_id=NULL, lease_expires_at=NULL, updated_at=$2
 			WHERE project_id=$1 AND status='wip' AND lease_expires_at <= $2
 		`, projectID, now, project.maxResets); err != nil {
@@ -548,7 +549,7 @@ func (s *Store) FailProjectJobs(ctx context.Context, userID, projectID string, r
 				status = protocol.JobStatusTodo
 			}
 			var actualStatus string
-			err = tx.QueryRow(ctx, `UPDATE tracker_jobs SET status=CASE WHEN $8 AND reset_count + 1 > $9 THEN 'reset_exhausted' ELSE $6 END,attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,execution_error=$7,reset_count=reset_count+CASE WHEN $8 THEN 1 ELSE 0 END,updated_at=$5,completed_at=CASE WHEN $8 AND reset_count + 1 <= $9 THEN NULL ELSE $5 END WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5 RETURNING status`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, status, executionError, item.Retryable, project.maxResets).Scan(&actualStatus)
+			err = tx.QueryRow(ctx, `UPDATE tracker_jobs SET status=CASE WHEN $8 AND reset_count + 1 > $9 THEN 'reset_exhausted' ELSE $6 END,attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL,execution_error=$7,random_key=CASE WHEN $8 AND reset_count + 1 <= $9 THEN (floor(random() * (1::bigint << 32)) - (1::bigint << 31))::integer ELSE random_key END,reset_count=reset_count+CASE WHEN $8 THEN 1 ELSE 0 END,updated_at=$5,completed_at=CASE WHEN $8 AND reset_count + 1 <= $9 THEN NULL ELSE $5 END WHERE project_id=$1 AND job_id=$2 AND status='wip' AND attempt_id=$3 AND worker_id=$4 AND lease_expires_at>$5 RETURNING status`, projectID, item.JobID, item.AttemptID, request.WorkerID, now, status, executionError, item.Retryable, project.maxResets).Scan(&actualStatus)
 			if errors.Is(err, pgx.ErrNoRows) {
 				results = append(results, projectItemResult(item.JobID, item.AttemptID, 0, status))
 				continue

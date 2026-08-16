@@ -252,7 +252,7 @@ paths:
       - {$ref: '#/components/parameters/JobID'}
     post:
       operationId: requeueAdminProjectJob
-      description: Resets a failed or reset-exhausted job to todo.
+      description: Resets a failed or reset-exhausted job to todo with a newly generated random key.
       responses:
         '204': {description: Job requeued}
         default: {$ref: '#/components/responses/Error'}

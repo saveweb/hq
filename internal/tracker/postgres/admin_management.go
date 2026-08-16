@@ -184,7 +184,7 @@ func (s *Store) RequeueProjectJob(ctx context.Context, projectID string, jobID, 
 	if !queue.ValidateIdentifier(projectID) || jobID < 1 {
 		return tracker.InvalidRequest("invalid job")
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE tracker_jobs SET status='todo',reset_count=0,execution_error=NULL,outcome=NULL,artifact_receipts=NULL,completed_at=NULL,updated_at=$3 WHERE project_id=$1 AND job_id=$2 AND status IN ('failed','reset_exhausted')`, projectID, jobID, now)
+	tag, err := s.pool.Exec(ctx, `UPDATE tracker_jobs SET status='todo',random_key=(floor(random() * (1::bigint << 32)) - (1::bigint << 31))::integer,reset_count=0,execution_error=NULL,outcome=NULL,artifact_receipts=NULL,completed_at=NULL,updated_at=$3 WHERE project_id=$1 AND job_id=$2 AND status IN ('failed','reset_exhausted')`, projectID, jobID, now)
 	if err != nil {
 		return storeError("requeue project job", err)
 	}
