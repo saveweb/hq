@@ -62,10 +62,10 @@ paths:
   /api/v1/whoami:
     get:
       operationId: whoAmI
-      description: Returns the user ID associated with the authenticated machine token.
+      description: Returns the user ID associated with the authenticated machine or project anonymous token. Anonymous tokens return gh_0.
       responses:
         '200':
-          description: Authenticated machine-token identity
+          description: Authenticated token identity
           content:
             application/json:
               schema: {$ref: '#/components/schemas/WhoAmIResponse'}
@@ -166,6 +166,34 @@ paths:
       description: Deletes a project and its non-WIP jobs; rejected while WIP jobs exist.
       responses:
         '204': {description: Project deleted}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/admin/projects/{project_id}/anonymous-token:
+    parameters: [{$ref: '#/components/parameters/ProjectID'}]
+    get:
+      operationId: getAdminProjectAnonymousToken
+      description: Returns the project's current anonymous token.
+      responses:
+        '200':
+          description: Current project anonymous token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminProjectAnonymousTokenResponse'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: rotateAdminProjectAnonymousToken
+      description: Enables anonymous access or replaces the project's current anonymous token.
+      responses:
+        '201':
+          description: New project anonymous token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminProjectAnonymousTokenResponse'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: revokeAdminProjectAnonymousToken
+      description: Disables anonymous access to the project.
+      responses:
+        '204': {description: Anonymous access disabled}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/admin/projects/{project_id}/jobs:
     parameters: [{$ref: '#/components/parameters/ProjectID'}]
@@ -322,7 +350,10 @@ paths:
         default: {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
-    MachineToken: {type: http, scheme: bearer}
+    MachineToken:
+      type: http
+      scheme: bearer
+      description: A machine token, or a project anonymous token on whoami and its bound worker project routes.
   parameters:
     ProjectID:
       name: project_id
@@ -429,6 +460,15 @@ components:
       properties:
         user_id: {$ref: '#/components/schemas/Identifier'}
         token: {type: string, minLength: 1}
+    AdminProjectAnonymousTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, user_id, token, created_at]
+      properties:
+        project_id: {$ref: '#/components/schemas/Identifier'}
+        user_id: {type: string, const: gh_0}
+        token: {type: string, pattern: '^hq_anon_[A-Za-z0-9_-]+$'}
+        created_at: {type: integer, format: int64}
     AdminProjectRequest:
       type: object
       additionalProperties: false
@@ -446,7 +486,7 @@ components:
     AdminProjectSummary:
       type: object
       additionalProperties: false
-      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, max_resets, recommended_lease_seconds, client_versions, policy_version, job_counts, created_at, updated_at]
+      required: [id, status, identity_mode, claim_order, dispatch_qps, worker_claim_qps, max_jobs_per_claim, max_resets, recommended_lease_seconds, client_versions, policy_version, anonymous_token_active, job_counts, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         status: {type: string, enum: [active, draining, archived]}
@@ -459,6 +499,7 @@ components:
         recommended_lease_seconds: {type: integer, format: int64, minimum: 1, maximum: 3600}
         client_versions: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
         policy_version: {type: integer, format: int64, minimum: 1}
+        anonymous_token_active: {type: boolean}
         job_counts: {$ref: '#/components/schemas/JobCounts'}
         created_at: {type: integer, format: int64}
         updated_at: {type: integer, format: int64}

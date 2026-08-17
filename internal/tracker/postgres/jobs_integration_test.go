@@ -145,6 +145,15 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err != nil || len(users) < 3 {
 		t.Fatalf("users = %+v, %v", users, err)
 	}
+	foundAnonymousUser := false
+	for _, user := range users {
+		if user.ID == tracker.SystemAnonymousUserID {
+			foundAnonymousUser = user.Status == tracker.UserStatusActive && len(user.Roles) == 1 && user.Roles[0] == tracker.RoleWorker
+		}
+	}
+	if !foundAnonymousUser {
+		t.Fatalf("system anonymous user = %+v", users)
+	}
 	if err := store.RevokeMachineToken(ctx, "managed-user", now+1); err != nil {
 		t.Fatal(err)
 	}
@@ -176,9 +185,42 @@ func TestPostgresProjectQueueContract(t *testing.T) {
 	if err := store.PutProject(ctx, tracker.Project{ID: "queue-project", Status: tracker.ProjectStatusActive, ClientVersions: []string{"worker-v2", "worker-v1"}}, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PutUser(ctx, tracker.SystemAnonymousUserID, tracker.UserStatusSuspended, nil, now); !tracker.IsCode(err, protocol.ErrorPermissionDenied) {
+		t.Fatalf("modify system anonymous user = %v", err)
+	}
+	if err := store.DeleteUser(ctx, tracker.SystemAnonymousUserID); !tracker.IsCode(err, protocol.ErrorPermissionDenied) {
+		t.Fatalf("delete system anonymous user = %v", err)
+	}
+	if err := store.RotateMachineToken(ctx, tracker.SystemAnonymousUserID, "forbidden-token", now); !tracker.IsCode(err, protocol.ErrorPermissionDenied) {
+		t.Fatalf("rotate system anonymous machine token = %v", err)
+	}
 	projects, err := store.ListProjectSummaries(ctx)
-	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || projects[0].MaxResets != 3 || projects[0].RecommendedLeaseSeconds != 300 || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
+	if err != nil || len(projects) != 1 || projects[0].ID != "queue-project" || projects[0].ClaimOrder != tracker.ClaimOrderFIFO || projects[0].MaxResets != 3 || projects[0].RecommendedLeaseSeconds != 300 || len(projects[0].ClientVersions) != 2 || projects[0].ClientVersions[0] != "worker-v1" || projects[0].AnonymousTokenActive || projects[0].JobCounts[protocol.JobStatusTodo] != 0 {
 		t.Fatalf("initial project summaries = %+v, %v", projects, err)
+	}
+	if err := store.PutProjectAnonymousToken(ctx, "queue-project", "hq_anon_queue", now+1); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := store.ProjectAnonymousToken(ctx, "queue-project"); err != nil || token.Token != "hq_anon_queue" || token.ProjectID != "queue-project" {
+		t.Fatalf("project anonymous token = %+v, %v", token, err)
+	}
+	if user, err := store.AuthenticateAnonymousToken(ctx, "hq_anon_queue"); err != nil || user.ID != tracker.SystemAnonymousUserID || !user.HasRole(tracker.RoleWorker) {
+		t.Fatalf("anonymous identity = %+v, %v", user, err)
+	}
+	if user, err := store.AuthenticateProjectAnonymousToken(ctx, "hq_anon_queue", "queue-project"); err != nil || user.ID != tracker.SystemAnonymousUserID {
+		t.Fatalf("project anonymous authentication = %+v, %v", user, err)
+	}
+	if err := store.PutProject(ctx, tracker.Project{ID: "other-project", Status: tracker.ProjectStatusActive, ClientVersions: []string{"worker-v2"}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateProjectAnonymousToken(ctx, "hq_anon_queue", "other-project"); !tracker.IsCode(err, protocol.ErrorInvalidMachineToken) {
+		t.Fatalf("cross-project anonymous authentication = %v", err)
+	}
+	if err := store.DeleteProjectAnonymousToken(ctx, "queue-project"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateAnonymousToken(ctx, "hq_anon_queue"); !tracker.IsCode(err, protocol.ErrorInvalidMachineToken) {
+		t.Fatalf("revoked anonymous authentication = %v", err)
 	}
 	if err := store.CheckProjectClientVersion(ctx, "queue-worker", "queue-project", "worker-v2"); err != nil {
 		t.Fatalf("allowed client version = %v", err)

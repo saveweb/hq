@@ -51,6 +51,9 @@ type Store interface {
 	ListProjectSummaries(context.Context) ([]protocol.AdminProjectSummary, error)
 	ProjectSummary(context.Context, string) (protocol.AdminProjectSummary, error)
 	PutProject(context.Context, tracker.Project, int64) error
+	ProjectAnonymousToken(context.Context, string) (tracker.ProjectAnonymousToken, error)
+	PutProjectAnonymousToken(context.Context, string, string, int64) error
+	DeleteProjectAnonymousToken(context.Context, string) error
 	EnqueueProjectJobs(context.Context, string, []protocol.AdminEnqueueJob, int64) (int64, error)
 	ListUsers(context.Context) ([]protocol.AdminUserSummary, error)
 	ListWorkers(context.Context, string, string, int) ([]tracker.WorkerUserMapping, error)
@@ -154,6 +157,9 @@ func (h *Handler) Register(server *echo.Echo) {
 	server.GET("/admin/projects/:project_id", h.project)
 	server.GET("/admin/projects/:project_id/stats", h.projectStats)
 	server.POST("/admin/projects/:project_id/status", h.updateProjectStatus)
+	server.GET("/admin/projects/:project_id/anonymous-token", h.viewProjectAnonymousToken)
+	server.POST("/admin/projects/:project_id/anonymous-token", h.rotateProjectAnonymousToken)
+	server.POST("/admin/projects/:project_id/anonymous-token/revoke", h.revokeProjectAnonymousToken)
 	server.POST("/admin/projects/:project_id/delete", h.deleteProject)
 	server.POST("/admin/projects/:project_id/jobs", h.enqueueJobs)
 	server.POST("/admin/projects/:project_id/source", h.enqueueSource)
@@ -445,6 +451,13 @@ func (h *Handler) users(ctx *echo.Context) error {
 	if err != nil {
 		return h.internal(ctx, err)
 	}
+	visibleUsers := users[:0]
+	for _, candidate := range users {
+		if candidate.ID != tracker.SystemAnonymousUserID {
+			visibleUsers = append(visibleUsers, candidate)
+		}
+	}
+	users = visibleUsers
 	selectedID := ctx.QueryParam("user_id")
 	var editUser protocol.AdminUserSummary
 	editing, editWorker, editAdmin := false, false, false
@@ -621,6 +634,53 @@ func (h *Handler) project(ctx *echo.Context) error {
 			WorkerClaimQPS:      optionalFloatValue(project.WorkerClaimQPS),
 		}, "Jobs": jobs.Jobs, "CSRF": h.csrfToken(sessionToken), "JobExample": jobExample(project.IdentityMode),
 	})
+}
+
+func (h *Handler) viewProjectAnonymousToken(ctx *echo.Context) error {
+	h.webHeaders(ctx.Response().Header())
+	user, sessionToken, ok := h.requireAdmin(ctx)
+	if !ok {
+		return nil
+	}
+	projectID := ctx.Param("project_id")
+	token, err := h.store.ProjectAnonymousToken(ctx.Request().Context(), projectID)
+	if err != nil {
+		if tracker.IsCode(err, protocol.ErrorNotFound) {
+			return h.pageError(ctx, http.StatusNotFound, "Anonymous token is not enabled")
+		}
+		return h.internal(ctx, err)
+	}
+	return render(ctx, http.StatusOK, "project-anonymous-token", map[string]any{
+		"User": user, "ProjectID": projectID, "Token": token.Token, "CSRF": h.csrfToken(sessionToken),
+	})
+}
+
+func (h *Handler) rotateProjectAnonymousToken(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	random, err := randomValue()
+	if err != nil {
+		return h.internal(ctx, err)
+	}
+	projectID := ctx.Param("project_id")
+	if err := h.store.PutProjectAnonymousToken(ctx.Request().Context(), projectID, "hq_anon_"+random, h.clock()); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Anonymous token update was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID)+"/anonymous-token")
+}
+
+func (h *Handler) revokeProjectAnonymousToken(ctx *echo.Context) error {
+	_, _, ok := h.authorizePost(ctx)
+	if !ok {
+		return nil
+	}
+	projectID := ctx.Param("project_id")
+	if err := h.store.DeleteProjectAnonymousToken(ctx.Request().Context(), projectID); err != nil {
+		return h.pageError(ctx, http.StatusBadRequest, "Anonymous token revocation was rejected")
+	}
+	return ctx.Redirect(http.StatusSeeOther, "/admin/projects/"+url.PathEscape(projectID))
 }
 
 type projectView struct {

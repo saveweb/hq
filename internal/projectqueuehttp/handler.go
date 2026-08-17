@@ -94,6 +94,9 @@ func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64,
 	server.GET("/api/v1/admin/projects/:project_id", h.getProject)
 	server.PUT("/api/v1/admin/projects/:project_id", h.putProject)
 	server.DELETE("/api/v1/admin/projects/:project_id", h.deleteProject)
+	server.GET("/api/v1/admin/projects/:project_id/anonymous-token", h.getProjectAnonymousToken)
+	server.POST("/api/v1/admin/projects/:project_id/anonymous-token", h.rotateProjectAnonymousToken)
+	server.DELETE("/api/v1/admin/projects/:project_id/anonymous-token", h.revokeProjectAnonymousToken)
 	server.POST("/api/v1/admin/projects/:project_id/jobs", h.enqueueJobs)
 	server.POST("/api/v1/admin/projects/:project_id/source", h.enqueueSource)
 	server.GET("/api/v1/admin/projects/:project_id/jobs", h.listJobs)
@@ -108,11 +111,53 @@ func Register(server *echo.Echo, store *postgres.Store, now, nowNS func() int64,
 }
 
 func (h *handler) whoAmI(ctx *echo.Context) error {
-	user, ok := h.authenticate(ctx)
+	user, ok := h.authenticateIdentity(ctx)
 	if !ok {
 		return nil
 	}
 	return ctx.JSON(http.StatusOK, protocol.WhoAmIResponse{UserID: user.ID})
+}
+
+func (h *handler) rotateProjectAnonymousToken(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return h.writeError(ctx, err)
+	}
+	token := "hq_anon_" + base64.RawURLEncoding.EncodeToString(raw[:])
+	projectID := ctx.Param("project_id")
+	now := h.now()
+	if err := h.store.PutProjectAnonymousToken(ctx.Request().Context(), projectID, token, now); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusCreated, protocol.AdminProjectAnonymousTokenResponse{
+		ProjectID: projectID, UserID: tracker.SystemAnonymousUserID, Token: token, CreatedAt: now,
+	})
+}
+
+func (h *handler) getProjectAnonymousToken(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	token, err := h.store.ProjectAnonymousToken(ctx.Request().Context(), ctx.Param("project_id"))
+	if err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.JSON(http.StatusOK, protocol.AdminProjectAnonymousTokenResponse{
+		ProjectID: token.ProjectID, UserID: tracker.SystemAnonymousUserID, Token: token.Token, CreatedAt: token.CreatedAt,
+	})
+}
+
+func (h *handler) revokeProjectAnonymousToken(ctx *echo.Context) error {
+	if _, ok := h.authenticateAdmin(ctx); !ok {
+		return nil
+	}
+	if err := h.store.DeleteProjectAnonymousToken(ctx.Request().Context(), ctx.Param("project_id")); err != nil {
+		return h.writeError(ctx, err)
+	}
+	return ctx.NoContent(http.StatusNoContent)
 }
 
 func (h *handler) listUsers(ctx *echo.Context) error {
@@ -364,7 +409,7 @@ func (h *handler) deleteJob(ctx *echo.Context) error {
 }
 
 func (h *handler) claim(ctx *echo.Context) error {
-	user, ok := h.authenticate(ctx)
+	user, ok := h.authenticateProject(ctx)
 	if !ok {
 		return nil
 	}
@@ -389,7 +434,7 @@ func (h *handler) claim(ctx *echo.Context) error {
 }
 
 func (h *handler) projectPolicy(ctx *echo.Context) error {
-	user, ok := h.authenticate(ctx)
+	user, ok := h.authenticateProject(ctx)
 	if !ok {
 		return nil
 	}
@@ -404,7 +449,7 @@ func (h *handler) projectPolicy(ctx *echo.Context) error {
 }
 
 func (h *handler) complete(ctx *echo.Context) error {
-	user, ok := h.authenticate(ctx)
+	user, ok := h.authenticateProject(ctx)
 	if !ok {
 		return nil
 	}
@@ -432,7 +477,7 @@ func (h *handler) complete(ctx *echo.Context) error {
 }
 
 func (h *handler) fail(ctx *echo.Context) error {
-	user, ok := h.authenticate(ctx)
+	user, ok := h.authenticateProject(ctx)
 	if !ok {
 		return nil
 	}
@@ -451,7 +496,7 @@ func (h *handler) fail(ctx *echo.Context) error {
 }
 
 func (h *handler) extendLease(ctx *echo.Context) error {
-	user, ok := h.authenticate(ctx)
+	user, ok := h.authenticateProject(ctx)
 	if !ok {
 		return nil
 	}
@@ -478,12 +523,36 @@ func (h *handler) checkClientVersion(ctx *echo.Context, userID string) bool {
 }
 
 func (h *handler) authenticate(ctx *echo.Context) (tracker.User, bool) {
+	return h.authenticateToken(ctx, "")
+}
+
+func (h *handler) authenticateIdentity(ctx *echo.Context) (tracker.User, bool) {
+	return h.authenticateToken(ctx, "identity")
+}
+
+func (h *handler) authenticateProject(ctx *echo.Context) (tracker.User, bool) {
+	return h.authenticateToken(ctx, ctx.Param("project_id"))
+}
+
+func (h *handler) authenticateToken(ctx *echo.Context, anonymousScope string) (tracker.User, bool) {
 	token, valid := httpapi.BearerToken(ctx.Request().Header.Get("Authorization"))
 	if !valid {
-		h.writeAPIError(ctx, http.StatusUnauthorized, protocol.APIError{Code: protocol.ErrorInvalidMachineToken, Message: "machine token required"})
+		h.writeAPIError(ctx, http.StatusUnauthorized, protocol.APIError{Code: protocol.ErrorInvalidMachineToken, Message: "bearer token required"})
 		return tracker.User{}, false
 	}
 	user, err := h.store.AuthenticateMachineToken(ctx.Request().Context(), token)
+	if err == nil {
+		return user, true
+	}
+	if !tracker.IsCode(err, protocol.ErrorInvalidMachineToken) {
+		h.writeError(ctx, err)
+		return tracker.User{}, false
+	}
+	if anonymousScope == "identity" {
+		user, err = h.store.AuthenticateAnonymousToken(ctx.Request().Context(), token)
+	} else if anonymousScope != "" {
+		user, err = h.store.AuthenticateProjectAnonymousToken(ctx.Request().Context(), token, anonymousScope)
+	}
 	if err != nil {
 		h.writeError(ctx, err)
 		return tracker.User{}, false

@@ -75,6 +75,32 @@ curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/project.json"
 python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["id"] == "project-e2e" and p["status"] == "active" and p["identity_mode"] == "external_id" and p["max_resets"] == 3 and p["recommended_lease_seconds"] == 300 and p["client_versions"] == ["e2e-v1"] and sum(p["job_counts"].values()) == 0' "${run_dir}/project.json"
 
+# Enable project-scoped anonymous access. It identifies as gh_0 but cannot
+# cross into admin routes or another project.
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X POST \
+  "${base}/api/v1/admin/projects/project-e2e/anonymous-token" >"${run_dir}/anonymous-token-1.json"
+anonymous_token_1=$(python3 -c 'import json,sys; t=json.load(open(sys.argv[1])); assert t["project_id"] == "project-e2e" and t["user_id"] == "gh_0" and t["token"].startswith("hq_anon_"); print(t["token"])' "${run_dir}/anonymous-token-1.json")
+curl --fail --silent --show-error "${admin[@]}" \
+  "${base}/api/v1/admin/projects/project-e2e/anonymous-token" >"${run_dir}/anonymous-token-view.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "${run_dir}/anonymous-token-1.json" "${run_dir}/anonymous-token-view.json"
+curl --fail --silent --show-error -H "Authorization: Bearer ${anonymous_token_1}" \
+  "${base}/api/v1/whoami" >"${run_dir}/anonymous-whoami.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"user_id":"gh_0"}' "${run_dir}/anonymous-whoami.json"
+status=$(curl --silent --output "${run_dir}/anonymous-admin.json" --write-out '%{http_code}' \
+  -H "Authorization: Bearer ${anonymous_token_1}" "${base}/api/v1/admin/projects")
+test "${status}" = 401
+
+curl --fail --silent --show-error "${admin[@]}" "${json[@]}" -X POST \
+  "${base}/api/v1/admin/projects/project-e2e/anonymous-token" >"${run_dir}/anonymous-token-2.json"
+anonymous_token=$(python3 -c 'import json,sys; t=json.load(open(sys.argv[1])); assert t["token"] != sys.argv[2]; print(t["token"])' "${run_dir}/anonymous-token-2.json" "${anonymous_token_1}")
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer ${anonymous_token_1}" "${base}/api/v1/whoami")
+test "${status}" = 401
+worker=(-H "Authorization: Bearer ${anonymous_token}" -H 'X-SavewebHQ-Client-Version: e2e-v1')
+curl --fail --silent --show-error "${admin[@]}" \
+  "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/anonymous-project.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["anonymous_token_active"] is True' "${run_dir}/anonymous-project.json"
+
 # Every worker route requires an explicitly allowed client version.
 status=$(curl --silent --output "${run_dir}/upgrade.json" --write-out '%{http_code}' \
   -H "Authorization: Bearer ${worker_token}" -H 'X-SavewebHQ-Client-Version: obsolete-v1' \
@@ -90,6 +116,9 @@ python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["recommend
 curl --fail --silent --show-error "${admin[@]}" "${json[@]}" \
   -X PUT -d '{"status":"active","identity_mode":"external_id","dispatch_qps":null,"worker_claim_qps":null,"max_jobs_per_claim":256,"max_resets":3,"client_versions":["e2e-v1"]}' \
   "${base}/api/v1/admin/projects/source-e2e" >"${run_dir}/source-project.json"
+status=$(curl --silent --output "${run_dir}/anonymous-cross-project.json" --write-out '%{http_code}' \
+  "${worker[@]}" "${base}/api/v1/projects/source-e2e")
+test "${status}" = 401
 printf 'https://example.test/source\n' >"${run_dir}/source-values.txt"
 "${run_dir}/source" pack --identity-mode external_id \
   --input "${run_dir}/source-values.txt" --output "${run_dir}/source.jobs.jsonl.zst"
@@ -239,9 +268,16 @@ status=$(curl --silent --output "${run_dir}/archived-enqueue.json" --write-out '
 test "${status}" = 409
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["error"]["code"] == "project_not_active"' "${run_dir}/archived-enqueue.json"
 
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${admin[@]}" -X DELETE \
+  "${base}/api/v1/admin/projects/project-e2e/anonymous-token")
+test "${status}" = 204
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer ${anonymous_token}" "${base}/api/v1/whoami")
+test "${status}" = 401
+
 curl --fail --silent --show-error "${admin[@]}" \
   "${base}/api/v1/admin/projects/project-e2e" >"${run_dir}/final-project.json"
-python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["status"] == "archived"; assert p["job_counts"] == {"todo":0,"wip":0,"done":3,"failed":1,"reset_exhausted":0}' "${run_dir}/final-project.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["status"] == "archived" and p["anonymous_token_active"] is False; assert p["job_counts"] == {"todo":0,"wip":0,"done":3,"failed":1,"reset_exhausted":0}' "${run_dir}/final-project.json"
 
 database_check=$(docker exec "${container}" psql -U postgres -d hq -Atc \
   "SELECT count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), count(*) FILTER (WHERE jsonb_array_length(artifact_receipts)=1), count(*) FILTER (WHERE attempt_id IS NOT NULL) FROM tracker_jobs WHERE project_id='project-e2e'")

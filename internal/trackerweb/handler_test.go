@@ -24,19 +24,20 @@ import (
 )
 
 type fakeStore struct {
-	user         tracker.User
-	sessions     map[string]bool
-	projects     map[string]protocol.AdminProjectSummary
-	enqueued     []protocol.AdminEnqueueJob
-	jobs         map[string][]protocol.AdminJob
-	users        map[string]protocol.AdminUserSummary
-	workers      []tracker.WorkerUserMapping
-	workerUserID string
-	tokens       map[string]string
-	deleted      bool
-	upsertedID   int64
-	registeredID int64
-	devices      map[string]fakeDeviceAuthorization
+	user          tracker.User
+	sessions      map[string]bool
+	projects      map[string]protocol.AdminProjectSummary
+	enqueued      []protocol.AdminEnqueueJob
+	jobs          map[string][]protocol.AdminJob
+	users         map[string]protocol.AdminUserSummary
+	workers       []tracker.WorkerUserMapping
+	workerUserID  string
+	tokens        map[string]string
+	projectTokens map[string]tracker.ProjectAnonymousToken
+	deleted       bool
+	upsertedID    int64
+	registeredID  int64
+	devices       map[string]fakeDeviceAuthorization
 }
 
 type fakeDeviceAuthorization struct {
@@ -46,7 +47,7 @@ type fakeDeviceAuthorization struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}, tokens: map[string]string{}, devices: map[string]fakeDeviceAuthorization{}}
+	return &fakeStore{sessions: map[string]bool{}, projects: map[string]protocol.AdminProjectSummary{}, jobs: map[string][]protocol.AdminJob{}, users: map[string]protocol.AdminUserSummary{}, tokens: map[string]string{}, projectTokens: map[string]tracker.ProjectAnonymousToken{}, devices: map[string]fakeDeviceAuthorization{}}
 }
 
 func (s *fakeStore) UpsertGitHubAdmin(_ context.Context, identity tracker.GitHubIdentity, now int64) (tracker.User, error) {
@@ -127,6 +128,36 @@ func (s *fakeStore) PutProject(_ context.Context, project tracker.Project, now i
 		existing.JobCounts = map[string]int64{}
 	}
 	s.projects[project.ID] = existing
+	return nil
+}
+
+func (s *fakeStore) ProjectAnonymousToken(_ context.Context, projectID string) (tracker.ProjectAnonymousToken, error) {
+	token, ok := s.projectTokens[projectID]
+	if !ok {
+		return tracker.ProjectAnonymousToken{}, &tracker.Error{Code: protocol.ErrorNotFound, Message: "missing"}
+	}
+	return token, nil
+}
+
+func (s *fakeStore) PutProjectAnonymousToken(_ context.Context, projectID, token string, now int64) error {
+	if _, ok := s.projects[projectID]; !ok {
+		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "missing"}
+	}
+	s.projectTokens[projectID] = tracker.ProjectAnonymousToken{ProjectID: projectID, Token: token, CreatedAt: now}
+	project := s.projects[projectID]
+	project.AnonymousTokenActive = true
+	s.projects[projectID] = project
+	return nil
+}
+
+func (s *fakeStore) DeleteProjectAnonymousToken(_ context.Context, projectID string) error {
+	if _, ok := s.projectTokens[projectID]; !ok {
+		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "missing"}
+	}
+	delete(s.projectTokens, projectID)
+	project := s.projects[projectID]
+	project.AnonymousTokenActive = false
+	s.projects[projectID] = project
 	return nil
 }
 func (s *fakeStore) EnqueueProjectJobs(_ context.Context, projectID string, jobs []protocol.AdminEnqueueJob, now int64) (int64, error) {
@@ -325,9 +356,21 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 		t.Fatalf("create = %d %q", create.Code, create.Header().Get("Location"))
 	}
 	detail := request(t, server, http.MethodGet, "/admin/projects/demo", "", sessionCookie)
-	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) || !strings.Contains(detail.Body.String(), "Claim order random") || !strings.Contains(detail.Body.String(), "Recommended lease (seconds)") ||
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "Enqueue jobs") || !strings.Contains(detail.Body.String(), "Enable anonymous access") || !strings.Contains(detail.Body.String(), tracker.IdentityModeUniqueValue) || !strings.Contains(detail.Body.String(), "Claim order random") || !strings.Contains(detail.Body.String(), "Recommended lease (seconds)") ||
 		!strings.Contains(detail.Body.String(), "1700000000 (2023-11-14 22:13:20 UTC)") {
 		t.Fatalf("detail = %d %q", detail.Code, detail.Body.String())
+	}
+	enableAnonymous := postForm(t, server, "/admin/projects/demo/anonymous-token", url.Values{"csrf": {csrf}}, sessionCookie)
+	if enableAnonymous.Code != http.StatusSeeOther || enableAnonymous.Header().Get("Location") != "/admin/projects/demo/anonymous-token" || !strings.HasPrefix(store.projectTokens["demo"].Token, "hq_anon_") {
+		t.Fatalf("enable anonymous = %d location=%q token=%q", enableAnonymous.Code, enableAnonymous.Header().Get("Location"), store.projectTokens["demo"].Token)
+	}
+	anonymousToken := request(t, server, http.MethodGet, "/admin/projects/demo/anonymous-token", "", sessionCookie)
+	if anonymousToken.Code != http.StatusOK || !strings.Contains(anonymousToken.Body.String(), store.projectTokens["demo"].Token) || !strings.Contains(anonymousToken.Body.String(), "gh_0") {
+		t.Fatalf("anonymous token = %d %q", anonymousToken.Code, anonymousToken.Body.String())
+	}
+	revokeAnonymous := postForm(t, server, "/admin/projects/demo/anonymous-token/revoke", url.Values{"csrf": {csrf}}, sessionCookie)
+	if revokeAnonymous.Code != http.StatusSeeOther || store.projects["demo"].AnonymousTokenActive {
+		t.Fatalf("revoke anonymous = %d project=%+v", revokeAnonymous.Code, store.projects["demo"])
 	}
 	statsPage := request(t, server, http.MethodGet, "/admin/projects/demo/stats", "", sessionCookie)
 	if statsPage.Code != http.StatusOK || !strings.Contains(statsPage.Body.String(), "Claim QPS") || !strings.Contains(statsPage.Body.String(), "Completed QPS") || !strings.Contains(statsPage.Body.String(), `http-equiv="refresh" content="1"`) {
@@ -379,8 +422,9 @@ func TestGitHubLoginAndAdminWorkflow(t *testing.T) {
 	if missingWorker.Code != http.StatusOK || !strings.Contains(missingWorker.Body.String(), "No worker mapping found") {
 		t.Fatalf("missing worker = %d %q", missingWorker.Code, missingWorker.Body.String())
 	}
+	store.users[tracker.SystemAnonymousUserID] = protocol.AdminUserSummary{ID: tracker.SystemAnonymousUserID, Status: tracker.UserStatusActive, Roles: []string{tracker.RoleWorker}}
 	users := request(t, server, http.MethodGet, "/admin/users", "", sessionCookie)
-	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "Create user") {
+	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "Create user") || strings.Contains(users.Body.String(), tracker.SystemAnonymousUserID) {
 		t.Fatalf("users = %d %q", users.Code, users.Body.String())
 	}
 	putUser := postForm(t, server, "/admin/users", url.Values{"csrf": {csrf}, "user_id": {"worker-web"}, "status": {tracker.UserStatusActive}, "roles": {tracker.RoleWorker}}, sessionCookie)

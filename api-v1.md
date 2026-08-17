@@ -1,9 +1,9 @@
 # SavewebHQ Project Queue API v1
 
-All endpoints require `Authorization: Bearer <machine-token>`. The token owner
-must be active and have the role required by the route: `admin` for management
-and `worker` for scheduling. JSON requests reject unknown fields. All
-timestamps are signed 64-bit UNIX seconds.
+All endpoints require `Authorization: Bearer <token>`. Management endpoints
+accept only machine tokens. Worker project endpoints accept either an active
+worker's machine token or the anonymous token bound to that project. JSON
+requests reject unknown fields. All timestamps are signed 64-bit UNIX seconds.
 
 ## Identity
 
@@ -11,8 +11,9 @@ timestamps are signed 64-bit UNIX seconds.
 GET /api/v1/whoami
 ```
 
-This endpoint returns `{"user_id":"..."}` for the supplied machine token. It
-uses the token's authenticated user directly and does not depend on the
+This endpoint returns `{"user_id":"..."}` for a machine or project anonymous
+token. Anonymous tokens return the protected system identity `gh_0`. It uses
+the token's authenticated identity directly and does not depend on the
 best-effort worker-to-user mapping.
 
 ## Administration
@@ -31,6 +32,9 @@ GET  /api/v1/admin/projects/{project_id}/jobs/{job_id}
 POST /api/v1/admin/projects/{project_id}/jobs/{job_id}/requeue
 DELETE /api/v1/admin/projects/{project_id}/jobs/{job_id}
 DELETE /api/v1/admin/projects/{project_id}
+GET  /api/v1/admin/projects/{project_id}/anonymous-token
+POST /api/v1/admin/projects/{project_id}/anonymous-token
+DELETE /api/v1/admin/projects/{project_id}/anonymous-token
 GET  /api/v1/admin/users
 PUT  /api/v1/admin/users/{user_id}
 DELETE /api/v1/admin/users/{user_id}
@@ -52,8 +56,14 @@ resets and retryable failures before a job enters `reset_exhausted`.
 strings. It may be empty to stop all worker access. `policy_version` starts at 1
 and increases when a claim policy, reset limit, lease recommendation, or client
 allowlist changes.
-Project responses include these settings and `todo`, `wip`,
-`done`, `failed`, and `reset_exhausted` counts.
+Project responses include these settings, `anonymous_token_active`, and
+`todo`, `wip`, `done`, `failed`, and `reset_exhausted` counts.
+
+Each project may have one anonymous token with the `hq_anon_` prefix. `POST`
+enables anonymous access or rotates the token, `GET` returns the current token,
+and `DELETE` disables it. Anonymous tokens are scoped to their project, but may
+also call `whoami`; all return `gh_0`. The `gh_0` system user is always an
+active worker and cannot be modified, deleted, or assigned a machine token.
 
 The jobs endpoint accepts one or more JobSpecs within the 8 MiB JSON request
 body limit. `value` is required; `type`, `via`, `hops`, `attr`, and the signed
@@ -96,9 +106,11 @@ administration itself requires an administrator token.
 
 These endpoints also back the same-origin management UI. The UI uses a
 separate HttpOnly browser session established through GitHub OAuth; machine
-tokens remain the only authentication accepted by `/api/v1/**` routes.
+tokens remain the only authentication accepted by admin API routes.
 OAuth users outside the configured administrator team are registered as
-`pending` workers without a browser session. An administrator must activate the
+`pending` workers without a browser session. Anonymous project tokens are the
+only non-machine credentials accepted by worker project routes and `whoami`.
+An administrator must activate the
 user before it can sign in at `/worker` and generate, rotate, or revoke its own
 machine token. The worker page keeps the value hidden until the user chooses
 `View token`, and it remains available on later visits.

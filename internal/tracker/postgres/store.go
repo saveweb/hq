@@ -98,7 +98,94 @@ func (s *Store) AuthenticateMachineToken(ctx context.Context, token string) (tra
 	return user, nil
 }
 
+func (s *Store) AuthenticateAnonymousToken(ctx context.Context, token string) (tracker.User, error) {
+	return s.authenticateAnonymousToken(ctx, token, "")
+}
+
+func (s *Store) AuthenticateProjectAnonymousToken(ctx context.Context, token, projectID string) (tracker.User, error) {
+	if !queue.ValidateIdentifier(projectID) {
+		return tracker.User{}, invalidMachineToken()
+	}
+	return s.authenticateAnonymousToken(ctx, token, projectID)
+}
+
+func (s *Store) authenticateAnonymousToken(ctx context.Context, token, projectID string) (tracker.User, error) {
+	if token == "" || len(token) > 1024 {
+		return tracker.User{}, invalidMachineToken()
+	}
+	var user tracker.User
+	var roles []string
+	err := s.pool.QueryRow(ctx, `
+		SELECT u.id,u.status,u.roles
+		FROM tracker_project_anonymous_tokens pat
+		JOIN tracker_users u ON u.id=$2
+		WHERE pat.token_hash=$1 AND ($3='' OR pat.project_id=$3)
+	`, projectAnonymousTokenDigest(token), tracker.SystemAnonymousUserID, projectID).Scan(&user.ID, &user.Status, &roles)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tracker.User{}, invalidMachineToken()
+	}
+	if err != nil {
+		return tracker.User{}, err
+	}
+	user.Roles = roleMap(roles)
+	return user, nil
+}
+
+func (s *Store) PutProjectAnonymousToken(ctx context.Context, projectID, token string, now int64) error {
+	if !queue.ValidateIdentifier(projectID) || token == "" || len(token) > 1024 {
+		return tracker.InvalidRequest("invalid project anonymous token")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO tracker_project_anonymous_tokens(project_id,token_hash,token,created_at)
+		SELECT id,$2,$3,$4 FROM tracker_projects WHERE id=$1
+		ON CONFLICT(project_id) DO UPDATE SET
+			token_hash=EXCLUDED.token_hash,token=EXCLUDED.token,created_at=EXCLUDED.created_at
+	`, projectID, projectAnonymousTokenDigest(token), token, now)
+	if err != nil {
+		return storeError("put project anonymous token", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "project not found"}
+	}
+	return nil
+}
+
+func (s *Store) ProjectAnonymousToken(ctx context.Context, projectID string) (tracker.ProjectAnonymousToken, error) {
+	if !queue.ValidateIdentifier(projectID) {
+		return tracker.ProjectAnonymousToken{}, tracker.InvalidRequest("invalid project ID")
+	}
+	var result tracker.ProjectAnonymousToken
+	err := s.pool.QueryRow(ctx, `
+		SELECT project_id,token,created_at
+		FROM tracker_project_anonymous_tokens WHERE project_id=$1
+	`, projectID).Scan(&result.ProjectID, &result.Token, &result.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tracker.ProjectAnonymousToken{}, &tracker.Error{Code: protocol.ErrorNotFound, Message: "project anonymous token not found"}
+	}
+	if err != nil {
+		return tracker.ProjectAnonymousToken{}, storeError("get project anonymous token", err)
+	}
+	return result, nil
+}
+
+func (s *Store) DeleteProjectAnonymousToken(ctx context.Context, projectID string) error {
+	if !queue.ValidateIdentifier(projectID) {
+		return tracker.InvalidRequest("invalid project ID")
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM tracker_project_anonymous_tokens WHERE project_id=$1`, projectID)
+	if err != nil {
+		return storeError("delete project anonymous token", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return &tracker.Error{Code: protocol.ErrorNotFound, Message: "project anonymous token not found"}
+	}
+	return nil
+}
+
 func (s *Store) PutUserAndToken(ctx context.Context, user tracker.User, token string, now int64) error {
+	if user.ID == tracker.SystemAnonymousUserID {
+		return fmt.Errorf("invalid bootstrap user")
+	}
 	if !queue.ValidateIdentifier(user.ID) || token == "" || len(token) > 1024 {
 		return fmt.Errorf("invalid bootstrap user")
 	}
@@ -244,6 +331,10 @@ func validProjectQPS(value *float64) bool {
 
 func tokenDigest(token string) []byte {
 	sum := sha256.Sum256([]byte("saveweb-machine-token-v1\x00" + token))
+	return sum[:]
+}
+func projectAnonymousTokenDigest(token string) []byte {
+	sum := sha256.Sum256([]byte("saveweb-project-anonymous-token-v1\x00" + token))
 	return sum[:]
 }
 func roleMap(roles []string) map[string]bool {

@@ -26,8 +26,9 @@ when connecting to another HQ deployment.
 Opening a queue generates a fresh seven-character `a-z0-9` worker ID, exposed
 as `queue.worker_id` and fixed for that queue instance.
 
-Use `saveweb_hq.whoami(config)` to get the user ID associated with a machine
-token without opening a project queue.
+Use `saveweb_hq.whoami(config)` to get the user ID associated with a machine or
+project anonymous token without opening a project queue. Project anonymous
+tokens return `gh_0` and can open only their bound project.
 
 `complete`, `fail`, and `extend_lease` accept bounded lists matching the
 Project Queue OpenAPI contract.

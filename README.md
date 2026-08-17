@@ -219,7 +219,8 @@ Rerunning is idempotent for `external_id` and `unique_value`; a `none` project
 will insert another copy.
 
 The administration API and Web Dashboard also import packed source files,
-manage user creation, deletion, and machine-token rotation, inspect current job
+manage user creation, deletion, machine-token rotation, and per-project
+anonymous access, inspect current job
 state, requeue terminal failures, and delete non-WIP jobs or projects without
 WIP work. New machine tokens are displayed only in the rotation response or
 the Web Dashboard. Active workers can view, generate, rotate, or revoke their
@@ -227,7 +228,10 @@ own machine token from the OAuth-authenticated worker page.
 
 ## Worker API
 
-All requests use `Authorization: Bearer <machine-token>`. Workers call:
+All requests use `Authorization: Bearer <token>`. A worker may use its machine
+token or a project's `hq_anon_` token. Anonymous tokens are restricted to their
+project, report `gh_0` from `whoami`, and otherwise use the same project policy.
+Workers call:
 
 ```text
 GET  /api/v1/projects/{project_id}

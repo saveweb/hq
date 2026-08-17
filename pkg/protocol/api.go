@@ -171,9 +171,17 @@ type AdminProjectSummary struct {
 	RecommendedLeaseSeconds int64            `json:"recommended_lease_seconds"`
 	ClientVersions          []string         `json:"client_versions"`
 	PolicyVersion           int64            `json:"policy_version"`
+	AnonymousTokenActive    bool             `json:"anonymous_token_active"`
 	JobCounts               map[string]int64 `json:"job_counts"`
 	CreatedAt               int64            `json:"created_at"`
 	UpdatedAt               int64            `json:"updated_at"`
+}
+
+type AdminProjectAnonymousTokenResponse struct {
+	ProjectID string `json:"project_id"`
+	UserID    string `json:"user_id"`
+	Token     string `json:"token"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 type AdminProjectListResponse struct {

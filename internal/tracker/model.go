@@ -10,6 +10,7 @@ import (
 var ErrWebSessionNotFound = errors.New("web session not found")
 
 const (
+	SystemAnonymousUserID   = "gh_0"
 	UserStatusPending       = "pending"
 	UserStatusActive        = "active"
 	UserStatusSuspended     = "suspended"
@@ -72,6 +73,12 @@ const (
 type DeviceAuthorization struct {
 	Status       string
 	MachineToken string
+}
+
+type ProjectAnonymousToken struct {
+	ProjectID string
+	Token     string
+	CreatedAt int64
 }
 
 type Project struct {

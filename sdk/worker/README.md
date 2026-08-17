@@ -23,11 +23,15 @@ when connecting to another HQ deployment.
 Opening a queue generates a fresh seven-character `a-z0-9` worker ID. It stays
 fixed for that queue instance and is available through `queue.WorkerID()`.
 
-To identify the user behind a machine token without opening a project queue:
+To identify the user behind a machine or project anonymous token without
+opening a project queue:
 
 ```go
 userID, err := worker.WhoAmI(ctx, config)
 ```
+
+Project anonymous tokens return the system identity `gh_0` and can open only
+their bound project.
 
 `rootCtx` owns the queue lifetime. Canceling it or calling `Close` stops lease
 renewal and cancels every held job. The context passed to `Claim` controls only

@@ -12,8 +12,9 @@ import (
 )
 
 const projectSummaryQuery = `
-		SELECT p.id,p.status,p.identity_mode,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
-			p.max_jobs_per_claim,p.max_resets,p.recommended_lease_seconds,p.client_versions,p.policy_version,p.created_at,p.updated_at,
+	SELECT p.id,p.status,p.identity_mode,p.claim_order,p.dispatch_qps,p.worker_claim_qps,
+			p.max_jobs_per_claim,p.max_resets,p.recommended_lease_seconds,p.client_versions,p.policy_version,
+			EXISTS(SELECT 1 FROM tracker_project_anonymous_tokens pat WHERE pat.project_id=p.id),p.created_at,p.updated_at,
 		count(*) FILTER (WHERE j.status='todo'),
 		count(*) FILTER (WHERE j.status='wip'),
 		count(*) FILTER (WHERE j.status='done'),
@@ -76,6 +77,7 @@ func scanProjectSummary(row projectSummaryScanner) (protocol.AdminProjectSummary
 	err := row.Scan(
 		&project.ID, &project.Status, &project.IdentityMode, &project.ClaimOrder,
 		&project.DispatchQPS, &project.WorkerClaimQPS, &project.MaxJobsPerClaim, &project.MaxResets, &project.RecommendedLeaseSeconds, &project.ClientVersions, &project.PolicyVersion,
+		&project.AnonymousTokenActive,
 		&project.CreatedAt, &project.UpdatedAt,
 		&todo, &wip, &done, &failed, &resetExhausted,
 	)

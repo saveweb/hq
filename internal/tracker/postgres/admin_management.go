@@ -49,6 +49,9 @@ func (s *Store) MachineToken(ctx context.Context, userID string) (string, bool, 
 }
 
 func (s *Store) PutUser(ctx context.Context, userID, status string, roles []string, now int64) error {
+	if userID == tracker.SystemAnonymousUserID {
+		return &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "system anonymous user cannot be modified"}
+	}
 	if !queue.ValidateIdentifier(userID) || (status != tracker.UserStatusPending && status != tracker.UserStatusActive && status != tracker.UserStatusSuspended) {
 		return tracker.InvalidRequest("invalid user")
 	}
@@ -69,6 +72,9 @@ func (s *Store) PutUser(ctx context.Context, userID, status string, roles []stri
 }
 
 func (s *Store) DeleteUser(ctx context.Context, userID string) error {
+	if userID == tracker.SystemAnonymousUserID {
+		return &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "system anonymous user cannot be deleted"}
+	}
 	if !queue.ValidateIdentifier(userID) {
 		return tracker.InvalidRequest("invalid user ID")
 	}
@@ -83,6 +89,9 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 }
 
 func (s *Store) RotateMachineToken(ctx context.Context, userID, token string, now int64) error {
+	if userID == tracker.SystemAnonymousUserID {
+		return &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "system anonymous user cannot have a machine token"}
+	}
 	if !queue.ValidateIdentifier(userID) || token == "" {
 		return tracker.InvalidRequest("invalid user or token")
 	}
@@ -101,6 +110,9 @@ func (s *Store) RotateMachineToken(ctx context.Context, userID, token string, no
 }
 
 func (s *Store) RevokeMachineToken(ctx context.Context, userID string, now int64) error {
+	if userID == tracker.SystemAnonymousUserID {
+		return &tracker.Error{Code: protocol.ErrorPermissionDenied, Message: "system anonymous user cannot have a machine token"}
+	}
 	if !queue.ValidateIdentifier(userID) {
 		return tracker.InvalidRequest("invalid user ID")
 	}
