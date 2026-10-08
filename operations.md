@@ -22,10 +22,7 @@ Production is deployed by Komodo: the `hq` Stack in `saveweb/infra`
 `docker compose up -d`. Changing the running version means changing
 `HQ_VERSION` there, not on the host.
 
-Manual fallback on the host, from the Stack's clone directory. A host that was
-last deployed with the old `scripts/deploy.sh` still has a bare short commit in
-`.env` (`HQ_VERSION=0cf3bba`); set it to `main` or `sha-<short>` first, since
-GHCR only has those tags:
+Manual fallback on the host, from the Stack's clone directory:
 
 ```bash
 git pull --ff-only origin main
