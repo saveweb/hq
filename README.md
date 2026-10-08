@@ -66,16 +66,20 @@ cp .env.example .env
 install -d -m 0700 secrets
 printf '%s\n' 'GITHUB_OAUTH_CLIENT_SECRET' > secrets/github-client.secret
 chmod 0600 secrets/github-client.secret
-make deploy
+docker compose pull && docker compose up -d
 ```
 
-`make deploy` derives `HQ_VERSION` and `HQ_COMMIT` from the current Git HEAD,
-updates those values in `.env`, rebuilds Compose, waits for tracker health, and
-verifies that the running image revision matches HEAD. It refuses to deploy
-from a dirty worktree.
+Images come from `ghcr.io/saveweb/hq`, built by GitHub Actions on every push
+to `main` and on `v*` tags; `HQ_VERSION` in `.env` picks the tag. To build
+from a local checkout instead, add the dev override:
+`docker compose -f compose.yml -f compose.dev.yml up -d --build`.
 
-HQ runs migrations before serving and listens on `127.0.0.74:8080` for a host
-HTTPS reverse proxy. PostgreSQL is not published to the host.
+HQ runs migrations before serving and listens on `HQ_BIND` (default
+`127.0.0.1:8080`) for a host HTTPS reverse proxy. PostgreSQL is not published
+to the host.
+
+The saveweb production instance is deployed by Komodo from the Stack declared
+in `saveweb/infra` (`komodo/resources.toml`); its `.env` is generated there.
 
 ## Bootstrap
 

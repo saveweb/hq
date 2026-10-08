@@ -1,12 +1,10 @@
 name: saveweb-hq
 
+# Images are built by GitHub Actions (see .github/workflows/build.yml).
+# HQ_VERSION selects the tag: a vX.Y.Z release, sha-<short>, or main.
+# For local builds use compose.dev.yml on top of this file.
 x-hq-image: &hq-image
-  build:
-    context: .
-    args:
-      VERSION: ${HQ_VERSION:-dev}
-      COMMIT: ${HQ_COMMIT:-unknown}
-  image: saveweb-hq:${HQ_VERSION:-dev}
+  image: ghcr.io/saveweb/hq:${HQ_VERSION:-main}
 
 services:
   postgres:
@@ -77,7 +75,8 @@ services:
       - ./secrets/github-client.secret:/run/secrets/github-client.secret:ro
       - ./secrets/tracker-web.secret:/run/secrets/tracker-web.secret:ro
     ports:
-      - 127.0.0.74:8080:8080
+      # Host bind for the reverse proxy; production sets HQ_BIND per host.
+      - "${HQ_BIND:-127.0.0.1:8080}:8080"
     networks:
       - default
       - database
