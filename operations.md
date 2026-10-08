@@ -16,15 +16,25 @@ Before first startup:
 4. Set `HQ_OAUTH_ADMIN_ORG` and `HQ_OAUTH_ADMIN_TEAM` to the team allowed to
    administer HQ.
 
+Production is deployed by Komodo: the `hq` Stack in `saveweb/infra`
+(`komodo/resources.toml`) points at this repository, writes `.env` from its
+`environment` block, pulls `ghcr.io/saveweb/hq:${HQ_VERSION}` and runs
+`docker compose up -d`. Changing the running version means changing
+`HQ_VERSION` there, not on the host.
+
+Manual fallback on the host, from the Stack's clone directory:
+
 ```bash
 git pull --ff-only origin main
-make deploy
+docker compose pull && docker compose up -d
 ```
 
-The deploy target derives `HQ_VERSION` and `HQ_COMMIT` from Git, persists them
-in `.env`, rebuilds the Compose project, waits for tracker health, checks the
-running image revision, and probes `HQ_PUBLIC_URL` when configured. It requires
-a clean worktree so the image revision always identifies its source exactly.
+The running image carries `org.opencontainers.image.revision`; compare it with
+the commit you expect after a deploy:
+
+```bash
+docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' saveweb-hq-tracker-1
+```
 
 `GET /healthz` reports process liveness. PostgreSQL health and backup status
 must be monitored separately.

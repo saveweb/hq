@@ -1,0 +1,16 @@
+# Local development override: build the image from this checkout instead of
+# pulling from GHCR.
+#
+#   docker compose -f compose.yml -f compose.dev.yml up -d --build
+#
+services:
+  tracker-init:
+    build: &build
+      context: .
+      args:
+        VERSION: ${HQ_VERSION:-dev}
+        COMMIT: ${HQ_COMMIT:-unknown}
+    image: saveweb-hq:${HQ_VERSION:-dev}
+  tracker:
+    build: *build
+    image: saveweb-hq:${HQ_VERSION:-dev}
